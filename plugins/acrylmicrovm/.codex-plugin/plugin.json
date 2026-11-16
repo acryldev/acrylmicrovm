@@ -1,0 +1,37 @@
+{
+  "name": "acrylmicrovm",
+  "version": "0.1.0",
+  "description": "Skills for building, deploying and updating apps on AcrylMicrovm cloud.",
+  "author": {
+    "name": "AcrylMicrovm",
+    "url": "https://acryl.dev/acrylmicrovm"
+  },
+  "homepage": "https://docs.acryl.dev",
+  "repository": "https://github.com/acryldev/acrylmicrovm",
+  "license": "Apache-2.0",
+  "keywords": ["acrylmicrovm", "cloud", "deployment", "cli", "skills"],
+  "skills": "./skills",
+  "interface": {
+    "displayName": "AcrylMicrovm",
+    "shortDescription": "Build and deploy AcrylMicrovm apps",
+    "longDescription": "Build or adapt applications, deploy them on AcrylMicrovm cloud boxes, register public HTTPS tunnels, and update or operate their services and storage through the AcrylMicrovm CLI.",
+    "developerName": "AcrylMicrovm",
+    "category": "Developer Tools",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "websiteURL": "https://acryl.dev/acrylmicrovm",
+    "brandColor": "#111111",
+    "defaultPrompt": [
+      "Use AcrylMicrovm to build and deploy an application.",
+      "Deploy this project to AcrylMicrovm and give me its public URL.",
+      "Update my AcrylMicrovm app and verify the same public URL."
+    ]
+  },
+  "extensions": {
+    "com.openai": {
+      "onboardingSkill": "./skills/acrylmicrovm-setup/SKILL.md"
+    }
+  }
+}

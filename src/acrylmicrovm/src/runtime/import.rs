@@ -1,0 +1,799 @@
+// Modified by ACRYL, 2026
+//! Box import from `.acrylmicrovm` archives.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
+
+use crate::disk::constants::filenames as disk_filenames;
+use crate::litebox::LiteBox;
+use crate::litebox::archive::{
+    ArchiveManifest, MANIFEST_FILENAME, MAX_SUPPORTED_VERSION, PUBLISHED_PORTS_ARCHIVE_VERSION,
+    extract_archive, move_file, sha256_file,
+};
+use crate::runtime::advanced_options::SecurityOptions;
+use crate::runtime::options::{
+    ArchiveImportPolicy, BoxArchive, BoxOptions, RootfsSpec, normalize_legacy_ports,
+};
+use crate::runtime::rt_impl::RuntimeImpl;
+use crate::runtime::types::BoxStatus;
+
+/// Import a box from a `.acrylmicrovm` archive.
+///
+/// Creates a new box with a new ID from archived disk images and
+/// configuration. The imported box starts in `Stopped` state.
+pub(crate) async fn import_box(
+    runtime: &Arc<RuntimeImpl>,
+    archive: BoxArchive,
+    name: Option<String>,
+) -> AcrylMicrovmResult<LiteBox> {
+    let t0 = std::time::Instant::now();
+    let archive_path = archive.path().to_path_buf();
+    if !archive_path.exists() {
+        return Err(AcrylMicrovmError::NotFound(format!(
+            "Archive not found: {}",
+            archive_path.display()
+        )));
+    }
+
+    // Phase 1: Extract and validate archive (blocking I/O).
+    let layout = runtime.layout.clone();
+    let (manifest, temp_dir) =
+        tokio::task::spawn_blocking(move || extract_and_validate(&archive_path, &layout))
+            .await
+            .map_err(|e| {
+                AcrylMicrovmError::Internal(format!("Import extraction task panicked: {}", e))
+            })??;
+
+    let options = options_from_manifest(&manifest, archive.import_policy())?;
+
+    // Phase 2: Validate disks and install into a staging directory (blocking I/O).
+    // The staging dir lives inside temp_dir; provision_box will rename it.
+    let staging_dir = temp_dir.path().join("staging");
+    let temp_path = temp_dir.path().to_path_buf();
+    let staging_clone = staging_dir.clone();
+    tokio::task::spawn_blocking(move || install_disks(&temp_path, &staging_clone))
+        .await
+        .map_err(|e| AcrylMicrovmError::Internal(format!("Import install task panicked: {}", e)))??;
+
+    let litebox = runtime
+        // An archive carries the box's options but not what its image resolved
+        // to, so an imported box has no record until one is rebuilt.
+        .provision_box(staging_dir, name, options, BoxStatus::Stopped, None)
+        .await?;
+
+    tracing::info!(
+        box_id = %litebox.id(),
+        elapsed_ms = t0.elapsed().as_millis() as u64,
+        "Imported box from archive"
+    );
+
+    Ok(litebox)
+}
+
+/// Read the persisted configuration, falling back to the v1/v2 image field.
+///
+/// An archive is untrusted input, so its options are validated here rather
+/// than after disks have been installed and box metadata persisted.
+fn options_from_manifest(
+    manifest: &ArchiveManifest,
+    policy: ArchiveImportPolicy,
+) -> AcrylMicrovmResult<BoxOptions> {
+    let mut options = manifest.box_options.clone().unwrap_or_else(|| BoxOptions {
+        rootfs: RootfsSpec::Image(manifest.image.clone()),
+        ..Default::default()
+    });
+    // Up to v4 an archive's ports carried no publication semantics: a null
+    // host port meant the guest port, and host_ip and protocol were ignored.
+    // Canonicalize before sanitize, so the rewritten mappings are validated.
+    if manifest.version < PUBLISHED_PORTS_ARCHIVE_VERSION {
+        let changed_mappings = normalize_legacy_ports(&mut options.ports);
+        if changed_mappings > 0 {
+            tracing::warn!(
+                archive_version = manifest.version,
+                changed_mappings,
+                "Canonicalized legacy archive port mappings"
+            );
+        }
+    }
+    options.validate_secret_headers()?;
+    options.sanitize().map_err(|error| {
+        AcrylMicrovmError::InvalidArgument(format!("invalid archive box_options: {error}"))
+    })?;
+    // The local runtime shares no typed mounts yet(TODO), so an archive that
+    // carries one is refused rather than stored and dropped at boot.
+    if !options.mounts.is_empty() {
+        return Err(AcrylMicrovmError::Unsupported(
+            "typed mounts are not supported by the local runtime yet".to_string(),
+        ));
+    }
+
+    if policy == ArchiveImportPolicy::Trusted {
+        return Ok(options);
+    }
+
+    // An upload must not reach into the server's host or pick its own
+    // isolation, so refuse everything that would and impose server defaults.
+    if options.advanced.kernel.is_some() {
+        return Err(rejected_upload("custom kernels"));
+    }
+    if options.advanced.nested_virtualization {
+        return Err(rejected_upload("nested virtualization"));
+    }
+    if options.advanced.engine.is_some() {
+        return Err(rejected_upload("engine selection"));
+    }
+    if options.advanced.privileged {
+        return Err(rejected_upload("privileged mode"));
+    }
+    if matches!(options.rootfs, RootfsSpec::RootfsPath(_)) {
+        return Err(rejected_upload("host rootfs paths"));
+    }
+    // Every mount, not just a host bind: a managed volume reference in an
+    // uploaded archive would also select storage the uploader does not own.
+    if !options.volumes.is_empty() {
+        return Err(rejected_upload("volume mounts"));
+    }
+    options.advanced.security = SecurityOptions::default();
+    // That reset also restores the default's hardcoded 1 GiB RLIMIT_FSIZE —
+    // the ceiling #1152 is about — because it replaces the whole struct rather
+    // than just the isolation fields it means to. The box still boots on a
+    // disk sized from its own `disk_size_gb`, so re-derive the limit.
+    // `sanitize` assigns it outright, so running it twice is idempotent.
+    options.sanitize().map_err(|error| {
+        AcrylMicrovmError::InvalidArgument(format!("invalid archive box_options: {error}"))
+    })?;
+
+    Ok(options)
+}
+
+fn rejected_upload(subject: &str) -> AcrylMicrovmError {
+    AcrylMicrovmError::Unsupported(format!(
+        "{subject} cannot be requested by an archive uploaded through a REST server"
+    ))
+}
+
+/// Extract archive, parse manifest, verify checksums.
+fn extract_and_validate(
+    archive_path: &Path,
+    layout: &crate::runtime::layout::FilesystemLayout,
+) -> AcrylMicrovmResult<(ArchiveManifest, tempfile::TempDir)> {
+    let temp_dir = tempfile::tempdir_in(layout.temp_dir())
+        .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to create temp directory: {}", e)))?;
+
+    extract_archive(archive_path, temp_dir.path())?;
+
+    let manifest_path = temp_dir.path().join(MANIFEST_FILENAME);
+    if !manifest_path.exists() {
+        return Err(AcrylMicrovmError::Storage(
+            "Invalid archive: manifest.json not found".to_string(),
+        ));
+    }
+
+    let manifest_json = std::fs::read_to_string(&manifest_path)?;
+    let manifest: ArchiveManifest = serde_json::from_str(&manifest_json)
+        .map_err(|e| AcrylMicrovmError::Storage(format!("Invalid manifest: {}", e)))?;
+
+    if manifest.version > MAX_SUPPORTED_VERSION {
+        return Err(AcrylMicrovmError::Storage(format!(
+            "Unsupported archive version {} (max supported: {}). Upgrade acrylmicrovm.",
+            manifest.version, MAX_SUPPORTED_VERSION
+        )));
+    }
+
+    let extracted_container = temp_dir.path().join(disk_filenames::CONTAINER_DISK);
+    if !extracted_container.exists() {
+        return Err(AcrylMicrovmError::Storage(format!(
+            "Invalid archive: {} not found",
+            disk_filenames::CONTAINER_DISK
+        )));
+    }
+
+    // Verify checksums (v2+ archives have non-empty checksums).
+    if !manifest.container_disk_checksum.is_empty() {
+        let actual = sha256_file(&extracted_container)?;
+        if actual != manifest.container_disk_checksum {
+            return Err(AcrylMicrovmError::Storage(format!(
+                "Container disk checksum mismatch: expected {}, got {}",
+                manifest.container_disk_checksum, actual
+            )));
+        }
+    }
+
+    Ok((manifest, temp_dir))
+}
+
+/// Validate disk security and move disks into box_home/disks/.
+fn install_disks(temp_dir: &Path, box_home: &Path) -> AcrylMicrovmResult<()> {
+    // Security: the disk about to become a box's own must be a file this
+    // extraction produced, and must not reach any further on its own. A
+    // crafted archive would otherwise point it at /etc/shadow or another
+    // box's disk, leaking data on first read.
+    let extracted_container = temp_dir.join(disk_filenames::CONTAINER_DISK);
+    ensure_within_extraction_dir(&extracted_container, temp_dir)?;
+    validate_no_backing_references(&extracted_container)?;
+
+    let disks_dir = box_home.join("disks");
+    std::fs::create_dir_all(&disks_dir).map_err(|e| {
+        AcrylMicrovmError::Storage(format!(
+            "Failed to create disks directory {}: {}",
+            disks_dir.display(),
+            e
+        ))
+    })?;
+
+    move_file(
+        &extracted_container,
+        &disks_dir.join(disk_filenames::CONTAINER_DISK),
+    )?;
+
+    Ok(())
+}
+
+/// Reject an imported disk that resolves outside the extraction directory.
+///
+/// Extraction already refuses link members, so this is the assertion rather
+/// than the control — but it is the last look before the rename turns this
+/// path into a box's own disk, and a path that escaped would hand the new box
+/// someone else's.
+fn ensure_within_extraction_dir(disk_path: &Path, extraction_dir: &Path) -> AcrylMicrovmResult<()> {
+    let resolve = |path: &Path| -> AcrylMicrovmResult<std::path::PathBuf> {
+        path.canonicalize().map_err(|e| {
+            AcrylMicrovmError::Storage(format!("Failed to resolve {}: {}", path.display(), e))
+        })
+    };
+
+    // Both sides are resolved: the extraction directory itself can sit under a
+    // symlinked home, and comparing a resolved disk against an unresolved root
+    // would reject every such install.
+    let resolved_disk = resolve(disk_path)?;
+    let resolved_root = resolve(extraction_dir)?;
+
+    if !resolved_disk.starts_with(&resolved_root) {
+        return Err(AcrylMicrovmError::InvalidState(format!(
+            "Imported disk '{}' resolves outside the extraction directory. \
+             This is not allowed for security reasons.",
+            disk_path.display()
+        )));
+    }
+
+    Ok(())
+}
+
+/// Reject qcow2 disks with backing file references (security check).
+pub(crate) fn validate_no_backing_references(disk_path: &Path) -> AcrylMicrovmResult<()> {
+    match crate::disk::read_backing_file_path(disk_path) {
+        Ok(None) => Ok(()),
+        Ok(Some(backing)) => Err(AcrylMicrovmError::InvalidState(format!(
+            "Imported disk '{}' has backing file reference '{}'. \
+             This is not allowed for security reasons.",
+            disk_path.display(),
+            backing
+        ))),
+        // A disk the parser cannot read is a disk this check cannot clear.
+        // Reading the error as "no backing reference" hands the verdict to
+        // whatever the file happens to be.
+        Err(error) => Err(AcrylMicrovmError::InvalidState(format!(
+            "Imported disk '{}' is not a readable qcow2 image: {error}",
+            disk_path.display()
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::types::Bytes;
+    use tempfile::TempDir;
+
+    fn v3_manifest(options: BoxOptions) -> ArchiveManifest {
+        ArchiveManifest {
+            version: 3,
+            box_name: None,
+            image: "alpine:latest".to_string(),
+            box_options: Some(options),
+            guest_disk_checksum: String::new(),
+            container_disk_checksum: String::new(),
+            exported_at: "2026-07-26T00:00:00Z".to_string(),
+        }
+    }
+
+    #[test]
+    fn required_headers_import_rejects_before_install() {
+        for suffix in ["", ",\"headers\":null", ",\"headers\":{}"] {
+            let secret = serde_json::from_str(&format!(r#"{{"name":"x","hosts":["api.test.com"],"placeholder":"dummy","value":"private-token"{suffix}}}"#)).unwrap();
+            let manifest = v3_manifest(BoxOptions {
+                secrets: vec![secret],
+                ..Default::default()
+            });
+            for policy in [
+                ArchiveImportPolicy::Trusted,
+                ArchiveImportPolicy::UntrustedRemote,
+            ] {
+                let error = options_from_manifest(&manifest, policy)
+                    .expect_err("import accepted missing headers");
+                assert!(
+                    error
+                        .to_string()
+                        .contains("secret \"x\" has no headers; recreate the box with headers")
+                );
+            }
+        }
+    }
+
+    fn loopback_port() -> crate::runtime::options::PortSpec {
+        crate::runtime::options::PortSpec {
+            host_port: Some(18080),
+            guest_port: 80,
+            protocol: crate::runtime::options::PortProtocol::Tcp,
+            host_ip: Some("127.0.0.1".to_string()),
+        }
+    }
+
+    /// The importer's canonicalization window is the other half of the archive
+    /// version contract: below v5 a mapping predates publication semantics and
+    /// must be rewritten, at v5 it carries them and must be left exactly alone.
+    /// A window that swallowed v5 would clear `host_ip` and turn a loopback
+    /// publication into one on every interface.
+    #[test]
+    fn canonicalization_window_stops_at_the_published_ports_version() {
+        let options = BoxOptions {
+            ports: vec![loopback_port()],
+            ..Default::default()
+        };
+
+        let mut legacy = v3_manifest(options.clone());
+        legacy.version = PUBLISHED_PORTS_ARCHIVE_VERSION - 1;
+        let rewritten = options_from_manifest(&legacy, ArchiveImportPolicy::Trusted).unwrap();
+        assert_eq!(
+            rewritten.ports[0].host_ip, None,
+            "a pre-publication archive never meant its bind IP"
+        );
+
+        let mut current = v3_manifest(options.clone());
+        current.version = PUBLISHED_PORTS_ARCHIVE_VERSION;
+        let preserved = options_from_manifest(&current, ArchiveImportPolicy::Trusted).unwrap();
+        assert_eq!(
+            preserved.ports, options.ports,
+            "a v5 archive carries publication semantics and must survive import intact"
+        );
+    }
+
+    #[test]
+    fn untrusted_import_rejects_nested_virtualization() {
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced.nested_virtualization = true;
+        let options = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let error =
+            options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
+                .unwrap_err();
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(error.to_string().contains("nested virtualization"));
+    }
+
+    #[test]
+    fn untrusted_import_rejects_engine_selection() {
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced.engine = Some(crate::vmm::VmmKind::Native);
+        let options = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let error =
+            options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
+                .unwrap_err();
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(error.to_string().contains("engine selection"));
+    }
+
+    #[test]
+    fn untrusted_import_rejects_privileged() {
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced.privileged = true;
+        let options = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let error =
+            options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
+                .unwrap_err();
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(error.to_string().contains("privileged mode"));
+    }
+
+    #[test]
+    fn untrusted_import_rejects_custom_kernel() {
+        // A real file, so `sanitize()` passes and the upload policy — not path
+        // validation — is what rejects the archive.
+        let kernel = tempfile::NamedTempFile::new().unwrap();
+        let mut options = BoxOptions::default();
+        options.advanced.kernel = Some(crate::experimental::custom_kernel::KernelOptions::new(
+            kernel.path(),
+        ));
+
+        let error =
+            options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
+                .unwrap_err();
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(error.to_string().contains("custom kernels"));
+    }
+
+    #[test]
+    fn untrusted_import_rejects_host_volumes() {
+        let mut options = BoxOptions::default();
+        options
+            .volumes
+            .push(crate::runtime::options::VolumeSpec::bind_mount(
+                "/", "/host",
+            ));
+
+        let error =
+            options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
+                .expect_err("untrusted archives must not select server host paths");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(error.to_string().contains("volume mounts"));
+    }
+
+    /// The second mount kind is refused by the same gate. A managed volume
+    /// names storage the uploader does not necessarily own, so an archive
+    /// arriving over REST must not be able to select one either.
+    #[test]
+    fn untrusted_import_rejects_managed_volumes() {
+        let mut options = BoxOptions::default();
+        options
+            .volumes
+            .push(crate::runtime::options::VolumeSpec::managed_volume(
+                "someone-elses-data",
+                "/data",
+            ));
+
+        let error =
+            options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
+                .expect_err("untrusted archives must not select managed volumes");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(error.to_string().contains("volume mounts"));
+    }
+
+    /// The local runtime shares no typed mounts yet, so an archive that carries
+    /// one is refused whoever imports it, rather than stored and later dropped.
+    #[test]
+    fn import_refuses_typed_mounts_until_the_local_runtime_shares_them() {
+        use crate::runtime::options::MountSpec;
+
+        for policy in [
+            ArchiveImportPolicy::Trusted,
+            ArchiveImportPolicy::UntrustedRemote,
+        ] {
+            let options = BoxOptions {
+                mounts: vec![MountSpec::bind_mount("/srv/data", "/data")],
+                ..Default::default()
+            };
+
+            let error = options_from_manifest(&v3_manifest(options), policy)
+                .expect_err("the local runtime shares no typed mounts yet");
+
+            assert!(
+                error.to_string().contains("typed mounts"),
+                "{policy:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn untrusted_import_rejects_host_rootfs_paths() {
+        let options = BoxOptions {
+            rootfs: RootfsSpec::RootfsPath("/".to_string()),
+            ..Default::default()
+        };
+
+        let error =
+            options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
+                .expect_err("untrusted archives must not select a server rootfs path");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(error.to_string().contains("host rootfs paths"));
+    }
+
+    #[test]
+    fn untrusted_import_replaces_archive_security_with_server_default() {
+        let mut options = BoxOptions::default();
+        options.advanced.security = SecurityOptions::disabled();
+
+        let resolved =
+            options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
+                .unwrap();
+
+        // Everything but the file-size ceiling is the server default; that one
+        // is derived from the box's own disk (#1152), so it is the default's
+        // stale 1 GiB that must NOT come back.
+        let mut expected = SecurityOptions::default();
+        expected.resource_limits.max_file_size = Some(Bytes::from_gib(20).as_bytes());
+        assert_eq!(resolved.advanced.security, expected);
+    }
+
+    /// The server-default reset must not put the 1 GiB ceiling back: an
+    /// uploaded archive's box boots on a disk sized from its own
+    /// `disk_size_gb` and needs a limit that covers it.
+    #[test]
+    fn untrusted_import_derives_the_fsize_limit_from_the_disk() {
+        let options = BoxOptions {
+            disk_size_gb: Some(20),
+            ..BoxOptions::default()
+        };
+
+        let resolved =
+            options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
+                .unwrap();
+
+        assert_eq!(
+            resolved.advanced.security.resource_limits.max_file_size,
+            Some(Bytes::from_gib(40).as_bytes())
+        );
+    }
+
+    #[test]
+    fn trusted_import_preserves_archive_configuration() {
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced.nested_virtualization = true;
+        advanced.privileged = true;
+        advanced.security = SecurityOptions::disabled();
+        let options = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let resolved =
+            options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::Trusted).unwrap();
+
+        assert!(resolved.advanced.nested_virtualization);
+        assert!(resolved.advanced.privileged);
+
+        // `sanitize` derives RLIMIT_FSIZE from `disk_size_gb` (#1152), so the
+        // one security field a trusted import does not carry over verbatim is
+        // the file-size ceiling. Everything else is preserved.
+        let mut expected = SecurityOptions::disabled();
+        expected.resource_limits.max_file_size = Some(Bytes::from_gib(20).as_bytes());
+        assert_eq!(resolved.advanced.security, expected);
+    }
+
+    #[test]
+    fn imported_capability_policy_is_validated_before_install() {
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced
+            .set_capabilities(Some(
+                crate::runtime::advanced_options::ContainerCapabilities {
+                    drop: vec!["NET-ADMIN".into()],
+                    ..Default::default()
+                },
+            ))
+            .unwrap();
+        let manifest = ArchiveManifest {
+            version: 3,
+            box_name: Some("untrusted".into()),
+            image: "alpine:latest".into(),
+            box_options: Some(BoxOptions {
+                advanced,
+                ..Default::default()
+            }),
+            guest_disk_checksum: String::new(),
+            container_disk_checksum: String::new(),
+            exported_at: "2026-01-01T00:00:00Z".into(),
+        };
+
+        let error = options_from_manifest(&manifest, ArchiveImportPolicy::Trusted)
+            .expect_err("malformed archived capability policy must be rejected");
+        assert!(matches!(error, AcrylMicrovmError::InvalidArgument(_)));
+        assert!(error.to_string().contains("NET-ADMIN"));
+    }
+
+    #[test]
+    fn test_validate_no_backing_references_rejects_absolute() {
+        let dir = TempDir::new_in("/tmp").unwrap();
+        let disk = dir.path().join("evil.qcow2");
+        crate::disk::qcow2::write_test_qcow2(&disk, Some("/etc/shadow"));
+
+        let result = validate_no_backing_references(&disk);
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("backing file reference"), "Got: {msg}");
+        assert!(msg.contains("/etc/shadow"), "Got: {msg}");
+    }
+
+    #[test]
+    fn test_validate_no_backing_references_rejects_relative() {
+        let dir = TempDir::new_in("/tmp").unwrap();
+        let disk = dir.path().join("evil.qcow2");
+        crate::disk::qcow2::write_test_qcow2(&disk, Some("../../other/disk.qcow2"));
+
+        let result = validate_no_backing_references(&disk);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_no_backing_references_accepts_standalone() {
+        let dir = TempDir::new_in("/tmp").unwrap();
+        let disk = dir.path().join("clean.qcow2");
+        crate::disk::qcow2::write_test_qcow2(&disk, None);
+
+        let result = validate_no_backing_references(&disk);
+        assert!(result.is_ok());
+    }
+
+    /// The backing-file scan is the import path's only disk-level security
+    /// decision, so it has to fail closed. A disk it cannot parse is a disk it
+    /// cannot clear — treating the parse error as "no backing reference" hands
+    /// the verdict to whatever the file happens to be.
+    #[test]
+    fn test_validate_no_backing_references_rejects_unparsable_disk() {
+        let dir = TempDir::new_in("/tmp").unwrap();
+        let disk = dir.path().join("not-a-qcow2.qcow2");
+        std::fs::write(&disk, b"this is not a qcow2 header at all").unwrap();
+
+        let error = validate_no_backing_references(&disk)
+            .expect_err("an unparsable disk must not be treated as safe");
+        assert!(
+            error.to_string().contains("qcow2"),
+            "the error must say the disk is not a usable qcow2, got: {error}"
+        );
+    }
+    #[test]
+    fn fractional_cpus_archive_versions_and_legacy_options() {
+        use crate::litebox::archive::build_zstd_tar_archive;
+        use crate::runtime::layout::FilesystemLayout;
+        let dir = TempDir::new().unwrap();
+        let layout = FilesystemLayout::new(dir.path().join("home"), Default::default());
+        std::fs::create_dir_all(layout.temp_dir()).unwrap();
+        let container_path = dir.path().join("container");
+        std::fs::write(&container_path, b"test disk").unwrap();
+        let manifest_path = dir.path().join(MANIFEST_FILENAME);
+        let archive_path = dir.path().join("box.acrylmicrovm");
+        for version in [1, 2, 3, 4, 5, 6, 7, 8] {
+            let mut manifest = v3_manifest(BoxOptions {
+                cpus: Some(if version == 6 { 1.5 } else { 2.0 }),
+                ..Default::default()
+            });
+            manifest.version = version;
+            std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            build_zstd_tar_archive(&archive_path, &manifest_path, &container_path, 1).unwrap();
+            let result = extract_and_validate(&archive_path, &layout);
+            if version > 6 {
+                let error = result.unwrap_err();
+                assert!(error.to_string().contains(&format!("version {version}")));
+            } else {
+                assert_eq!(
+                    result.unwrap().0.box_options.unwrap().cpus,
+                    manifest.box_options.unwrap().cpus
+                );
+            }
+        }
+        let mut value = serde_json::to_value(v3_manifest(BoxOptions::default())).unwrap();
+        for field in ["cpu_limit", "cpu_limit_millicpu"] {
+            value["box_options"][field] = serde_json::json!(125);
+            let error = serde_json::from_value::<ArchiveManifest>(value.clone()).unwrap_err();
+            assert!(error.to_string().contains(field));
+            value["box_options"][field] = serde_json::Value::Null;
+            serde_json::from_value::<ArchiveManifest>(value.clone()).unwrap();
+        }
+    }
+}
+
+#[cfg(test)]
+mod required_import_safety_tests {
+    use super::*;
+    use crate::runtime::options::AcrylMicrovmOptions;
+
+    #[tokio::test]
+    async fn required_headers_import_preserves_archive_and_store() {
+        for extra in [
+            ",\"headers\":{\"Host\":\"{value}\"}",
+            "",
+            ",\"headers\":null",
+            ",\"headers\":{}",
+            ",\"headers\":{\"X-Key\":\"{value}\"}",
+        ] {
+            for untrusted in [false, true] {
+                let home = tempfile::tempdir().unwrap();
+                let runtime = RuntimeImpl::new_for_test(AcrylMicrovmOptions {
+                    home_dir: home.path().join("runtime"),
+                    ..Default::default()
+                })
+                .unwrap();
+                let disk = home.path().join("disk.qcow2");
+                crate::disk::qcow2::write_test_qcow2(&disk, None);
+                let secret = serde_json::from_str(&format!(r#"{{"name":"x","hosts":["api.test.com"],"placeholder":"dummy","value":"token"{extra}}}"#)).unwrap();
+                let manifest = ArchiveManifest {
+                    version: 3,
+                    box_name: None,
+                    image: "alpine:latest".into(),
+                    box_options: Some(BoxOptions {
+                        secrets: vec![secret],
+                        ..Default::default()
+                    }),
+                    guest_disk_checksum: String::new(),
+                    container_disk_checksum: sha256_file(&disk).unwrap(),
+                    exported_at: "2026-11-10T00:00:00Z".into(),
+                };
+                let manifest_path = home.path().join("manifest.json");
+                std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+                let path = home.path().join("saved.acrylmicrovm");
+                crate::litebox::archive::build_zstd_tar_archive(&path, &manifest_path, &disk, 1)
+                    .unwrap();
+                let before = std::fs::read(&path).unwrap();
+                let sentinel = runtime.layout.boxes_dir().join("keep");
+                std::fs::create_dir_all(&sentinel).unwrap();
+                std::fs::write(sentinel.join("data"), "original").unwrap();
+                let archive = if untrusted {
+                    BoxArchive::from_untrusted_upload(&path)
+                } else {
+                    BoxArchive::new(&path)
+                };
+                let result = import_box(&runtime, archive, None).await;
+                if extra.contains("X-Key") {
+                    let imported = result.expect("valid headers must remain importable");
+                    let (config, _) = runtime
+                        .box_manager
+                        .box_by_id(imported.id())
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        serde_json::to_value(config.options).unwrap()["secrets"][0]["headers"]["X-Key"],
+                        "{value}"
+                    );
+                    assert_eq!(std::fs::read(&path).unwrap(), before);
+                    assert_eq!(
+                        std::fs::read_to_string(sentinel.join("data")).unwrap(),
+                        "original"
+                    );
+                    assert_eq!(
+                        std::fs::read_dir(runtime.layout.temp_dir())
+                            .unwrap()
+                            .count(),
+                        0
+                    );
+                    continue;
+                }
+                assert!(result.is_err(), "import accepted headers {extra:?}");
+                let message = result.err().unwrap().to_string();
+                assert!(
+                    message.contains(if extra.contains("Host") {
+                        "header cannot be"
+                    } else {
+                        "secret \"x\" has no headers; recreate the box with headers"
+                    }),
+                    "{message}"
+                );
+                assert!(runtime.list_info().await.unwrap().is_empty());
+                assert_eq!(std::fs::read(&path).unwrap(), before);
+                assert_eq!(
+                    std::fs::read_to_string(sentinel.join("data")).unwrap(),
+                    "original"
+                );
+                assert_eq!(
+                    std::fs::read_dir(runtime.layout.boxes_dir())
+                        .unwrap()
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    std::fs::read_dir(runtime.layout.temp_dir())
+                        .unwrap()
+                        .count(),
+                    0
+                );
+            }
+        }
+    }
+}

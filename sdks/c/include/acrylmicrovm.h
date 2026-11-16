@@ -1,0 +1,2290 @@
+// Modified by ACRYL, 2026
+#ifndef ACRYLMICROVM_H
+#define ACRYLMICROVM_H
+
+#pragma once
+
+#include <stdarg.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <sys/socket.h>
+
+// Maximum number of buffered events before producer tasks yield.
+#define QUEUE_CAPACITY 4096
+
+// Error codes returned by ACRYL microVMs C API functions.
+//
+// These codes map directly to Rust's AcrylMicrovmError variants,
+// allowing programmatic error handling in C.
+typedef enum AcrylMicrovmErrorCode {
+  // Operation succeeded
+  Ok = 0,
+  // Internal error
+  Internal = 1,
+  // Resource not found
+  NotFound = 2,
+  // Resource already exists
+  AlreadyExists = 3,
+  // Invalid state for operation
+  InvalidState = 4,
+  // Invalid argument provided
+  InvalidArgument = 5,
+  // Configuration error
+  Config = 6,
+  // Storage error
+  Storage = 7,
+  // Image error
+  Image = 8,
+  // Network error
+  Network = 9,
+  // Execution error
+  Execution = 10,
+  // Resource stopped
+  Stopped = 11,
+  // Engine error
+  Engine = 12,
+  // Unsupported operation
+  Unsupported = 13,
+  // Database error
+  Database = 14,
+  // Portal/communication error
+  Portal = 15,
+  // RPC error
+  Rpc = 16,
+  // RPC transport error
+  RpcTransport = 17,
+  // Metadata error
+  Metadata = 18,
+  // Unsupported engine error
+  UnsupportedEngine = 19,
+  // System resource limit reached
+  ResourceExhausted = 20,
+  // Interactive execution session was reaped server-side after disconnect.
+  // Reattach is no longer possible — start a new exec.
+  SessionReaped = 21,
+} AcrylMicrovmErrorCode;
+
+// Admission modes; zero-initialized options select queue.
+typedef enum CAgentSendMode {
+  AgentSendQueue = 0,
+  AgentSendReject = 1,
+} CAgentSendMode;
+
+// Network mode exposed by [`CNetworkInfo`].
+typedef enum AcrylMicrovmNetworkMode {
+  AcrylMicrovmNetworkModeEnabled = 0,
+  AcrylMicrovmNetworkModeDisabled = 1,
+} AcrylMicrovmNetworkMode;
+
+// Transport protocol for a port forwarding rule.
+typedef enum AcrylMicrovmPortProtocol {
+  AcrylMicrovmPortProtocolTcp = 0,
+  AcrylMicrovmPortProtocolUdp = 1,
+} AcrylMicrovmPortProtocol;
+
+typedef enum AcrylMicrovmRegistryTransport {
+  AcrylMicrovmRegistryTransportHttps = 0,
+  AcrylMicrovmRegistryTransportHttp = 1,
+} AcrylMicrovmRegistryTransport;
+
+// Streaming-copy source shape. For copy-in, `AcrylMicrovmCopySourceKindUnknown`
+// means the caller cannot tell; the guest lands every upload by the
+// archive's first entry regardless. For copy-out, it means the peer omitted
+// the hint. The C-ABI mirror of the core `CopySourceKind`.
+typedef enum AcrylMicrovmCopySourceKind {
+  AcrylMicrovmCopySourceKindUnknown = 0,
+  AcrylMicrovmCopySourceKindFile = 1,
+  AcrylMicrovmCopySourceKindDir = 2,
+} AcrylMicrovmCopySourceKind;
+
+// The kinds of target a domain can route to; `CDomainTarget.type` holds one.
+// `type` is an `int32_t` there because a C caller can pass any value.
+typedef enum AcrylMicrovmDomainTargetType {
+  AcrylMicrovmDomainTargetBox = 0,
+  AcrylMicrovmDomainTargetApp = 1,
+} AcrylMicrovmDomainTargetType;
+
+// Opaque handle wrapping an `AdvancedBoxOptions`. Allocated via
+// `acrylmicrovm_advanced_options_new`, freed via `acrylmicrovm_advanced_options_free`.
+typedef struct AdvancedBoxOptionsHandle AdvancedBoxOptionsHandle;
+
+// Opaque handle to a running box.
+//
+// `handle` is wrapped in `Arc` so it can be cloned into Tokio tasks for
+// async lifecycle ops.
+typedef struct BoxHandle BoxHandle;
+
+// Opaque handle for network operations on a box.
+typedef struct BoxNetworkHandle BoxNetworkHandle;
+
+// Opaque handle for Runner API (auto-manages runtime)
+typedef struct BoxRunner BoxRunner;
+
+// Opaque handle for a one-shot prepared tunnel.
+typedef struct BoxTunnelHandle BoxTunnelHandle;
+
+// Agent instance handle.
+typedef struct CAgent CAgent;
+
+// Event subscription. Freeing it does not cancel agent work.
+typedef struct CAgentEvents CAgentEvents;
+
+// Agent turn handle.
+typedef struct CAgentTurn CAgentTurn;
+
+// Box-owned namespace; release with acrylmicrovm_agents_free.
+typedef struct CAgents CAgents;
+
+// Opaque handle for a streaming copy-in (push archive bytes into the guest).
+//
+// The lifecycle is fixed, and the third step is not optional:
+//
+//     acrylmicrovm_copy_in_start
+//       acrylmicrovm_copy_in_write   (repeat)
+//       acrylmicrovm_copy_in_close   on success
+//       acrylmicrovm_copy_in_abort   when the source read failed
+//     acrylmicrovm_copy_in_free
+//
+// Going straight from write to free is what makes a truncated upload
+// dangerous: freeing the handle drops the channel, which the guest reads
+// as a clean EOF and commits. Only acrylmicrovm_copy_in_abort turns a
+// mid-transfer source failure into a terminal error the guest can refuse.
+typedef struct CBoxCopyInStream CBoxCopyInStream;
+
+// Opaque handle for a streaming copy-out (pull archive bytes from the guest).
+typedef struct CBoxCopyOutStream CBoxCopyOutStream;
+
+// Opaque credential handle. Wraps a core `Arc<dyn Credential>` so the
+// concrete credential kind (today only `ApiKeyCredential`) is hidden
+// behind one C type, matching the trait/interface surface in the other
+// SDKs.
+typedef struct CredentialHandle CredentialHandle;
+
+// Opaque handle to a REST runtime's domains, released with
+// `acrylmicrovm_free_domain_handle`.
+typedef struct DomainHandle DomainHandle;
+
+// Opaque handle to a running command execution.
+typedef struct ExecutionHandle ExecutionHandle;
+
+// Opaque handle to runtime image operations.
+typedef struct ImageHandle ImageHandle;
+
+typedef struct OptionsHandle OptionsHandle;
+
+// Opaque handle to a REST runtime's registry logins, released with
+// `acrylmicrovm_registry_free`.
+typedef struct RegistryHandle RegistryHandle;
+
+// Opaque REST options handle. Owns a core [`AcrylMicrovmRestOptions`] that
+// the setters mutate in place before construction.
+typedef struct RestOptionsHandle RestOptionsHandle;
+
+// Opaque handle to a AcrylMicrovmRuntime instance with its Tokio runtime and the
+// per-runtime event queue used by the post-and-drain callback API.
+typedef struct RuntimeHandle RuntimeHandle;
+
+// Opaque long-lived listener handle.
+typedef struct TunnelForwarderHandle TunnelForwarderHandle;
+
+// Opaque handle to runtime named-volume operations.
+//
+// The handle owns a cloneable core volume handle plus the runtime liveness,
+// Tokio runtime, and event queue needed to submit asynchronous work. C callers
+// receive this as an opaque `CAcrylMicrovmVolumeHandle` and must release it with
+// `acrylmicrovm_volume_free`.
+typedef struct VolumeHandle VolumeHandle;
+
+typedef struct AdvancedBoxOptionsHandle CAdvancedBoxOptions;
+
+// Extended error information for C API.
+//
+// Contains both an error code (for programmatic handling)
+// and an optional detailed message (for debugging).
+typedef struct FFIError {
+  // Error code
+  enum AcrylMicrovmErrorCode code;
+  // Detailed error message (NULL if none, caller must free with acrylmicrovm_error_free)
+  char *message;
+} FFIError;
+
+typedef struct BoxHandle CBoxHandle;
+
+typedef struct FFIError CAcrylMicrovmError;
+
+// Initial agent settings. Null strings mean omitted; config_json uses the
+// AgentConfig keys documented in docs/reference/agents.md.
+typedef struct CAgentCreateOptions {
+  const char *cwd;
+  const char *config_json;
+  const char *idempotency_key;
+} CAgentCreateOptions;
+
+// On success, receives an owned agent; release it with acrylmicrovm_agent_free.
+// The error pointer is borrowed for callback dispatch only.
+typedef void (*CAgentCb)(struct CAgent*, const CAcrylMicrovmError*, void*);
+
+// Shared retry identity for close, reply, steering and interruption.
+typedef struct CAgentControlOptions {
+  const char *idempotency_key;
+} CAgentControlOptions;
+
+// The error pointer is borrowed for callback dispatch only.
+typedef void (*CAgentDoneCb)(const CAcrylMicrovmError*, void*);
+
+// Optional JSON accompanies positional message text.
+typedef struct CAgentSendOptions {
+  enum CAgentSendMode mode;
+  const char *data_json;
+  const char *idempotency_key;
+} CAgentSendOptions;
+
+// On success, receives an owned turn; release it with acrylmicrovm_agent_turn_free.
+// The error pointer is borrowed for callback dispatch only.
+typedef void (*CAgentTurnCb)(struct CAgentTurn*, const CAcrylMicrovmError*, void*);
+
+// JSON and error pointers are borrowed for callback dispatch only.
+// Copy their contents to retain them after the callback returns.
+typedef void (*CAgentJsonCb)(const char*, const CAcrylMicrovmError*, void*);
+
+// Timeout in seconds; negative or a null options pointer means no deadline.
+typedef struct CAgentWaitOptions {
+  double timeout_seconds;
+} CAgentWaitOptions;
+
+// Resume after an opaque cursor; null means no cursor.
+typedef struct CAgentEventsOptions {
+  const char *after;
+} CAgentEventsOptions;
+
+// Box export completion.
+typedef void (*CBoxExportCb)(char*, CAcrylMicrovmError*, void*);
+
+typedef struct RuntimeHandle CAcrylMicrovmRuntime;
+
+// Runtime import completion.
+typedef void (*CRuntimeImportCb)(CBoxHandle*, CAcrylMicrovmError*, void*);
+
+typedef struct OptionsHandle CAcrylMicrovmOptions;
+
+// Box creation completion.
+typedef void (*CBoxCreateBoxCb)(CBoxHandle*, CAcrylMicrovmError*, void*);
+
+// Get-or-create completion. Same shape as create plus a `bool` that is `true`
+// when a new box was created and `false` when an existing box was adopted.
+typedef void (*CBoxGetOrCreateBoxCb)(CBoxHandle*, bool, CAcrylMicrovmError*, void*);
+
+// Box stop completion.
+typedef void (*CBoxStopBoxCb)(CAcrylMicrovmError*, void*);
+
+// Box attach (get) completion.
+typedef void (*CBoxGetBoxCb)(CBoxHandle*, CAcrylMicrovmError*, void*);
+
+// Box remove completion.
+typedef void (*CBoxRemoveBoxCb)(CAcrylMicrovmError*, void*);
+
+// Box start completion.
+typedef void (*CBoxStartBoxCb)(CAcrylMicrovmError*, void*);
+
+// Callback-owned checkpoint metadata. Release with acrylmicrovm_free_checkpoint_info.
+typedef struct CCheckpointInfo {
+  char *id;
+  char *name;
+  char *source_box_id;
+  char *created_at;
+  uint64_t size_bytes;
+  // Lowercase creating, ready, failed, or deleting.
+  char *state;
+  // Null unless the server reports a failure reason.
+  char *error_reason;
+} CCheckpointInfo;
+
+// Entries belong to this list; release once with acrylmicrovm_free_checkpoint_list.
+typedef struct CCheckpointList {
+  struct CCheckpointInfo *items;
+  int count;
+} CCheckpointList;
+
+// On success, the recipient owns metadata and frees it with
+// acrylmicrovm_free_checkpoint_info. Error pointers live only during dispatch.
+typedef void (*CCheckpointInfoCb)(struct CCheckpointInfo*, CAcrylMicrovmError*, void*);
+
+// On success, the recipient owns the entire list and frees it with
+// acrylmicrovm_free_checkpoint_list; entries must not be freed individually.
+typedef void (*CCheckpointListCb)(struct CCheckpointList*, CAcrylMicrovmError*, void*);
+
+// Copy (into / out of) completion.
+typedef void (*CBoxCopyCb)(CAcrylMicrovmError*, void*);
+
+typedef struct DomainHandle CAcrylMicrovmDomainHandle;
+
+// What a domain routes to. For `AcrylMicrovmDomainTargetBox`, `box` is a box id or
+// name and `port` a guest port. Passed in, the strings are borrowed for the
+// call; inside a `CDomain`, they belong to it.
+//
+// App targets use `app` with a null `box` and zero `port`; binding is reserved.
+typedef struct CDomainTarget {
+  int32_t type;
+  const char *box;
+  uint16_t port;
+  const char *app;
+} CDomainTarget;
+
+// A domain the organization holds. Strings are heap-owned and non-null,
+// except inactive target references. Both references are null while unbound. Released
+// with `acrylmicrovm_free_domain`; list entries belong to their list.
+typedef struct CDomain {
+  char *hostname;
+  char *url;
+  struct CDomainTarget target;
+} CDomain;
+
+// `count` domains at `items` (null only when `count` is zero), with the
+// allowance they count against. Released, entries included, with
+// `acrylmicrovm_free_domain_list`.
+typedef struct CDomainList {
+  struct CDomain *items;
+  int count;
+  uint32_t limit;
+  uint32_t used;
+  uint32_t remaining;
+  // The shortest platform name a new claim may use.
+  uint32_t min_length;
+} CDomainList;
+
+typedef struct ExecutionHandle CExecutionHandle;
+
+// C-compatible command descriptor with all BoxCommand options.
+//
+// All string fields are nullable — NULL means "use default".
+// `timeout_secs` of 0.0 means no timeout.
+typedef struct AcrylMicrovmCommand {
+  // Command to execute (required, must not be NULL).
+  const char *command;
+  // Array of argument strings. NULL = no args.
+  const char *const *args;
+  // Number of arguments in `args`.
+  int argc;
+  // Array of env var pairs: [key0, val0, key1, ...]. NULL = inherit env.
+  const char *const *env_pairs;
+  // Number of strings in `env_pairs`; odd trailing values are ignored.
+  int env_count;
+  // Working directory inside the container. NULL = container default.
+  const char *workdir;
+  // User spec (e.g., "nobody", "1000:1000"). NULL = container default.
+  const char *user;
+  // Timeout in seconds. 0.0 = no timeout.
+  double timeout_secs;
+  // Enable TTY mode for interactive programs.
+  int tty;
+} AcrylMicrovmCommand;
+
+// Streaming stdout chunk callback.
+typedef void (*CBoxStdoutCb)(const uint8_t*, size_t, void*);
+
+// Streaming stderr chunk callback.
+typedef void (*CBoxStderrCb)(const uint8_t*, size_t, void*);
+
+// Process exit callback (fired once per execution).
+typedef void (*CBoxExitCb)(int, void*);
+
+// Execution wait completion (carries exit code on success).
+typedef void (*CExecutionWaitCb)(int, CAcrylMicrovmError*, void*);
+
+// Execution kill completion.
+typedef void (*CExecutionKillCb)(CAcrylMicrovmError*, void*);
+
+// Execution signal completion. Distinct typedef from `CExecutionKillCb`
+// even though the shape is identical so callers can route SIGKILL (kill)
+// and arbitrary-signal (signal) callbacks to different handlers without
+// relying on positional inference.
+typedef void (*CExecutionSignalCb)(CAcrylMicrovmError*, void*);
+
+// Execution PTY resize completion.
+typedef void (*CExecutionResizeCb)(CAcrylMicrovmError*, void*);
+
+// Owned metadata for one live guest execution, including the main process.
+typedef struct CExecutionInfo {
+  char *execution_id;
+  char **argv;
+  int argc;
+  // Start time in Unix milliseconds.
+  uint64_t started_at;
+  bool tty;
+  bool is_main_session;
+} CExecutionInfo;
+
+// Owned list. Release it with `acrylmicrovm_free_execution_info_list`.
+typedef struct CExecutionInfoList {
+  struct CExecutionInfo *items;
+  int count;
+} CExecutionInfoList;
+
+// Live execution inventory completion. The caller owns the returned list and
+// must release it with `acrylmicrovm_free_execution_info_list`.
+typedef void (*CExecutionInfoListCb)(struct CExecutionInfoList*, CAcrylMicrovmError*, void*);
+
+typedef struct BoxRunner CAcrylMicrovmSimple;
+
+// Result structure for runner command execution
+typedef struct ExecResult {
+  int exit_code;
+  char *stdout_text;
+  char *stderr_text;
+} ExecResult;
+
+typedef struct ExecResult CAcrylMicrovmExecResult;
+
+typedef struct ImageHandle CAcrylMicrovmImageHandle;
+
+typedef struct CImagePullResult {
+  char *reference;
+  char *config_digest;
+  int layer_count;
+} CImagePullResult;
+
+// Image pull completion.
+typedef void (*CBoxImagePullCb)(struct CImagePullResult*, CAcrylMicrovmError*, void*);
+
+typedef struct CImageInfo {
+  char *reference;
+  char *repository;
+  char *tag;
+  char *id;
+  int64_t cached_at;
+  uint64_t size;
+  int has_size;
+} CImageInfo;
+
+typedef struct CImageInfoList {
+  struct CImageInfo *items;
+  int count;
+} CImageInfoList;
+
+// Image list completion.
+typedef void (*CBoxImageListCb)(struct CImageInfoList*, CAcrylMicrovmError*, void*);
+
+// One build of an image, owned by its enclosing [`CImageDetail`].
+//
+// Sizes and times follow [`CImageInfo`]: `size_bytes` is meaningful only when
+// `has_size` is non-zero, times are in Unix seconds (UTC), and an optional
+// time is meaningful only when its `has_` flag is non-zero.
+typedef struct CImageVersion {
+  // Manifest digest, such as "sha256:…".
+  char *digest;
+  // Sum of the layer sizes the manifest declares, in bytes.
+  uint64_t size_bytes;
+  // Non-zero when `size_bytes` is known.
+  int has_size;
+  // The reference that was pulled to get this build.
+  char *source_ref;
+  // When this build was recorded, in Unix seconds.
+  int64_t recorded_at;
+  // The image's aliases that point at this build: `aliases_count` strings, null
+  // only when the count is zero.
+  char **aliases;
+  int aliases_count;
+  // When a box last started from this build.
+  int64_t last_used_at;
+  int has_last_used_at;
+  // When a pull found this build gone from its registry.
+  int64_t upstream_missing_at;
+  int has_upstream_missing_at;
+} CImageVersion;
+
+// An alias registration or historical binding change, owned by its
+// enclosing [`CImageDetail`]. Versions are named by digest.
+typedef struct CImageAliasEvent {
+  char *alias;
+  // The build the alias pointed at before; null when the alias was new.
+  char *from_digest;
+  char *to_digest;
+  // Who recorded the alias; null when a pull recorded it.
+  char *actor;
+  // When the alias moved, in Unix seconds.
+  int64_t recorded_at;
+} CImageAliasEvent;
+
+// An image name and every build of it the runtime holds.
+//
+// `aliases` points to `aliases_count` strings, `versions` to `versions_count`
+// entries, newest first, and `history` to `history_count` alias history entries, the
+// latest first; each array is null only when its count is zero. A local cache
+// leaves `history` empty. The callback that receives a detail owns it, nested
+// strings and arrays included, and releases it once with
+// `acrylmicrovm_free_image_detail`.
+typedef struct CImageDetail {
+  // Registry and repository without a tag, such as "docker.io/library/alpine".
+  char *name;
+  char **aliases;
+  int aliases_count;
+  // Non-zero when the operator provides the image rather than a box having
+  // pulled it. Only a REST runtime's catalog has these.
+  int curated;
+  struct CImageVersion *versions;
+  int versions_count;
+  struct CImageAliasEvent *history;
+  int history_count;
+} CImageDetail;
+
+// Image get completion. On success the callback owns the non-null detail and
+// must release it with `acrylmicrovm_free_image_detail`; on failure it is null. The
+// error pointer is borrowed for callback dispatch only.
+typedef void (*CBoxImageGetCb)(struct CImageDetail*, CAcrylMicrovmError*, void*);
+
+// Image remove completion. The error pointer is borrowed for callback
+// dispatch only and no result allocation is produced.
+typedef void (*CBoxImageRemoveCb)(CAcrylMicrovmError*, void*);
+
+// How much of its image allowance a REST runtime's caller holds.
+//
+// Passed to the callback by pointer, valid only during that callback; there
+// is nothing to free.
+typedef struct CImageUsage {
+  // Images held.
+  uint64_t count;
+  // Images the caller may hold.
+  uint64_t limit;
+  // Sum of the sizes the held builds' manifests declare. A layer two builds
+  // share is counted for each, so this is not the bytes stored.
+  uint64_t known_bytes;
+} CImageUsage;
+
+// Image usage completion. The usage (null on failure) and error pointers are
+// borrowed for callback dispatch only; there is nothing to free.
+typedef void (*CBoxImageUsageCb)(struct CImageUsage*, CAcrylMicrovmError*, void*);
+
+typedef struct RegistryHandle CAcrylMicrovmRegistryHandle;
+
+// A concrete host listener published to a guest port.
+//
+// `host_ip` is owned by the enclosing [`CBoxInfo`].
+typedef struct CPublishedPort {
+  uint16_t guest_port;
+  char *host_ip;
+  uint16_t host_port;
+  enum AcrylMicrovmPortProtocol protocol;
+} CPublishedPort;
+
+// Owned list of concrete published ports.
+//
+// A non-null list with `count == 0` means publication metadata was resolved
+// and no listeners are active. The list is owned by its enclosing
+// [`CNetworkInfo`].
+typedef struct CPublishedPortList {
+  struct CPublishedPort *items;
+  int count;
+} CPublishedPortList;
+
+// Outbound (guest → internet) network mode and allowlist.
+// `allow_net` points to `allow_net_count` owned strings, owned by the
+// enclosing [`CNetworkInfo`].
+typedef struct COutboundNetworkInfo {
+  enum AcrylMicrovmNetworkMode mode;
+  char **allow_net;
+  int allow_net_count;
+} COutboundNetworkInfo;
+
+// Inbound (internet → guest) network mode and allowlist.
+// `allow_net` points to `allow_net_count` owned strings, owned by the
+// enclosing [`CNetworkInfo`].
+typedef struct CInboundNetworkInfo {
+  enum AcrylMicrovmNetworkMode mode;
+  char **allow_net;
+  int allow_net_count;
+} CInboundNetworkInfo;
+
+// Typed network metadata owned by an enclosing [`CBoxInfo`].
+//
+// `published_ports` is null when the current handle does not know the
+// bindings, non-null and empty when there are no active publications, and
+// otherwise contains concrete bindings.
+// The first four fields are byte-compatible with the pre-split struct
+// (`mode`, `allow_net`, `allow_net_count`, `published_ports`), so callers
+// compiled against the old header keep reading valid data at the same
+// offsets. They alias `outbound`'s allocations — never free them separately;
+// [`free_network_info`] releases each allocation exactly once through
+// `outbound`/`inbound`.
+typedef struct CNetworkInfo {
+  // Deprecated: read `outbound.mode`. Mirrors it for old callers.
+  enum AcrylMicrovmNetworkMode mode;
+  // Deprecated: read `outbound.allow_net`. Aliases it — do not free.
+  char **allow_net;
+  // Deprecated: read `outbound.allow_net_count`.
+  int allow_net_count;
+  struct CPublishedPortList *published_ports;
+  struct COutboundNetworkInfo outbound;
+  struct CInboundNetworkInfo inbound;
+} CNetworkInfo;
+
+typedef struct CBoxInfo {
+  char *id;
+  char *name;
+  char *image;
+  char *status;
+  int running;
+  int pid;
+  double cpus;
+  int memory_mib;
+  uint32_t auto_stop;
+  uint32_t auto_delete;
+  int auto_resume;
+  int64_t created_at;
+  // Owned typed network metadata; null when network metadata is unavailable.
+  struct CNetworkInfo *network;
+  // Unix milliseconds when the box most recently entered `Running`; `0`
+  // when no start time was recorded. Preserved after stop or reboot; when
+  // [`Self::pid`] is nonzero, the timestamp describes that live PID.
+  // Milliseconds — not `created_at`'s seconds — preserve sub-second ordering
+  // against a job's timeline.
+  int64_t started_at;
+  // Unix milliseconds of the box's last recorded activity — the clock
+  // AutoStop measures idleness against; `0` when nothing was recorded, which
+  // is always the case for local runtimes.
+  int64_t last_activity_at;
+  // Owned record of how the box's main command ended; null when the runtime
+  // recorded none. Stopping a box signals that command, so this carries what
+  // the stop produced as well as a self-chosen exit.
+  //
+  // Absence cannot be a sentinel the way it is for [`Self::pid`] and
+  // [`Self::started_at`]: `0` is the exit code of every command that
+  // succeeded, so a reader that took `0` for "nothing recorded" would
+  // report every clean exit as an absent one. A pointer makes that reading
+  // impossible rather than merely wrong — there is no value to mistake —
+  // and follows [`Self::network`], the struct's other owned optional.
+  //
+  // [`free_box_info`] releases it.
+  int *exit_code;
+  // Manifest digest `image` resolved to when this box's disk was built —
+  // the build the box runs. Null when unknown: a box booted from a local
+  // rootfs path, one imported from an archive, one whose disk predates the
+  // record, or a backend that does not know it. Owned and freed with the
+  // rest of this struct.
+  char *resolved_image_digest;
+  // Declared on-registry size, in bytes, of that image; `0` when
+  // [`Self::resolved_image_digest`] is null.
+  int64_t resolved_image_size;
+} CBoxInfo;
+
+// Box info completion. On success the callback owns the non-null metadata and
+// must release it with `acrylmicrovm_free_box_info`. The error pointer is borrowed
+// for callback dispatch only; on failure the metadata pointer is null.
+typedef void (*CBoxInfoCb)(struct CBoxInfo*, CAcrylMicrovmError*, void*);
+
+typedef struct CBoxInfoList {
+  struct CBoxInfo *items;
+  int count;
+} CBoxInfoList;
+
+// Box info list completion.
+typedef void (*CBoxInfoListCb)(struct CBoxInfoList*, CAcrylMicrovmError*, void*);
+
+typedef struct CBoxMetrics {
+  double cpu_percent;
+  int64_t memory_bytes;
+  int commands_executed;
+  int exec_errors;
+  int64_t bytes_sent;
+  int64_t bytes_received;
+  int64_t create_duration_ms;
+  int64_t boot_duration_ms;
+  int64_t network_bytes_sent;
+  int64_t network_bytes_received;
+  int network_tcp_connections;
+  int network_tcp_errors;
+} CBoxMetrics;
+
+// Per-box metrics completion.
+typedef void (*CBoxMetricsCb)(struct CBoxMetrics*, CAcrylMicrovmError*, void*);
+
+typedef struct CRuntimeMetrics {
+  int boxes_created_total;
+  int boxes_failed_total;
+  int num_running_boxes;
+  int total_commands_executed;
+  int total_exec_errors;
+} CRuntimeMetrics;
+
+// Runtime metrics completion.
+typedef void (*CRuntimeMetricsCb)(struct CRuntimeMetrics*, CAcrylMicrovmError*, void*);
+
+typedef struct BoxNetworkHandle CBoxNetworkHandle;
+
+typedef struct TunnelForwarderHandle CTunnelForwarderHandle;
+
+// Tunnel forwarder wait completion.
+typedef void (*CTunnelForwarderWaitCb)(CAcrylMicrovmError*, void*);
+
+// Tunnel forwarder close completion.
+typedef void (*CTunnelForwarderCloseCb)(CAcrylMicrovmError*, void*);
+
+// Access policy for tunnel creation. A NULL options pointer defaults to public.
+typedef struct AcrylMicrovmTunnelOptions {
+  bool is_public;
+} AcrylMicrovmTunnelOptions;
+
+typedef struct BoxTunnelHandle CBoxTunnelHandle;
+
+typedef uint32_t AcrylMicrovmSocketAddressKind;
+
+// Socket address for a tunnel listener. Input strings are borrowed
+// for the duration of a call.
+typedef struct AcrylMicrovmSocketAddress {
+  AcrylMicrovmSocketAddressKind kind;
+  const char *host;
+  uint16_t port;
+  const char *path;
+} AcrylMicrovmSocketAddress;
+
+// A registry login the server pulls private images with. It has no
+// password field: the server never returns one.
+//
+// Every string is heap-owned and non-null except `created_by`, which is null
+// when the server does not know who added the login. `created_at` is in Unix
+// seconds (UTC). A standalone value is released with
+// `acrylmicrovm_free_registry_credential`; list entries belong to their list.
+typedef struct CRegistryCredential {
+  // UUID that `acrylmicrovm_registry_remove` takes.
+  char *id;
+  char *registry_host;
+  // Whole path segments ending in "/"; empty for the whole registry.
+  char *repository_prefix;
+  char *username;
+  char *created_by;
+  int64_t created_at;
+} CRegistryCredential;
+
+// `count` logins at `items`, which is null only when `count` is zero.
+// Released, entries included, with `acrylmicrovm_free_registry_credential_list`.
+typedef struct CRegistryCredentialList {
+  struct CRegistryCredential *items;
+  int count;
+} CRegistryCredentialList;
+
+// Registry login list completion. A successful callback owns the list and
+// must release it with `acrylmicrovm_free_registry_credential_list`; the error
+// pointer is borrowed for callback dispatch only.
+typedef void (*CBoxRegistryListCb)(struct CRegistryCredentialList*, CAcrylMicrovmError*, void*);
+
+// Registry login create completion. A successful callback owns the login and
+// must release it with `acrylmicrovm_free_registry_credential`; on failure it is
+// null. The error pointer is borrowed for callback dispatch only.
+typedef void (*CBoxRegistryCreateCb)(struct CRegistryCredential*, CAcrylMicrovmError*, void*);
+
+// Registry login remove completion. The error pointer is borrowed for
+// callback dispatch only and no result allocation is produced.
+typedef void (*CBoxRegistryRemoveCb)(CAcrylMicrovmError*, void*);
+
+typedef struct CredentialHandle CAcrylMicrovmCredential;
+
+typedef struct RestOptionsHandle CAcrylMicrovmRestOptions;
+
+typedef struct AcrylMicrovmImageRegistry {
+  const char *host;
+  enum AcrylMicrovmRegistryTransport transport;
+  int skip_verify;
+  int search;
+  const char *username;
+  const char *password;
+  const char *bearer_token;
+} AcrylMicrovmImageRegistry;
+
+typedef struct VolumeHandle CAcrylMicrovmVolumeHandle;
+
+// Runtime shutdown completion.
+typedef void (*CRuntimeShutdownCb)(CAcrylMicrovmError*, void*);
+
+// Guest SSH listener state as observed by one call; carries no credentials.
+//
+// The callback that receives it by pointer owns it, nested strings included,
+// and releases it once with `acrylmicrovm_free_ssh_status`. `enabled` is non-zero
+// while the guest listener runs. Disabling a running listener preserves its
+// generation; a never-enabled one reports zero, as Configured and Stopped
+// boxes do.
+typedef struct CSshStatus {
+  int enabled;
+  uint64_t generation;
+  char *listen_address;
+  char *host_public_key;
+  char *host_key_fingerprint;
+} CSshStatus;
+
+// SSH configure completion. A successful callback owns the status and must
+// release it with `acrylmicrovm_free_ssh_status`; on failure it is null.
+typedef void (*CBoxSshConfigureCb)(struct CSshStatus*, CAcrylMicrovmError*, void*);
+
+// SSH status completion with the same ownership contract as SSH configure.
+typedef void (*CBoxSshStatusCb)(struct CSshStatus*, CAcrylMicrovmError*, void*);
+
+// SSH enable completion with the same ownership contract as SSH configure.
+typedef void (*CBoxSshEnableCb)(struct CSshStatus*, CAcrylMicrovmError*, void*);
+
+// SSH disable completion with the same ownership contract as SSH configure.
+typedef void (*CBoxSshDisableCb)(struct CSshStatus*, CAcrylMicrovmError*, void*);
+
+// C ABI representation of volume metadata.
+//
+// `id` and `created_at` are non-null, heap-owned C strings. A standalone value
+// is transferred to the callback and must be released exactly once with
+// `acrylmicrovm_free_volume_info`. List entries remain owned by their enclosing
+// [`CVolumeInfoList`] and must not be freed individually. `size_bytes` is
+// meaningful only when `has_size` is non-zero.
+typedef struct CVolumeInfo {
+  char *id;
+  // Volume name, mountable in place of the id. Defaults to the id.
+  char *name;
+  char *created_at;
+  uint64_t size_bytes;
+  int has_size;
+} CVolumeInfo;
+
+// Volume create completion.
+//
+// On success the callback takes ownership of the non-null metadata pointer and
+// must release it with `acrylmicrovm_free_volume_info`. On failure the pointer is
+// null. The error pointer is borrowed for callback dispatch only.
+typedef void (*CBoxVolumeCreateCb)(struct CVolumeInfo*, CAcrylMicrovmError*, void*);
+
+// C ABI representation of a volume metadata list.
+//
+// `items` points to `count` contiguous [`CVolumeInfo`] entries and may be null
+// only when `count` is zero. The callback recipient owns the list, its array,
+// and all entry strings and must release them together with
+// `acrylmicrovm_free_volume_info_list`.
+typedef struct CVolumeInfoList {
+  struct CVolumeInfo *items;
+  int count;
+} CVolumeInfoList;
+
+// Volume list completion. A successful callback owns the list and must release
+// it with `acrylmicrovm_free_volume_info_list`; the error pointer is callback-scoped.
+typedef void (*CBoxVolumeListCb)(struct CVolumeInfoList*, CAcrylMicrovmError*, void*);
+
+// Volume get completion with the same ownership contract as volume create.
+typedef void (*CBoxVolumeGetCb)(struct CVolumeInfo*, CAcrylMicrovmError*, void*);
+
+// Volume remove completion. The error pointer is borrowed for callback dispatch
+// only and no result allocation is produced.
+typedef void (*CBoxVolumeRemoveCb)(CAcrylMicrovmError*, void*);
+
+#define AcrylMicrovmSocketTcp 0
+
+#define AcrylMicrovmSocketUnix 1
+
+#ifdef __cplusplus
+extern "C" {
+#endif // __cplusplus
+
+// Set nested virtualization for a new box. Runtime experimental authorization
+// is checked by create; the value is saved with the existing BoxConfig.
+enum AcrylMicrovmErrorCode acrylmicrovm_advanced_options_set_nested_virtualization(CAdvancedBoxOptions *opts,
+                                                                         int enabled);
+
+// Set an absolute host kernel path (RC). The runtime must enable custom-kernel.
+// Copies the path; invalid input leaves the previous option unchanged.
+enum AcrylMicrovmErrorCode acrylmicrovm_advanced_options_set_kernel_path(CAdvancedBoxOptions *opts,
+                                                               const char *path,
+                                                               struct FFIError *out_error);
+
+// Allocate a `CAdvancedBoxOptions` initialized to `AdvancedBoxOptions::default()`
+// (secure-by-default security profile, mount isolation off, no health check).
+//
+// Sets `*out_opts` to the new handle on `Ok`. The caller owns the handle and
+// must release it via `acrylmicrovm_advanced_options_free` once it has been applied
+// to a `CAcrylMicrovmOptions` via `acrylmicrovm_options_set_advanced` (or if no longer
+// needed).
+enum AcrylMicrovmErrorCode acrylmicrovm_advanced_options_new(CAdvancedBoxOptions **out_opts,
+                                                   struct FFIError *out_error);
+
+// Release a `CAdvancedBoxOptions` previously returned by
+// `acrylmicrovm_advanced_options_new`. Null is a no-op.
+void acrylmicrovm_advanced_options_free(CAdvancedBoxOptions *opts);
+
+// Toggle the box's sandbox on the advanced options. `enabled` != 0 selects the
+// fully-isolated profile (`SecurityOptions::enabled()`, also the default when
+// this is never called); 0 selects `SecurityOptions::disabled()` (master
+// switch off, every sub-protection off — for debugging or environments that
+// genuinely can't sandbox). Null `opts` is a no-op.
+void acrylmicrovm_advanced_options_set_security_enabled(CAdvancedBoxOptions *opts, int enabled);
+
+// Replace the capabilities added to ACRYL microVMs' Docker-compatible baseline.
+//
+// A zero count clears the list. Negative counts, null handles, null arrays
+// with a positive count, null elements, and invalid UTF-8 fail closed.
+enum AcrylMicrovmErrorCode acrylmicrovm_advanced_options_set_capabilities_add(CAdvancedBoxOptions *opts,
+                                                                    const char *const *capabilities,
+                                                                    int count);
+
+// Replace the capabilities removed from the container capability set.
+//
+// A zero count clears the list. Negative counts, null handles, null arrays
+// with a positive count, null elements, and invalid UTF-8 fail closed.
+enum AcrylMicrovmErrorCode acrylmicrovm_advanced_options_set_capabilities_drop(CAdvancedBoxOptions *opts,
+                                                                     const char *const *capabilities,
+                                                                     int count);
+
+// Enable full capabilities and writable kernel mounts inside the guest only.
+// Runner sandbox security is unchanged. Returns InvalidArgument for a null
+// handle or a conflicting explicit capability policy.
+enum AcrylMicrovmErrorCode acrylmicrovm_advanced_options_set_privileged(CAdvancedBoxOptions *opts,
+                                                              int enabled);
+
+// Obtain a namespace without starting the Box.
+// handle must be live; out must be writable; out_error may be null.
+enum AcrylMicrovmErrorCode acrylmicrovm_box_agents(CBoxHandle *handle,
+                                         struct CAgents **out,
+                                         CAcrylMicrovmError *out_error);
+
+// Create an agent with initial configuration.
+// out_error may be null or writable.
+enum AcrylMicrovmErrorCode acrylmicrovm_agents_create(struct CAgents *_handle,
+                                            const char *_agent,
+                                            const struct CAgentCreateOptions *_options,
+                                            CAgentCb _cb,
+                                            void *_user_data,
+                                            CAcrylMicrovmError *out_error);
+
+// Look up an agent without replaying work.
+// out_error may be null or writable.
+enum AcrylMicrovmErrorCode acrylmicrovm_agents_get(struct CAgents *_handle,
+                                         const char *_agent_id,
+                                         CAgentCb _cb,
+                                         void *_user_data,
+                                         CAcrylMicrovmError *out_error);
+
+// Stop admissions and close the agent loop.
+// out_error may be null or writable.
+enum AcrylMicrovmErrorCode acrylmicrovm_agent_close(struct CAgent *_agent,
+                                          const struct CAgentControlOptions *_options,
+                                          CAgentDoneCb _cb,
+                                          void *_user_data,
+                                          CAcrylMicrovmError *out_error);
+
+// Submit text with optional JSON data.
+// out_error may be null or writable.
+enum AcrylMicrovmErrorCode acrylmicrovm_agent_send(struct CAgent *_agent,
+                                         const char *_text,
+                                         const struct CAgentSendOptions *_options,
+                                         CAgentTurnCb _cb,
+                                         void *_user_data,
+                                         CAcrylMicrovmError *out_error);
+
+// Look up a turn without executing it.
+// out_error may be null or writable.
+enum AcrylMicrovmErrorCode acrylmicrovm_agent_get_turn(struct CAgent *_agent,
+                                             const char *_turn_id,
+                                             CAgentTurnCb _cb,
+                                             void *_user_data,
+                                             CAcrylMicrovmError *out_error);
+
+// Read outstanding questions and permissions.
+// out_error may be null or writable.
+enum AcrylMicrovmErrorCode acrylmicrovm_agent_requests(struct CAgent *_agent,
+                                             CAgentJsonCb _cb,
+                                             void *_user_data,
+                                             CAcrylMicrovmError *out_error);
+
+// Answer a typed request.
+// out_error may be null or writable.
+enum AcrylMicrovmErrorCode acrylmicrovm_agent_respond(struct CAgent *_agent,
+                                            const char *_request_id,
+                                            const char *_response_json,
+                                            const struct CAgentControlOptions *_options,
+                                            CAgentTurnCb _cb,
+                                            void *_user_data,
+                                            CAcrylMicrovmError *out_error);
+
+// Wait for a turn result; timeout does not imply cancellation.
+// out_error may be null or writable.
+enum AcrylMicrovmErrorCode acrylmicrovm_agent_turn_wait(struct CAgentTurn *_turn,
+                                              const struct CAgentWaitOptions *_options,
+                                              CAgentJsonCb _cb,
+                                              void *_user_data,
+                                              CAcrylMicrovmError *out_error);
+
+// Steer this turn without submitting another turn.
+// out_error may be null or writable.
+enum AcrylMicrovmErrorCode acrylmicrovm_agent_turn_steer(struct CAgentTurn *_turn,
+                                               const char *_text,
+                                               const struct CAgentControlOptions *_options,
+                                               CAgentJsonCb _cb,
+                                               void *_user_data,
+                                               CAcrylMicrovmError *out_error);
+
+// Interrupt the agent loop for this turn.
+// out_error may be null or writable.
+enum AcrylMicrovmErrorCode acrylmicrovm_agent_turn_interrupt(struct CAgentTurn *_turn,
+                                                   const struct CAgentControlOptions *_options,
+                                                   CAgentDoneCb _cb,
+                                                   void *_user_data,
+                                                   CAcrylMicrovmError *out_error);
+
+// Open the agent's events, after an opaque cursor where the adapter supports it.
+// out and out_error may be null or writable. out is cleared on error.
+enum AcrylMicrovmErrorCode acrylmicrovm_agent_events(struct CAgent *_handle,
+                                           const struct CAgentEventsOptions *_options,
+                                           CAgentJsonCb _cb,
+                                           void *_user_data,
+                                           struct CAgentEvents **out,
+                                           CAcrylMicrovmError *out_error);
+
+// Open this turn's view of the agent's events.
+// out and out_error may be null or writable. out is cleared on error.
+enum AcrylMicrovmErrorCode acrylmicrovm_agent_turn_events(struct CAgentTurn *_handle,
+                                                const struct CAgentEventsOptions *_options,
+                                                CAgentJsonCb _cb,
+                                                void *_user_data,
+                                                struct CAgentEvents **out,
+                                                CAcrylMicrovmError *out_error);
+
+// Read a consistent agent state snapshot.
+// Release a returned JSON string with acrylmicrovm_free_string.
+// out_json and out_error may be null or writable. out_json is cleared on error.
+enum AcrylMicrovmErrorCode acrylmicrovm_agent_state(struct CAgent *_handle,
+                                          char **out_json,
+                                          CAcrylMicrovmError *out_error);
+
+// Read effective agent configuration.
+// Release a returned JSON string with acrylmicrovm_free_string.
+// out_json and out_error may be null or writable. out_json is cleared on error.
+enum AcrylMicrovmErrorCode acrylmicrovm_agent_config(struct CAgent *_handle,
+                                           char **out_json,
+                                           CAcrylMicrovmError *out_error);
+
+// Read adapter guarantees and limits.
+// Release a returned JSON string with acrylmicrovm_free_string.
+// out_json and out_error may be null or writable. out_json is cleared on error.
+enum AcrylMicrovmErrorCode acrylmicrovm_agent_capabilities(struct CAgent *_handle,
+                                                 char **out_json,
+                                                 CAcrylMicrovmError *out_error);
+
+// Read a consistent turn state snapshot.
+// Release a returned JSON string with acrylmicrovm_free_string.
+// out_json and out_error may be null or writable. out_json is cleared on error.
+enum AcrylMicrovmErrorCode acrylmicrovm_agent_turn_state(struct CAgentTurn *_handle,
+                                               char **out_json,
+                                               CAcrylMicrovmError *out_error);
+
+// Release only the local handle. Does not close an agent or interrupt a turn.
+// handle must be null or a live, uniquely owned pointer returned by this SDK.
+void acrylmicrovm_agents_free(struct CAgents *handle);
+
+// Release only the local handle. Does not close an agent or interrupt a turn.
+// handle must be null or a live, uniquely owned pointer returned by this SDK.
+void acrylmicrovm_agent_free(struct CAgent *handle);
+
+// Release only the local handle. Does not close an agent or interrupt a turn.
+// handle must be null or a live, uniquely owned pointer returned by this SDK.
+void acrylmicrovm_agent_turn_free(struct CAgentTurn *handle);
+
+// Release only the local handle. Does not close an agent or interrupt a turn.
+// handle must be null or a live, uniquely owned pointer returned by this SDK.
+void acrylmicrovm_agent_events_free(struct CAgentEvents *handle);
+
+// Submit a box export.
+//
+// On success, the callback owns the returned path and must release it with
+// `acrylmicrovm_free_string`. The archive itself is never deleted by this bridge.
+enum AcrylMicrovmErrorCode acrylmicrovm_box_export(CBoxHandle *handle,
+                                         const char *dest,
+                                         CBoxExportCb cb,
+                                         void *user_data,
+                                         CAcrylMicrovmError *out_error);
+
+// Submit a trusted archive import.
+//
+// A null or empty `name_or_null` leaves the new box unnamed. The callback
+// owns the returned stopped box handle. The caller retains ownership of the
+// archive file; this bridge never removes it.
+enum AcrylMicrovmErrorCode acrylmicrovm_runtime_import(CAcrylMicrovmRuntime *runtime,
+                                             const char *archive_path,
+                                             const char *name_or_null,
+                                             CRuntimeImportCb cb,
+                                             void *user_data,
+                                             CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_create_box(CAcrylMicrovmRuntime *runtime,
+                                         CAcrylMicrovmOptions *opts,
+                                         CBoxCreateBoxCb cb,
+                                         void *user_data,
+                                         CAcrylMicrovmError *out_error);
+
+// Get an existing box by name, or create a new one if it does not exist.
+//
+// When a box with the given name already exists it returns that box instead
+// of failing with "already exists". The callback receives an extra `created`
+// flag: `true` when a new box was created, `false` when an existing box was
+// adopted — letting callers distinguish the two (e.g. skip re-initialization
+// for an adopted box).
+enum AcrylMicrovmErrorCode acrylmicrovm_get_or_create_box(CAcrylMicrovmRuntime *runtime,
+                                                CAcrylMicrovmOptions *opts,
+                                                CBoxGetOrCreateBoxCb cb,
+                                                void *user_data,
+                                                CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_stop_box(CBoxHandle *handle,
+                                       CBoxStopBoxCb cb,
+                                       void *user_data,
+                                       CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_get(CAcrylMicrovmRuntime *runtime,
+                                  const char *id_or_name,
+                                  CBoxGetBoxCb cb,
+                                  void *user_data,
+                                  CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_remove(CAcrylMicrovmRuntime *runtime,
+                                     const char *id_or_name,
+                                     int force,
+                                     CBoxRemoveBoxCb cb,
+                                     void *user_data,
+                                     CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_start_box(CBoxHandle *handle,
+                                        CBoxStartBoxCb cb,
+                                        void *user_data,
+                                        CAcrylMicrovmError *out_error);
+
+char *acrylmicrovm_box_id(CBoxHandle *handle);
+
+// Return an owned name string, or null for an unnamed/invalid handle.
+// Release the returned string with acrylmicrovm_free_string.
+char *acrylmicrovm_box_name(CBoxHandle *handle);
+
+void acrylmicrovm_box_free(CBoxHandle *handle);
+
+void acrylmicrovm_free_checkpoint_info(struct CCheckpointInfo *info);
+
+void acrylmicrovm_free_checkpoint_list(struct CCheckpointList *list);
+
+// Queue capture; name may be null. Runtime, source and callback must be valid.
+enum AcrylMicrovmErrorCode acrylmicrovm_checkpoint_create(CAcrylMicrovmRuntime *runtime,
+                                                const char *source,
+                                                const char *name,
+                                                CCheckpointInfoCb cb,
+                                                void *user_data,
+                                                CAcrylMicrovmError *out_error);
+
+// Queue metadata lookup by ID or name. All inputs except out_error are required.
+enum AcrylMicrovmErrorCode acrylmicrovm_checkpoint_get(CAcrylMicrovmRuntime *runtime,
+                                             const char *key,
+                                             CCheckpointInfoCb cb,
+                                             void *user_data,
+                                             CAcrylMicrovmError *out_error);
+
+// Queue listing. Runtime and callback must be valid; user_data is opaque.
+enum AcrylMicrovmErrorCode acrylmicrovm_checkpoint_list(CAcrylMicrovmRuntime *runtime,
+                                              CCheckpointListCb cb,
+                                              void *user_data,
+                                              CAcrylMicrovmError *out_error);
+
+// Queue deletion; force only ignores absence. Completion has no owned payload.
+enum AcrylMicrovmErrorCode acrylmicrovm_checkpoint_remove(CAcrylMicrovmRuntime *runtime,
+                                                const char *key,
+                                                int force,
+                                                CBoxRemoveBoxCb cb,
+                                                void *user_data,
+                                                CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_copy_into(CBoxHandle *handle,
+                                        const char *host_src,
+                                        const char *guest_dst,
+                                        CBoxCopyCb cb,
+                                        void *user_data,
+                                        CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_copy_out(CBoxHandle *handle,
+                                       const char *guest_src,
+                                       const char *host_dst,
+                                       CBoxCopyCb cb,
+                                       void *user_data,
+                                       CAcrylMicrovmError *out_error);
+
+// Begin downloading `guest_src` as a pull-based raw archive stream.
+//
+// This call blocks until the stream and its optional source-shape hint are
+// ready. On success the returned handle must be released with
+// [`acrylmicrovm_copy_out_free`]. A non-null `out_source_kind` is initialized to
+// `AcrylMicrovmCopySourceKindUnknown` and updated to the `...File` or `...Dir`
+// variant when the peer supplies the hint.
+struct CBoxCopyOutStream *acrylmicrovm_copy_out_start(CBoxHandle *handle,
+                                                 const char *guest_src,
+                                                 int32_t *out_source_kind,
+                                                 CAcrylMicrovmError *out_error);
+
+// Read the next raw archive bytes from a copy-out stream.
+//
+// This call blocks while the upstream stream is pending. `Ok` with a
+// positive `out_read` returns data; `Ok` with zero length is sticky EOF. A
+// stream item error is terminal: its first read reports the stream error and
+// later reads return `InvalidState` without polling upstream again.
+enum AcrylMicrovmErrorCode acrylmicrovm_copy_out_read(struct CBoxCopyOutStream *stream,
+                                            uint8_t *buffer,
+                                            size_t capacity,
+                                            size_t *out_read,
+                                            CAcrylMicrovmError *out_error);
+
+// Reclaim a copy-out stream handle. A null handle is a no-op.
+//
+// The caller must not invoke [`acrylmicrovm_copy_out_read`] concurrently or race
+// a read with this function.
+void acrylmicrovm_copy_out_free(struct CBoxCopyOutStream *stream);
+
+// Begin a streaming copy-in, returning an opaque transfer handle.
+//
+// `source_kind` describes the archive shape: `AcrylMicrovmCopySourceKind`'s
+// discriminant (`...Unknown`=0, `...File`=1, `...Dir`=2), or 0 when the
+// caller cannot tell (older clients). The guest lands the archive by its
+// first entry whatever the kind says.
+// Taken as an integer because C callers can pass any value, and
+// out-of-range discriminants must behave as Unknown rather than as an
+// invalid Rust enum.
+struct CBoxCopyInStream *acrylmicrovm_copy_in_start(CBoxHandle *handle,
+                                               const char *guest_dst,
+                                               int32_t source_kind,
+                                               CBoxCopyCb copy_cb,
+                                               void *user_data,
+                                               CAcrylMicrovmError *out_error);
+
+// Push a chunk of archive bytes into the guest. Blocks when the guest is
+// slow (bounded-channel backpressure).
+enum AcrylMicrovmErrorCode acrylmicrovm_copy_in_write(struct CBoxCopyInStream *stream,
+                                            const uint8_t *data,
+                                            size_t len,
+                                            CAcrylMicrovmError *out_error);
+
+// Close the copy-in stream, signalling EOF to the guest. Idempotent.
+enum AcrylMicrovmErrorCode acrylmicrovm_copy_in_close(struct CBoxCopyInStream *stream,
+                                            CAcrylMicrovmError *out_error);
+
+// Abort the copy-in stream: deliver a terminal error to the guest and then
+// close the channel. Unlike [`acrylmicrovm_copy_in_close`], the guest sees a
+// failed stream — a truncated upload can never pass as a clean EOF. Call
+// this when the source read failed mid-transfer. This is a one-shot
+// transition: after the first call (abort or close), later abort calls return
+// `InvalidState`.
+enum AcrylMicrovmErrorCode acrylmicrovm_copy_in_abort(struct CBoxCopyInStream *stream,
+                                            CAcrylMicrovmError *out_error);
+
+// Reclaim a copy-in stream handle.
+//
+// Freeing a stream that was never closed or aborted still drops the
+// channel, so it signals EOF exactly as acrylmicrovm_copy_in_close would — the
+// guest commits whatever it received. Call acrylmicrovm_copy_in_abort first
+// whenever the transfer did not complete; see CBoxCopyInStream for the
+// full sequence.
+void acrylmicrovm_copy_in_free(struct CBoxCopyInStream *stream);
+
+// Get the organization's domains from a REST runtime. A local runtime
+// answers `Unsupported`. Release the handle with `acrylmicrovm_free_domain_handle`.
+//
+// # Safety
+//
+// `runtime` and `out_handle` must be non-null; `out_error` may be null.
+enum AcrylMicrovmErrorCode acrylmicrovm_runtime_domains(CAcrylMicrovmRuntime *runtime,
+                                              CAcrylMicrovmDomainHandle **out_handle,
+                                              CAcrylMicrovmError *out_error);
+
+// List every domain the organization holds, unbound ones included, with the
+// allowance. On `Ok`, `*out_list` must be released with
+// `acrylmicrovm_free_domain_list`.
+//
+// # Safety
+//
+// `handle` and `out_list` must be non-null; `out_error` may be null.
+enum AcrylMicrovmErrorCode acrylmicrovm_domain_list(CAcrylMicrovmDomainHandle *handle,
+                                          struct CDomainList **out_list,
+                                          CAcrylMicrovmError *out_error);
+
+// Route `domain` (an owned full hostname) to
+// `target`, requiring ownership; request names in Dashboard > Domains first. A domain bound elsewhere in the organization
+// moves. On `Ok`, `*out_domain` must be released with `acrylmicrovm_free_domain`.
+//
+// # Safety
+//
+// `handle`, `domain`, `target`, the selected target reference and `out_domain` must be
+// non-null and the strings UTF-8; they only need to stay valid for this
+// call. `out_error` may be null.
+enum AcrylMicrovmErrorCode acrylmicrovm_domain_bind(CAcrylMicrovmDomainHandle *handle,
+                                          const char *domain,
+                                          const struct CDomainTarget *target,
+                                          struct CDomain **out_domain,
+                                          CAcrylMicrovmError *out_error);
+
+// Stop routing a full hostname, keeping it for the organization. Safe to repeat; a
+// domain the organization does not hold is `NotFound`.
+//
+// # Safety
+//
+// `handle` and `domain` must be non-null; `domain` must be UTF-8 and only
+// needs to stay valid for this call. `out_error` may be null.
+enum AcrylMicrovmErrorCode acrylmicrovm_domain_unbind(CAcrylMicrovmDomainHandle *handle,
+                                            const char *domain,
+                                            CAcrylMicrovmError *out_error);
+
+// Free the local management handle returned by `acrylmicrovm_runtime_domains`.
+// Existing domain bindings are unaffected.
+//
+// # Safety
+//
+// `handle` must be null or a pointer from `acrylmicrovm_runtime_domains` that has
+// not been freed. It must not be used afterwards.
+void acrylmicrovm_free_domain_handle(CAcrylMicrovmDomainHandle *handle);
+
+// Free a domain `acrylmicrovm_domain_bind` returned.
+//
+// # Safety
+//
+// `domain` must be null or a pointer this library handed out that has not
+// been freed.
+void acrylmicrovm_free_domain(struct CDomain *domain);
+
+// Free a list `acrylmicrovm_domain_list` returned, and every domain in it.
+//
+// # Safety
+//
+// `list` must be null or a pointer this library handed out that has not been
+// freed.
+void acrylmicrovm_free_domain_list(struct CDomainList *list);
+
+void acrylmicrovm_error_free(CAcrylMicrovmError *error);
+
+// Recover control of a live execution without claiming its output reader.
+// Freeing this handle releases control only; it never kills the process.
+enum AcrylMicrovmErrorCode acrylmicrovm_box_executions_get(CBoxHandle *handle,
+                                                 const char *execution_id,
+                                                 CExecutionHandle **out_execution,
+                                                 CAcrylMicrovmError *out_error);
+
+// Attach live streams to an existing guest execution. A current reader causes
+// an immediate conflict error rather than stealing output. This never boots
+// the box; freeing the attached handle does not kill the guest process.
+enum AcrylMicrovmErrorCode acrylmicrovm_box_executions_attach(CBoxHandle *handle,
+                                                    const char *execution_id,
+                                                    CExecutionHandle **out_execution,
+                                                    CAcrylMicrovmError *out_error);
+
+// Attach output only, without opening a stdin channel.
+//
+// Use this for a client that never writes. Freeing a stdin-attached handle
+// sends a stdin close to the guest, which a process reading stdin observes as
+// EOF — it can exit or change state on it. A read-only attach sends nothing on
+// free. A current reader still causes an immediate conflict error.
+enum AcrylMicrovmErrorCode acrylmicrovm_box_executions_attach_read_only(CBoxHandle *handle,
+                                                              const char *execution_id,
+                                                              CExecutionHandle **out_execution,
+                                                              CAcrylMicrovmError *out_error);
+
+// Return an owned copy of the canonical guest execution ID. Null means an
+// invalid handle; release a non-null result with `acrylmicrovm_free_string`.
+char *acrylmicrovm_execution_id(CExecutionHandle *execution);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_box_exec(CBoxHandle *handle,
+                                       const struct AcrylMicrovmCommand *cmd,
+                                       CExecutionHandle **out_execution,
+                                       CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_execution_on_stdout(CExecutionHandle *execution,
+                                                  CBoxStdoutCb cb,
+                                                  void *user_data,
+                                                  CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_execution_on_stderr(CExecutionHandle *execution,
+                                                  CBoxStderrCb cb,
+                                                  void *user_data,
+                                                  CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_execution_on_exit(CExecutionHandle *execution,
+                                                CBoxExitCb cb,
+                                                void *user_data,
+                                                CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_execution_stdin_write(CExecutionHandle *execution,
+                                                    const uint8_t *data,
+                                                    size_t len,
+                                                    CAcrylMicrovmError *out_error);
+
+// Close the execution's stdin stream, signaling EOF to the guest process.
+//
+// Synchronous and idempotent: dropping the stdin sender closes the underlying
+// mpsc channel; subsequent writes return `InvalidState`; a second close is a
+// no-op. Used by clients that want to terminate input without killing the
+// process (e.g. `cat`/`wc`/`sort` waiting on stdin EOF).
+enum AcrylMicrovmErrorCode acrylmicrovm_execution_stdin_close(CExecutionHandle *execution,
+                                                    CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_execution_wait(CExecutionHandle *execution,
+                                             CExecutionWaitCb cb,
+                                             void *user_data,
+                                             CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_execution_kill(CExecutionHandle *execution,
+                                             CExecutionKillCb cb,
+                                             void *user_data,
+                                             CAcrylMicrovmError *out_error);
+
+// Send an arbitrary Unix signal to the execution. `sig` is the signal
+// number (e.g. 2 = SIGINT, 15 = SIGTERM). `acrylmicrovm_execution_kill`
+// remains the dedicated SIGKILL+evict entrypoint; this function is for
+// graceful and non-terminal signals (HUP/INT/TERM/WINCH/...) that should
+// not tear down the per-execution bookkeeping.
+enum AcrylMicrovmErrorCode acrylmicrovm_execution_signal(CExecutionHandle *execution,
+                                               int sig,
+                                               CExecutionSignalCb cb,
+                                               void *user_data,
+                                               CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_execution_tty_resize(CExecutionHandle *execution,
+                                                   int rows,
+                                                   int cols,
+                                                   CExecutionResizeCb cb,
+                                                   void *user_data,
+                                                   CAcrylMicrovmError *out_error);
+
+void acrylmicrovm_execution_free(CExecutionHandle *execution);
+
+// Callback owns the returned list; errors are borrowed during dispatch only.
+enum AcrylMicrovmErrorCode acrylmicrovm_box_executions_list(CBoxHandle *handle,
+                                                  CExecutionInfoListCb cb,
+                                                  void *user_data,
+                                                  CAcrylMicrovmError *out_error);
+
+// Free the list and all IDs/argv strings. Null is accepted.
+void acrylmicrovm_free_execution_info_list(struct CExecutionInfoList *list);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_simple_new(const char *image,
+                                         double cpus,
+                                         int memory_mib,
+                                         CAcrylMicrovmSimple **out_box,
+                                         CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_simple_run(CAcrylMicrovmSimple *box_runner,
+                                         const char *command,
+                                         const char *const *args,
+                                         int argc,
+                                         CAcrylMicrovmExecResult **out_result,
+                                         CAcrylMicrovmError *out_error);
+
+void acrylmicrovm_simple_free(CAcrylMicrovmSimple *box_runner);
+
+void acrylmicrovm_result_free(CAcrylMicrovmExecResult *result);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_image_pull(CAcrylMicrovmImageHandle *handle,
+                                         const char *image_ref,
+                                         CBoxImagePullCb cb,
+                                         void *user_data,
+                                         CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_image_list(CAcrylMicrovmImageHandle *handle,
+                                         CBoxImageListCb cb,
+                                         void *user_data,
+                                         CAcrylMicrovmError *out_error);
+
+// Queue a read of every build held under an image name, such as
+// "docker.io/library/alpine".
+//
+// `Ok` means the request was queued; the callback runs later on the thread
+// calling `acrylmicrovm_runtime_drain`. A name the runtime does not hold reaches
+// the callback as `NotFound`, and a reference with a tag or digest
+// (`"quay.io/acme/app:v1"`) as `InvalidArgument`. `user_data` is passed
+// through unchanged and must stay usable until the callback runs.
+//
+// # Safety
+//
+// `handle`, `name`, and `cb` must be non-null; `name` must be UTF-8 and only
+// needs to stay valid for this call. `out_error` may be null and otherwise
+// receives synchronous queueing failures only. A successful callback owns
+// the detail and must release it with `acrylmicrovm_free_image_detail`; the error
+// pointer is borrowed for the callback only.
+enum AcrylMicrovmErrorCode acrylmicrovm_image_get(CAcrylMicrovmImageHandle *handle,
+                                        const char *name,
+                                        CBoxImageGetCb cb,
+                                        void *user_data,
+                                        CAcrylMicrovmError *out_error);
+
+// Queue removal of an image name, every tag of it, with the same dispatch
+// and argument contract as [`acrylmicrovm_image_get`].
+//
+// The layers stay. On a local runtime a box built from the image fetches the
+// image's configuration from the registry when it next starts. A REST server
+// refuses with `InvalidState` while a box can still boot from the image.
+//
+// # Safety
+//
+// As for [`acrylmicrovm_image_get`]. The callback receives only a borrowed error
+// and has nothing to free.
+enum AcrylMicrovmErrorCode acrylmicrovm_image_remove(CAcrylMicrovmImageHandle *handle,
+                                           const char *name,
+                                           CBoxImageRemoveCb cb,
+                                           void *user_data,
+                                           CAcrylMicrovmError *out_error);
+
+// Queue a read of how many images are held against the allowance, with the
+// same dispatch contract as [`acrylmicrovm_image_get`]. REST runtimes only: on a
+// local runtime the callback receives `Unsupported`.
+//
+// # Safety
+//
+// `handle` and `cb` must be non-null; `out_error` may be null. The usage and
+// error pointers the callback receives are valid only during the callback.
+enum AcrylMicrovmErrorCode acrylmicrovm_image_usage(CAcrylMicrovmImageHandle *handle,
+                                          CBoxImageUsageCb cb,
+                                          void *user_data,
+                                          CAcrylMicrovmError *out_error);
+
+// Queue creation of a catalog alias for a ready version, with the
+// same dispatch contract as [`acrylmicrovm_image_get`]. The callback receives the
+// image as it now is. Boxes already created keep the version they have.
+//
+// `tag` must be one the OCI distribution spec accepts and `digest` a
+// `sha256:` one; either malformed reaches the callback as `InvalidArgument`
+// before anything is sent. REST runtimes only: on a local runtime, which
+// resolves a tag afresh for each new box, the callback receives
+// `Unsupported`.
+//
+// # Safety
+//
+// As for [`acrylmicrovm_image_get`], with `tag` and `digest` held to the same
+// rules as `name`.
+enum AcrylMicrovmErrorCode acrylmicrovm_image_create_alias(CAcrylMicrovmImageHandle *handle,
+                                                 const char *name,
+                                                 const char *alias,
+                                                 const char *digest,
+                                                 CBoxImageGetCb cb,
+                                                 void *user_data,
+                                                 CAcrylMicrovmError *out_error);
+
+// Queue deletion of one catalog alias. Versions and existing boxes remain.
+//
+// # Safety
+//
+// As for [`acrylmicrovm_image_remove`], with `alias` held to the same rules as `name`.
+enum AcrylMicrovmErrorCode acrylmicrovm_image_delete_alias(CAcrylMicrovmImageHandle *handle,
+                                                 const char *name,
+                                                 const char *alias,
+                                                 CBoxImageRemoveCb cb,
+                                                 void *user_data,
+                                                 CAcrylMicrovmError *out_error);
+
+// Create a handle for the registry logins a REST server pulls private images
+// with.
+//
+// On success ownership of `*out_handle` transfers to the caller, which must
+// release it with `acrylmicrovm_registry_free`. A local runtime answers
+// `Unsupported`: it pulls with the logins in its `image_registries` option.
+// `out_error` may be null and otherwise receives synchronous failures.
+//
+// # Safety
+//
+// `images` must be a live image handle and `out_handle` must be non-null
+// and writable. The returned handle must not be used after it is freed.
+enum AcrylMicrovmErrorCode acrylmicrovm_image_registries(CAcrylMicrovmImageHandle *images,
+                                               CAcrylMicrovmRegistryHandle **out_handle,
+                                               CAcrylMicrovmError *out_error);
+
+void acrylmicrovm_image_free(CAcrylMicrovmImageHandle *handle);
+
+void acrylmicrovm_free_image_info_list(struct CImageInfoList *list);
+
+void acrylmicrovm_free_image_pull_result(struct CImagePullResult *result);
+
+// Free a `CImageDetail` with its aliases, versions, and their strings.
+//
+// # Safety
+//
+// `detail` must be null or a pointer handed to a `acrylmicrovm_image_get` or
+// `acrylmicrovm_image_create_alias` callback that has not already been freed.
+void acrylmicrovm_free_image_detail(struct CImageDetail *detail);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_box_info(CBoxHandle *handle,
+                                       CBoxInfoCb cb,
+                                       void *user_data,
+                                       CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_get_info(CAcrylMicrovmRuntime *runtime,
+                                       const char *id_or_name,
+                                       CBoxInfoCb cb,
+                                       void *user_data,
+                                       CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_list_info(CAcrylMicrovmRuntime *runtime,
+                                        CBoxInfoListCb cb,
+                                        void *user_data,
+                                        CAcrylMicrovmError *out_error);
+
+void acrylmicrovm_free_box_info(struct CBoxInfo *info);
+
+void acrylmicrovm_free_box_info_list(struct CBoxInfoList *list);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_box_metrics(CBoxHandle *handle,
+                                          CBoxMetricsCb cb,
+                                          void *user_data,
+                                          CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_runtime_metrics(CAcrylMicrovmRuntime *runtime,
+                                              CRuntimeMetricsCb cb,
+                                              void *user_data,
+                                              CAcrylMicrovmError *out_error);
+
+// Replace inbound policy from {"mode":"enabled","allow_net":[]}.
+// Blocks until applied or rejected. Strings are borrowed for the call.
+enum AcrylMicrovmErrorCode acrylmicrovm_network_update_inbound(CBoxNetworkHandle *network,
+                                                     const char *policy_json,
+                                                     CAcrylMicrovmError *out_error);
+
+// Replace outbound policy from {"mode":"enabled","allow_net":["example.com"]}.
+// An empty enabled allowlist clears restrictions. Blocks until applied or rejected.
+enum AcrylMicrovmErrorCode acrylmicrovm_network_update_outbound(CBoxNetworkHandle *network,
+                                                      const char *policy_json,
+                                                      CAcrylMicrovmError *out_error);
+
+// Borrow the box's network capability into a new owned handle.
+//
+// On success, `*out_network` must be released with `acrylmicrovm_network_free`.
+// Returns `InvalidArgument` for null input/output pointers and writes details
+// to `out_error` when provided.
+enum AcrylMicrovmErrorCode acrylmicrovm_box_network(CBoxHandle *handle,
+                                          CBoxNetworkHandle **out_network,
+                                          CAcrylMicrovmError *out_error);
+
+// Parse a numeric IPv4:port or [IPv6]:port into system socket storage.
+// No DNS lookup is performed. On error, `out_address` is unchanged.
+// Output storage is owned by the caller and needs no cleanup.
+enum AcrylMicrovmErrorCode acrylmicrovm_socket_address_parse(const char *address,
+                                                   struct sockaddr_storage *out_address,
+                                                   CAcrylMicrovmError *out_error);
+
+// Return a newly allocated canonical address string.
+enum AcrylMicrovmErrorCode acrylmicrovm_tunnel_forwarder_address(CTunnelForwarderHandle *forwarder,
+                                                       char **out_address,
+                                                       CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_tunnel_forwarder_wait(CTunnelForwarderHandle *forwarder,
+                                                    CTunnelForwarderWaitCb cb,
+                                                    void *user_data,
+                                                    CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_tunnel_forwarder_close(CTunnelForwarderHandle *forwarder,
+                                                     CTunnelForwarderCloseCb cb,
+                                                     void *user_data,
+                                                     CAcrylMicrovmError *out_error);
+
+// Initiate non-blocking cancellation and release the caller's handle.
+void acrylmicrovm_tunnel_forwarder_free(CTunnelForwarderHandle *forwarder);
+
+// Release a network handle. Accepts NULL and does not affect the box handle.
+void acrylmicrovm_network_free(CBoxNetworkHandle *network);
+
+// Prepare a one-shot tunnel to `target`, the service's TCP address as seen
+// from the box.
+//
+// `target` must point to a complete sockaddr_storage containing an AF_INET or
+// AF_INET6 address; do not cast a pointer to a smaller sockaddr_in/in6 object.
+// Use acrylmicrovm_socket_address_parse to initialize it. The IP must be loopback
+// or the guest IP, with a non-zero port and zero IPv6 scope/flow information.
+// Set options->is_public=false for private cloud access; NULL defaults to public.
+// Address and options are borrowed for this call only.
+// On success, `*out_tunnel` owns a handle that must be released with
+// `acrylmicrovm_tunnel_free`. Returns `InvalidArgument` for a null
+// network/target/output pointer or an invalid target or options, with details
+// written to `out_error` when provided.
+enum AcrylMicrovmErrorCode acrylmicrovm_network_tunnel(CBoxNetworkHandle *network,
+                                             const struct sockaddr_storage *target,
+                                             const struct AcrylMicrovmTunnelOptions *options,
+                                             CBoxTunnelHandle **out_tunnel,
+                                             CAcrylMicrovmError *out_error);
+
+// Revoke the tunnel for `port` in the box.
+//
+// Safe to repeat. Connections already open are not closed. Returns
+// `InvalidArgument` for a null network pointer or port zero.
+enum AcrylMicrovmErrorCode acrylmicrovm_network_revoke_tunnel(CBoxNetworkHandle *network,
+                                                    uint16_t port,
+                                                    CAcrylMicrovmError *out_error);
+
+// Release an unconsumed tunnel. Existing connections and forwarders remain alive.
+void acrylmicrovm_tunnel_free(CBoxTunnelHandle *tunnel);
+
+// Read the public URL of a remotely served tunnel, without consuming it.
+// It stays readable after connect or forward consumes the tunnel.
+//
+// On success `*out_uri` is an allocated string the caller must release with
+// `acrylmicrovm_free_string`, or NULL for a local tunnel — a local descriptor is
+// already a live connection, so it has no address; use
+// `acrylmicrovm_tunnel_connect` for those. Errors are returned as a
+// `AcrylMicrovmErrorCode` and described through `out_error` when provided.
+enum AcrylMicrovmErrorCode acrylmicrovm_tunnel_uri(CBoxTunnelHandle *tunnel,
+                                         char **out_uri,
+                                         CAcrylMicrovmError *out_error);
+
+// Read JSON containing uri, isPublic, and token (full on creation, masked later).
+// It stays readable after connect or forward consumes the tunnel.
+// Release the result with acrylmicrovm_free_string.
+enum AcrylMicrovmErrorCode acrylmicrovm_tunnel_descriptor(CBoxTunnelHandle *tunnel,
+                                                char **out_json,
+                                                CAcrylMicrovmError *out_error);
+
+// Consume the tunnel and return its owned file descriptor.
+//
+// On success, the caller owns `*out_fd` and must close it.
+// On failure `*out_fd` remains -1 and `out_error`
+// receives details when provided.
+enum AcrylMicrovmErrorCode acrylmicrovm_tunnel_connect(CBoxTunnelHandle *tunnel,
+                                             int32_t *out_fd,
+                                             CAcrylMicrovmError *out_error);
+
+// Bind a local listener synchronously and start forwarding accepted clients.
+enum AcrylMicrovmErrorCode acrylmicrovm_tunnel_forward(CBoxTunnelHandle *tunnel,
+                                             const struct AcrylMicrovmSocketAddress *listen,
+                                             CTunnelForwarderHandle **out_forwarder,
+                                             CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_options_new(const char *image,
+                                          CAcrylMicrovmOptions **out_opts,
+                                          CAcrylMicrovmError *out_error);
+
+void acrylmicrovm_options_set_rootfs_path(CAcrylMicrovmOptions *opts, const char *path);
+
+// Create the box from a REST-managed checkpoint instead of the image.
+//
+// The box inherits the checkpoint's saved settings, so every other option
+// must stay unset; only the name may accompany it. Local runtimes fail the
+// create with an unsupported error.
+void acrylmicrovm_options_set_checkpoint(CAcrylMicrovmOptions *opts, const char *checkpoint);
+
+void acrylmicrovm_options_set_name(CAcrylMicrovmOptions *opts, const char *name);
+
+void acrylmicrovm_options_set_cpus(CAcrylMicrovmOptions *opts, double cpus);
+
+void acrylmicrovm_options_set_memory(CAcrylMicrovmOptions *opts, int memory_mib);
+
+void acrylmicrovm_options_set_disk_size_gb(CAcrylMicrovmOptions *opts, int disk_size_gb);
+
+void acrylmicrovm_options_set_workdir(CAcrylMicrovmOptions *opts, const char *workdir);
+
+void acrylmicrovm_options_set_user(CAcrylMicrovmOptions *opts, const char *user);
+
+void acrylmicrovm_options_add_env(CAcrylMicrovmOptions *opts, const char *key, const char *val);
+
+// Bind a host directory or file into the box.
+//
+// Host bind mounts are local-runtime only; a REST runtime rejects them at
+// create. Use [`acrylmicrovm_options_add_managed_volume`] against a REST runtime.
+void acrylmicrovm_options_add_bind_mount(CAcrylMicrovmOptions *opts,
+                                    const char *host_path,
+                                    const char *guest_path,
+                                    int read_only);
+
+// Mount a managed volume, addressed by its server-assigned id **or** by its
+// name — the server resolves either.
+//
+// `managed_volume` is the volume's id or name (`"my-data"`, `"vol_01K2…"`).
+// Managed volumes need a REST runtime; the local runtime has no volume backend
+// and rejects one at create.
+//
+// A NULL `opts`, `managed_volume`, or `guest_path` is ignored, matching
+// [`acrylmicrovm_options_add_bind_mount`].
+void acrylmicrovm_options_add_managed_volume(CAcrylMicrovmOptions *opts,
+                                        const char *managed_volume,
+                                        const char *guest_path,
+                                        int read_only);
+
+// Forward `host_port` on the host to `guest_port` inside the box.
+//
+// - `host_port`: 0 = let the OS select an available host port.
+// - `guest_port`: required, 1-65535.
+// - `host_ip`: bind address; NULL or "" = all host interfaces.
+//
+// Returns `InvalidArgument` if `opts` is NULL, `guest_port` is 0, or
+// `host_ip` is not valid UTF-8.
+enum AcrylMicrovmErrorCode acrylmicrovm_options_add_port(CAcrylMicrovmOptions *opts,
+                                               uint16_t host_port,
+                                               uint16_t guest_port,
+                                               enum AcrylMicrovmPortProtocol protocol,
+                                               const char *host_ip);
+
+void acrylmicrovm_options_set_network_enabled(CAcrylMicrovmOptions *opts);
+
+void acrylmicrovm_options_set_network_disabled(CAcrylMicrovmOptions *opts);
+
+// Adds one entry to the outbound allowlist. Patterns: exact host,
+// "*.example.com", IPv4, or IPv4 CIDR; anything else fails at create.
+//
+// A non-empty allowlist restricts both TCP and UDP egress. Hostname entries
+// are enforced by TLS SNI / HTTP Host inspection, which only TCP carries, so
+// an allowlist holding only hostnames denies all UDP egress — add the IP or
+// CIDR to keep UDP open. A host matched by a configured secret is
+// additionally reachable on port 443 without an entry of its own, so this
+// allowlist is not the only egress gate. That connection is dialed by name,
+// and under a non-empty allowlist an answer in a private, loopback or CGNAT
+// range is refused unless an IP or CIDR rule covers it.
+void acrylmicrovm_options_add_network_allow(CAcrylMicrovmOptions *opts, const char *host);
+
+// Enables exposed services subject to each tunnel's access policy.
+// Mirrors `acrylmicrovm_options_set_network_enabled` for the inbound direction.
+void acrylmicrovm_options_set_network_inbound_enabled(CAcrylMicrovmOptions *opts);
+
+// Marks services the box exposes as unreachable from outside the box (the
+// default). Mirrors `acrylmicrovm_options_set_network_disabled` for the
+// inbound direction.
+void acrylmicrovm_options_set_network_inbound_disabled(CAcrylMicrovmOptions *opts);
+
+void acrylmicrovm_options_add_secret(CAcrylMicrovmOptions *opts,
+                                const char *name,
+                                const char *value,
+                                const char *placeholder,
+                                const char *const *hosts,
+                                int hosts_count);
+
+// Add a secret with parallel header-name and template arrays.
+// At least one entry is required at creation; zero entries and empty strings are rejected by Rust.
+// # Safety
+// Every non-null options pointer must reference a live, exclusively accessible
+// options handle for the duration of this call. Non-null string pointers must
+// reference readable NUL-terminated strings. For positive counts, each non-null
+// array must contain at least that many readable pointer entries; every non-null
+// entry must reference a readable NUL-terminated string. Header name and template
+// arrays both use `headers_count`; the hosts array uses `hosts_count`.
+void acrylmicrovm_options_add_secret_with_headers(CAcrylMicrovmOptions *opts,
+                                             const char *name,
+                                             const char *value,
+                                             const char *placeholder,
+                                             const char *const *hosts,
+                                             int hosts_count,
+                                             const char *const *header_names,
+                                             const char *const *header_templates,
+                                             int headers_count);
+
+// Deprecated: use `acrylmicrovm_options_set_auto_delete_interval`.
+void acrylmicrovm_options_set_auto_remove(CAcrylMicrovmOptions *opts, int val);
+
+// Set how long an idle box may remain paused before the runtime pauses it.
+//
+// The value is expressed in seconds. `0` preserves the runtime/control-plane
+// default. A null options pointer is treated as a no-op.
+void acrylmicrovm_options_set_auto_stop_interval(CAcrylMicrovmOptions *opts, uint32_t seconds);
+
+// Set how long a stopped box may remain before the runtime deletes it.
+//
+// The value is expressed in seconds. `0` disables automatic deletion for
+// persistent boxes. A null options pointer is treated as a no-op.
+void acrylmicrovm_options_set_auto_delete_interval(CAcrylMicrovmOptions *opts, uint32_t seconds);
+
+// Configure whether stopped boxes may automatically resume on demand.
+//
+// Any non-zero `val` enables auto-resume; `0` disables it. A null options
+// pointer is treated as a no-op.
+void acrylmicrovm_options_set_auto_resume_enabled(CAcrylMicrovmOptions *opts, int val);
+
+void acrylmicrovm_options_set_detach(CAcrylMicrovmOptions *opts, int val);
+
+// Apply a `CAdvancedBoxOptions` (capabilities, security, mount isolation, health check) to a
+// `CAcrylMicrovmOptions`. Clones the advanced configuration into the box options —
+// the caller retains ownership of `advanced_opts` and is responsible for
+// freeing it via `acrylmicrovm_advanced_options_free`.
+//
+// Either pointer being null is a no-op. Security is reached through the
+// advanced layer, mirroring the core model (`BoxOptions.advanced.security`):
+// build the `CAdvancedBoxOptions` handle via `acrylmicrovm_advanced_options_new`,
+// toggle the sandbox with `acrylmicrovm_advanced_options_set_security_enabled`,
+// then apply it here.
+void acrylmicrovm_options_set_advanced(CAcrylMicrovmOptions *opts, const CAdvancedBoxOptions *advanced_opts);
+
+void acrylmicrovm_options_set_entrypoint(CAcrylMicrovmOptions *opts, const char *const *args, int argc);
+
+void acrylmicrovm_options_set_cmd(CAcrylMicrovmOptions *opts, const char *const *args, int argc);
+
+void acrylmicrovm_options_free(CAcrylMicrovmOptions *opts);
+
+// Queue a read of every login the organization holds, oldest first.
+//
+// `Ok` means the request was queued; the callback runs later on the thread
+// calling `acrylmicrovm_runtime_drain`. `user_data` is passed through unchanged
+// and must stay usable until the callback runs.
+//
+// # Safety
+//
+// `handle` and `cb` must be non-null. `out_error` may be null and otherwise
+// receives synchronous queueing failures only. A successful callback owns the
+// list and must release it with `acrylmicrovm_free_registry_credential_list`; the
+// error pointer is borrowed for the callback only.
+enum AcrylMicrovmErrorCode acrylmicrovm_registry_list(CAcrylMicrovmRegistryHandle *handle,
+                                            CBoxRegistryListCb cb,
+                                            void *user_data,
+                                            CAcrylMicrovmError *out_error);
+
+// Queue adding a login, with the same dispatch contract as
+// [`acrylmicrovm_registry_list`].
+//
+// `repository_prefix` is whole path segments ending in "/", such as "acme/",
+// or null for the whole registry. The strings are copied before this returns;
+// the password is sent once and never returned. A login already held for the
+// same registry and prefix reaches the callback as `AlreadyExists`.
+//
+// # Safety
+//
+// `handle`, `registry_host`, `username`, `password` and `cb` must be
+// non-null and UTF-8; `repository_prefix` may be null. `out_error` may be
+// null. A successful callback owns the login and must release it with
+// `acrylmicrovm_free_registry_credential`.
+enum AcrylMicrovmErrorCode acrylmicrovm_registry_create(CAcrylMicrovmRegistryHandle *handle,
+                                              const char *registry_host,
+                                              const char *repository_prefix,
+                                              const char *username,
+                                              const char *password,
+                                              CBoxRegistryCreateCb cb,
+                                              void *user_data,
+                                              CAcrylMicrovmError *out_error);
+
+// Queue removing a login by id, with the same dispatch contract as
+// [`acrylmicrovm_registry_list`].
+//
+// An id that is not a UUID reaches the callback as `InvalidArgument` without
+// a request; a login a box still pulls through as `InvalidState`, naming the
+// boxes; an unknown id as `NotFound`.
+//
+// # Safety
+//
+// `handle`, `id` and `cb` must be non-null; `id` must be UTF-8 and only needs
+// to stay valid for this call. `out_error` may be null. The callback receives
+// only a borrowed error and has nothing to free.
+enum AcrylMicrovmErrorCode acrylmicrovm_registry_remove(CAcrylMicrovmRegistryHandle *handle,
+                                              const char *id,
+                                              CBoxRegistryRemoveCb cb,
+                                              void *user_data,
+                                              CAcrylMicrovmError *out_error);
+
+// Free a handle returned by `acrylmicrovm_image_registries`.
+//
+// # Safety
+//
+// `handle` must be null or a pointer from `acrylmicrovm_image_registries` that
+// has not been freed. It must not be used afterwards.
+void acrylmicrovm_registry_free(CAcrylMicrovmRegistryHandle *handle);
+
+// Free a login a create callback received.
+//
+// # Safety
+//
+// `credential` must be null or a pointer this library handed out that has
+// not been freed.
+void acrylmicrovm_free_registry_credential(struct CRegistryCredential *credential);
+
+// Free a list a list callback received, and every login in it.
+//
+// # Safety
+//
+// `list` must be null or a pointer this library handed out that has not been
+// freed.
+void acrylmicrovm_free_registry_credential_list(struct CRegistryCredentialList *list);
+
+// Create an API-key credential.
+//
+// # Arguments
+// - `key`: opaque API key sent as `Authorization: Bearer` (required).
+// - `out_credential`: receives the credential handle on success.
+// - `out_error`: receives error code + message on failure (nullable).
+//
+// Returns `AcrylMicrovmErrorCode::Ok` on success. Free the handle with
+// `acrylmicrovm_credential_free`.
+//
+// # Safety
+// `out_credential` must be non-NULL; `key` must be a valid C string.
+enum AcrylMicrovmErrorCode acrylmicrovm_api_key_credential_new(const char *key,
+                                                     CAcrylMicrovmCredential **out_credential,
+                                                     CAcrylMicrovmError *out_error);
+
+// Free a credential handle. No-op on NULL.
+//
+// # Safety
+// `credential` must be a handle from `acrylmicrovm_api_key_credential_new`
+// or NULL, and must not be used after this call.
+void acrylmicrovm_credential_free(CAcrylMicrovmCredential *credential);
+
+// Create REST options for `url` (no credential, server-default prefix).
+//
+// # Arguments
+// - `url`: REST API base URL (required, e.g. `https://api.example.com`).
+// - `out_options`: receives the options handle on success.
+// - `out_error`: receives error code + message on failure (nullable).
+//
+// Returns `AcrylMicrovmErrorCode::Ok` on success. Free the handle with
+// `acrylmicrovm_rest_options_free`.
+//
+// # Safety
+// `out_options` must be non-NULL; `url` must be a valid C string.
+enum AcrylMicrovmErrorCode acrylmicrovm_rest_options_new(const char *url,
+                                               CAcrylMicrovmRestOptions **out_options,
+                                               CAcrylMicrovmError *out_error);
+
+// Attach a credential to the options. The credential's inner reference
+// is cloned into the options, so the caller still owns `credential`
+// and must free it independently with `acrylmicrovm_credential_free`.
+// No-op if either pointer is NULL.
+//
+// # Safety
+// `options` and `credential` must be valid handles or NULL.
+void acrylmicrovm_rest_options_set_credential(CAcrylMicrovmRestOptions *options,
+                                         const CAcrylMicrovmCredential *credential);
+
+// Set the routing-slot value substituted into the `{prefix}`
+// URL segment on box-scoped requests. Opaque — the server tells
+// the client what to use here via `Principal.path_prefix` from
+// `GET /v1/me`. No-op if `options` is NULL or `path_prefix` is
+// not a valid C string. When unset, the client builds URLs
+// without the segment (`/v1/boxes/...`) — the single-tenant
+// deployment shape.
+//
+// # Safety
+// `options` must be a valid handle or NULL; `path_prefix` a valid
+// C string or NULL.
+void acrylmicrovm_rest_options_set_path_prefix(CAcrylMicrovmRestOptions *options, const char *path_prefix);
+
+// Free a REST options handle. No-op on NULL.
+//
+// # Safety
+// `options` must be a handle from `acrylmicrovm_rest_options_new` or NULL,
+// and must not be used after this call.
+void acrylmicrovm_rest_options_free(CAcrylMicrovmRestOptions *options);
+
+// Create a runtime that connects to a remote ACRYL microVMs REST server using
+// the supplied options.
+//
+// # Arguments
+// - `options`: a handle from `acrylmicrovm_rest_options_new` (required).
+// - `out_runtime`: receives the runtime handle on success.
+// - `out_error`: receives error code + message on failure (nullable).
+//
+// Returns `AcrylMicrovmErrorCode::Ok` on success. The runtime handle is
+// freed with `acrylmicrovm_runtime_free`. `options` is unchanged and must
+// still be freed by the caller with `acrylmicrovm_rest_options_free`.
+//
+// # Safety
+// `options` and `out_runtime` must be non-NULL.
+enum AcrylMicrovmErrorCode acrylmicrovm_rest_runtime_new_with_options(const CAcrylMicrovmRestOptions *options,
+                                                            CAcrylMicrovmRuntime **out_runtime,
+                                                            CAcrylMicrovmError *out_error);
+
+const char *acrylmicrovm_version(void);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_runtime_new(const char *home_dir,
+                                          const struct AcrylMicrovmImageRegistry *image_registries,
+                                          int image_registries_count,
+                                          CAcrylMicrovmRuntime **out_runtime,
+                                          CAcrylMicrovmError *out_error);
+
+// Create a local runtime with an explicit comma-separated RC feature allowlist
+// (for example, "custom-kernel"). Null enables none; unknown tokens fail.
+// Does not read ACRYLMICROVM_EXPERIMENTAL. Ownership matches acrylmicrovm_runtime_new.
+enum AcrylMicrovmErrorCode acrylmicrovm_runtime_new_experimental(const char *home_dir,
+                                                       const struct AcrylMicrovmImageRegistry *image_registries,
+                                                       int image_registries_count,
+                                                       const char *features,
+                                                       CAcrylMicrovmRuntime **out_runtime,
+                                                       CAcrylMicrovmError *out_error);
+
+enum AcrylMicrovmErrorCode acrylmicrovm_runtime_images(CAcrylMicrovmRuntime *runtime,
+                                             CAcrylMicrovmImageHandle **out_handle,
+                                             CAcrylMicrovmError *out_error);
+
+// Create a runtime-scoped named-volume handle.
+//
+// On success ownership of `*out_handle` transfers to the caller, which must
+// release it with `acrylmicrovm_volume_free`. The handle may submit operations from
+// multiple threads; callbacks run only while the parent runtime is drained.
+// `out_error` may be null and otherwise receives synchronous failures.
+//
+// # Safety
+//
+// `runtime` must be a live runtime pointer and `out_handle` must be non-null
+// and writable. The returned handle must not be used after it is freed.
+enum AcrylMicrovmErrorCode acrylmicrovm_runtime_volumes(CAcrylMicrovmRuntime *runtime,
+                                              CAcrylMicrovmVolumeHandle **out_handle,
+                                              CAcrylMicrovmError *out_error);
+
+// Async + callback variant of runtime shutdown.
+//
+// Spawns a Tokio task that calls `AcrylMicrovmRuntime::shutdown` and posts a
+// `RuntimeEvent::Shutdown` to the runtime queue. Marks liveness as closed
+// synchronously so subsequent ops fail fast.
+enum AcrylMicrovmErrorCode acrylmicrovm_runtime_shutdown(CAcrylMicrovmRuntime *runtime,
+                                               int timeout_secs,
+                                               CRuntimeShutdownCb cb,
+                                               void *user_data,
+                                               CAcrylMicrovmError *out_error);
+
+void acrylmicrovm_runtime_free(CAcrylMicrovmRuntime *runtime);
+
+// Drain pending callbacks for `runtime`, dispatching them on the calling
+// thread. The queue lock is released before any user code runs.
+//
+// `timeout_ms`:
+//   - `0`  : non-blocking poll
+//   - `< 0`: block indefinitely until at least one event is available
+//   - `> 0`: block up to that many milliseconds
+//
+// Returns the number of dispatched events, or `-1` on error.
+int acrylmicrovm_runtime_drain(CAcrylMicrovmRuntime *runtime, int timeout_ms, CAcrylMicrovmError *out_error);
+
+// Queue SSH configuration replacement. The caller's JSON is copied and
+// deserialized into the runtime's `SshConfig` at entry — a malformed or
+// non-UTF-8 body returns `InvalidArgument` with a constant message before
+// anything is queued, so key material never reaches the error. The core
+// applies its own startup policy: with an explicit main command a Configured
+// or Stopped box fails the callback with `InvalidState`.
+//
+// # Safety
+//
+// `handle`, `config_json`, and `cb` must be non-null; `config_json` must be
+// UTF-8 and only needs to stay valid for this call. A successful callback
+// owns the status and must release it with `acrylmicrovm_free_ssh_status`; the
+// error pointer is borrowed for the callback only.
+enum AcrylMicrovmErrorCode acrylmicrovm_box_ssh_configure(CBoxHandle *handle,
+                                                const char *config_json,
+                                                CBoxSshConfigureCb cb,
+                                                void *user_data,
+                                                struct FFIError *out_error);
+
+// Queue a read of SSH state. Never starts the VM or its main command: a
+// Configured or Stopped box completes with disabled status, generation zero,
+// and empty fields.
+//
+// # Safety
+//
+// `handle` and `cb` must be non-null. Ownership is as for
+// [`acrylmicrovm_box_ssh_configure`].
+enum AcrylMicrovmErrorCode acrylmicrovm_box_ssh_status(CBoxHandle *handle,
+                                             CBoxSshStatusCb cb,
+                                             void *user_data,
+                                             struct FFIError *out_error);
+
+// Enable saved SSH configuration on a running box without restarting a healthy
+// listener. Requires existing configuration; never starts the box.
+// A valid handle to a configured or stopped box fails the callback with
+// `InvalidState` without changing saved SSH intent.
+//
+// # Safety
+//
+// As for [`acrylmicrovm_box_ssh_status`].
+enum AcrylMicrovmErrorCode acrylmicrovm_box_ssh_enable(CBoxHandle *handle,
+                                             CBoxSshEnableCb cb,
+                                             void *user_data,
+                                             struct FFIError *out_error);
+
+// Queue SSH shutdown on a running box, disconnecting clients. Repeated calls
+// succeed while running; never starts the box. A valid handle to a configured
+// or stopped box fails the callback with `InvalidState` without changing saved
+// SSH intent.
+// Disable while running to persist the disabled switch.
+//
+// # Safety
+//
+// As for [`acrylmicrovm_box_ssh_status`].
+enum AcrylMicrovmErrorCode acrylmicrovm_box_ssh_disable(CBoxHandle *handle,
+                                              CBoxSshDisableCb cb,
+                                              void *user_data,
+                                              struct FFIError *out_error);
+
+// Release a status handed to an SSH callback.
+//
+// # Safety
+//
+// `status` must be null or a pointer from an SSH callback that has not
+// already been freed.
+void acrylmicrovm_free_ssh_status(struct CSshStatus *status);
+
+void acrylmicrovm_free_string(char *s);
+
+// Queue asynchronous volume creation.
+//
+// `Ok` means queueing succeeded. The callback runs later on the thread calling
+// `acrylmicrovm_runtime_drain`; successful metadata ownership transfers to it.
+// Calls may be submitted concurrently. `user_data` is passed through unchanged
+// and must remain usable by the caller until callback dispatch.
+//
+// # Safety
+//
+// `handle` and `cb` must be non-null. `out_error` may be null; otherwise it must
+// be writable and receives synchronous queueing failures only. The handle must
+// remain valid until this function returns. A successful callback must release
+// its metadata with `acrylmicrovm_free_volume_info`; the error pointer is borrowed.
+enum AcrylMicrovmErrorCode acrylmicrovm_volume_create(CAcrylMicrovmVolumeHandle *handle,
+                                            const char *name,
+                                            CBoxVolumeCreateCb cb,
+                                            void *user_data,
+                                            CAcrylMicrovmError *out_error);
+
+// Queue asynchronous volume listing with the same dispatch, concurrency, and
+// `user_data` contract as [`acrylmicrovm_volume_create`].
+//
+// # Safety
+//
+// `handle` and `cb` must be non-null; `out_error` may be null. A successful
+// callback owns its list and must call `acrylmicrovm_free_volume_info_list`.
+enum AcrylMicrovmErrorCode acrylmicrovm_volume_list(CAcrylMicrovmVolumeHandle *handle,
+                                          CBoxVolumeListCb cb,
+                                          void *user_data,
+                                          CAcrylMicrovmError *out_error);
+
+// Queue asynchronous lookup of a volume by id with the same dispatch,
+// concurrency, and `user_data` contract as [`acrylmicrovm_volume_create`].
+//
+// # Safety
+//
+// `handle`, `id`, and `cb` must be non-null. `id` must contain UTF-8 and only
+// needs to remain valid for this call. `out_error` may be null. A successful
+// callback owns its metadata and must call `acrylmicrovm_free_volume_info`.
+enum AcrylMicrovmErrorCode acrylmicrovm_volume_get(CAcrylMicrovmVolumeHandle *handle,
+                                         const char *id,
+                                         CBoxVolumeGetCb cb,
+                                         void *user_data,
+                                         CAcrylMicrovmError *out_error);
+
+// Queue asynchronous removal of a volume by id with the same dispatch,
+// concurrency, and `user_data` contract as [`acrylmicrovm_volume_create`]. A
+// non-zero `force` requests success when the volume is absent.
+//
+// # Safety
+//
+// `handle`, `id`, and `cb` must be non-null. `id` must contain UTF-8 and only
+// needs to remain valid for this call. `out_error` may be null. Callback
+// arguments are borrowed for dispatch and require no result deallocation.
+enum AcrylMicrovmErrorCode acrylmicrovm_volume_remove(CAcrylMicrovmVolumeHandle *handle,
+                                            const char *id,
+                                            int force,
+                                            CBoxVolumeRemoveCb cb,
+                                            void *user_data,
+                                            CAcrylMicrovmError *out_error);
+
+// Free a volume handle returned by `acrylmicrovm_runtime_volumes`.
+//
+// # Safety
+//
+// `handle` must be null or a pointer previously returned by
+// `acrylmicrovm_runtime_volumes` that has not already been freed. Callers must not
+// use the handle after this function returns.
+void acrylmicrovm_volume_free(CAcrylMicrovmVolumeHandle *handle);
+
+// Free a standalone `CVolumeInfo` and its owned strings.
+//
+// # Safety
+//
+// `info` must be null or a pointer allocated by this module that has not
+// already been freed.
+void acrylmicrovm_free_volume_info(struct CVolumeInfo *info);
+
+// Free a `CVolumeInfoList`, all entries, and their owned strings.
+//
+// # Safety
+//
+// `list` must be null or a pointer allocated by this module that has not
+// already been freed.
+void acrylmicrovm_free_volume_info_list(struct CVolumeInfoList *list);
+
+#ifdef __cplusplus
+}  // extern "C"
+#endif  // __cplusplus
+
+#endif  /* ACRYLMICROVM_H */

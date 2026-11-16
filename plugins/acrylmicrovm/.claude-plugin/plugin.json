@@ -1,0 +1,19 @@
+{
+  "name": "acrylmicrovm",
+  "version": "0.1.0",
+  "description": "Skills for building, deploying and updating apps on AcrylMicrovm cloud.",
+  "author": {
+    "name": "AcrylMicrovm",
+    "url": "https://acryl.dev/acrylmicrovm"
+  },
+  "homepage": "https://docs.acryl.dev",
+  "repository": "https://github.com/acryldev/acrylmicrovm",
+  "license": "Apache-2.0",
+  "keywords": [
+    "acrylmicrovm",
+    "cloud",
+    "deployment",
+    "cli",
+    "skills"
+  ]
+}

@@ -1,0 +1,87 @@
+# Modified by ACRYL, 2026
+"""
+AcrylMicrovm Sync API - Synchronous wrappers using greenlet fiber switching.
+
+This module provides synchronous wrappers for AcrylMicrovm's async API using
+greenlet fiber switching. This allows sync code to execute async operations
+without blocking the event loop.
+
+Architecture:
+- A dispatcher fiber runs the asyncio event loop
+- User code runs in the main fiber
+- _sync() method switches between fibers to execute async operations
+
+Usage:
+    from acrylmicrovm import SyncCodeBox, SyncSimpleBox
+
+    # Simplest usage - standalone (like async API)
+    with SyncCodeBox() as box:
+        result = box.run("print('Hello!')")
+        print(result)
+
+    with SyncSimpleBox(image="alpine:latest") as box:
+        result = box.exec("echo", "Hello")
+        print(result.stdout)
+
+    # Or with explicit runtime (for multiple boxes)
+    from acrylmicrovm import SyncAcrylMicrovm
+
+    with SyncAcrylMicrovm.default() as runtime:
+        box = runtime.create(BoxOptions(image="alpine:latest"))
+        execution = box.exec("echo", ["Hello"])
+        for line in execution.stdout():
+            print(line)
+        box.stop()
+
+Requirements:
+    - greenlet>=3.0.0 (install with: pip install acrylmicrovm[sync])
+
+Note:
+    This API cannot be used from within an async context (e.g., inside
+    an async function or when an event loop is already running).
+    Use the async API (CodeBox, SimpleBox) in those cases.
+"""
+
+from ._agents import SyncAgent, SyncAgents, SyncAgentTurn
+from ._box import SyncBox
+from ._acrylmicrovm import SyncAcrylMicrovm
+from ._checkpoints import SyncCheckpointHandle
+from ._codebox import SyncCodeBox
+from ._domains import SyncDomainHandle
+from ._execution import SyncExecStderr, SyncExecStdout, SyncExecution
+from ._executions import SyncExecutions
+from ._images import SyncImageHandle
+from ._network import SyncNetworkHandle, SyncTunnelForwarder
+from ._registries import SyncRegistryHandle
+from ._simplebox import SyncSimpleBox
+from ._skillbox import SyncSkillBox
+from ._ssh import SyncSshHandle
+from ._sync_base import SyncBase, SyncContextManager
+
+__all__ = [  # noqa: RUF022 - grouped by API area, not alphabetical
+    # Entry point
+    "SyncAgents",
+    "SyncAgent",
+    "SyncAgentTurn",
+    "SyncAcrylMicrovm",
+    # Base classes
+    "SyncBase",
+    "SyncContextManager",
+    # Native API mirrors
+    "SyncBox",
+    "SyncCheckpointHandle",
+    "SyncDomainHandle",
+    "SyncImageHandle",
+    "SyncNetworkHandle",
+    "SyncSshHandle",
+    "SyncRegistryHandle",
+    "SyncTunnelForwarder",
+    "SyncExecution",
+    "SyncExecStdout",
+    "SyncExecStderr",
+    "SyncExecutions",
+    # Convenience wrappers
+    "SyncSimpleBox",
+    "SyncCodeBox",
+    "SyncSkillBox",
+]

@@ -1,0 +1,16 @@
+# Modified by ACRYL, 2026
+# Cloudflare Worker that serves the acrylmicrovm-cli installer at sh.acryl.dev.
+# See README.md in this directory for setup and deploy.
+
+name = "sh-acryldev"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+
+# Cloudflare manages acryl.dev DNS; custom_domain=true makes it auto-create
+# the sh.acryl.dev DNS record and TLS cert on first deploy.
+routes = [
+  { pattern = "sh.acryl.dev", custom_domain = true }
+]
+
+[observability]
+enabled = true

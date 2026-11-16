@@ -1,0 +1,2386 @@
+// Modified by ACRYL, 2026
+//! Tar archive pack/unpack for host↔guest file transfer.
+//!
+//! Both host (acrylmicrovm) and guest agent share this module to avoid
+//! duplicating tar building/extraction logic.
+
+use crate::constants::files::{COPY_CHUNKS_IN_FLIGHT, COPY_CHUNK_SIZE};
+use crate::{BoxByteStream, AcrylMicrovmError, AcrylMicrovmResult};
+use futures::StreamExt;
+use std::collections::HashSet;
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use tokio::sync::mpsc;
+use tokio_stream::wrappers::ReceiverStream;
+
+// ── Pack ──────────────────────────────────────────────────────────
+
+/// Controls how a source path is packed into a tar archive.
+pub struct PackContext {
+    /// Follow symlinks (copy target content) vs preserve them as links.
+    pub follow_symlinks: bool,
+    /// When packing a directory, root the archive at the directory itself
+    /// (`name/`, true) or at its contents (`./`, false — docker's `SRC/.`).
+    ///
+    /// Either way the archive leads with one entry standing for the source.
+    /// Callers holding the caller's raw path derive this with
+    /// [`specifies_current_dir`].
+    pub include_parent: bool,
+}
+
+/// Whether `path` names a directory's contents rather than the directory —
+/// docker's `SRC/.` spelling (`go-archive/copy.go`'s `specifiesCurrentDir`).
+///
+/// Reads the raw bytes on purpose. `Path::components` drops a trailing
+/// `CurDir`, so anything that rebuilds a path through it silently turns
+/// `src/.` into `src` — including `Path::strip_prefix`, which the guest runs
+/// on every container path it resolves. Call this on the caller's path at the
+/// boundary it arrives on, before anything normalizes it.
+pub fn specifies_current_dir(path: &std::ffi::OsStr) -> bool {
+    let bytes = path.as_encoded_bytes();
+    // Trailing separators first, the way `filepath.Base` does: `./` and
+    // `src/./` name the contents just as `.` and `src/.` do.
+    let trimmed = match bytes.iter().rposition(|byte| *byte != b'/') {
+        Some(last) => &bytes[..=last],
+        None => return false,
+    };
+    trimmed == b"." || trimmed.ends_with(b"/.")
+}
+
+/// Pack `src` (file or directory) into a tar archive at `tar_path`.
+///
+/// Runs blocking I/O on a dedicated thread via `spawn_blocking`.
+pub async fn pack(src: PathBuf, tar_path: PathBuf, opts: PackContext) -> AcrylMicrovmResult<()> {
+    tokio::task::spawn_blocking(move || {
+        let tar_file = std::fs::File::create(&tar_path).map_err(|e| {
+            AcrylMicrovmError::Storage(format!(
+                "failed to create tar {}: {}",
+                tar_path.display(),
+                e
+            ))
+        })?;
+        pack_blocking(&src, tar_file, &opts)
+    })
+    .await
+    .map_err(|e| AcrylMicrovmError::Storage(format!("pack task join error: {}", e)))?
+}
+
+/// Pack `src` into `writer` (generic over `std::io::Write`).
+fn pack_blocking<W: Write>(src: &Path, writer: W, opts: &PackContext) -> AcrylMicrovmResult<()> {
+    let mut builder = tar::Builder::new(writer);
+    builder.follow_symlinks(opts.follow_symlinks);
+
+    if src.is_dir() {
+        // The directory's own entry comes first — `append_dir_all` writes it
+        // before any child. The contents form is rooted at `"."`, never `""`:
+        // an empty name makes `append_dir_all` skip the root entry, and an
+        // archive without one cannot be told apart from the archive of
+        // whatever the directory holds. Extraction skips `./` itself.
+        let root = if opts.include_parent {
+            src.file_name()
+                .map(|s| s.to_owned())
+                .unwrap_or_else(|| std::ffi::OsStr::new("root").to_owned())
+        } else {
+            std::ffi::OsStr::new(".").to_owned()
+        };
+        builder
+            .append_dir_all(root, src)
+            .map_err(|e| AcrylMicrovmError::Storage(format!("failed to archive dir: {}", e)))?;
+    } else {
+        let name = src
+            .file_name()
+            .ok_or_else(|| AcrylMicrovmError::Config("source file has no name".into()))?;
+        builder
+            .append_path_with_name(src, name)
+            .map_err(|e| AcrylMicrovmError::Storage(format!("failed to archive file: {}", e)))?;
+    }
+
+    builder
+        .finish()
+        .map_err(|e| AcrylMicrovmError::Storage(format!("failed to finish tar: {}", e)))?;
+
+    // `finish` writes the trailer but not the writer's own pending buffer
+    // (PipeWriter coalesces the final sub-chunk-size bytes). Flush it here
+    // so a dropped consumer surfaces as an error instead of silently
+    // truncating the stream.
+    let mut inner = builder
+        .into_inner()
+        .map_err(|e| AcrylMicrovmError::Storage(format!("failed to finish tar: {}", e)))?;
+    inner
+        .flush()
+        .map_err(|e| AcrylMicrovmError::Storage(format!("failed to flush tar stream: {}", e)))
+}
+
+// ── Stream pack ──────────────────────────────────────────────────
+
+/// Blocking `Write` adapter feeding a bounded channel. Coalesces small writes
+/// into full `COPY_CHUNK_SIZE` messages; `blocking_send` provides backpressure
+/// (a slow consumer throttles the pack thread) and surfaces `BrokenPipe` when
+/// the consumer drops the stream.
+struct PipeWriter {
+    tx: mpsc::Sender<io::Result<Vec<u8>>>,
+    pending: Vec<u8>,
+}
+
+impl PipeWriter {
+    fn send_chunk(&self, chunk: Vec<u8>) -> io::Result<()> {
+        self.tx
+            .blocking_send(Ok(chunk))
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "tar stream consumer dropped"))
+    }
+
+    fn flush_pending(&mut self) -> io::Result<()> {
+        if self.pending.is_empty() {
+            return Ok(());
+        }
+        let chunk = std::mem::take(&mut self.pending);
+        self.send_chunk(chunk)
+    }
+}
+
+impl Write for PipeWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+
+        let write_len = (COPY_CHUNK_SIZE - self.pending.len()).min(buf.len());
+        self.pending.extend_from_slice(&buf[..write_len]);
+        if self.pending.len() == COPY_CHUNK_SIZE {
+            let chunk = std::mem::take(&mut self.pending);
+            self.send_chunk(chunk)?;
+            self.pending = Vec::with_capacity(COPY_CHUNK_SIZE);
+        }
+        Ok(write_len)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.flush_pending()
+    }
+}
+
+impl Drop for PipeWriter {
+    fn drop(&mut self) {
+        let _ = self.flush_pending();
+    }
+}
+
+/// Stream `src` into a tar byte stream.
+///
+/// Returns the source shape (`source_is_dir = src.is_dir()`) alongside the
+/// stream. The pack runs on a `spawn_blocking` thread; a pack failure surfaces
+/// as a terminal `Err` item on the stream.
+pub async fn pack_stream(src: PathBuf, opts: PackContext) -> AcrylMicrovmResult<(bool, BoxByteStream)> {
+    let source_is_dir = src.is_dir();
+    if !src.exists() {
+        return Err(AcrylMicrovmError::NotFound(format!(
+            "source path {} does not exist",
+            src.display()
+        )));
+    }
+    let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>(COPY_CHUNKS_IN_FLIGHT);
+    let writer = PipeWriter {
+        tx: tx.clone(),
+        pending: Vec::with_capacity(COPY_CHUNK_SIZE),
+    };
+    let task_tx = tx;
+    tokio::task::spawn_blocking(move || {
+        let outcome = pack_task_body(&src, writer, &opts);
+        // Report a failure as a terminal stream error through the original
+        // sender, then drop it to signal EOF.
+        if let Err(e) = outcome {
+            let _ = task_tx.blocking_send(Err(io::Error::other(e)));
+        }
+    });
+    Ok((source_is_dir, Box::pin(ReceiverStream::new(rx))))
+}
+
+/// Body of the pack task: runs [`pack_blocking`] under `catch_unwind` so a
+/// panicking pack surfaces as an error (per the stream contract) instead of
+/// ending the stream on a clean EOF that consumers would read as a truncated
+/// archive.
+fn pack_task_body<W: Write>(src: &Path, writer: W, opts: &PackContext) -> AcrylMicrovmResult<()> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        pack_blocking(src, writer, opts)
+    })) {
+        Ok(outcome) => outcome,
+        Err(_) => Err(AcrylMicrovmError::Internal("tar pack task panicked".into())),
+    }
+}
+
+// ── Unpack ────────────────────────────────────────────────────────
+
+/// An error's own message followed by every cause beneath it.
+///
+/// `tar`'s `Display` names the operation it was attempting and drops the errno
+/// that stopped it, so `failed to create \`/x/y\`` reaches the caller with no
+/// hint whether the disk was full, the path was not a directory, or permission
+/// was denied. Walking `source()` puts the reason back.
+fn with_causes(err: &dyn std::error::Error) -> String {
+    let mut detail = err.to_string();
+    let mut cause = err.source();
+    while let Some(next) = cause {
+        detail.push_str(&format!(": {}", next));
+        cause = next.source();
+    }
+    detail
+}
+
+/// Controls how a tar archive is unpacked to a destination.
+pub struct UnpackContext {
+    /// Allow overwriting existing files/directories.
+    pub overwrite: bool,
+    /// Create parent directories if they don't exist.
+    pub mkdir_parents: bool,
+    /// The caller's path names a directory, by a trailing `/` the path may
+    /// have lost since: every entry lands inside `dest`, whatever leads the
+    /// archive.
+    pub force_directory: bool,
+}
+
+/// Paths observed while unpacking a one-shot tar stream.
+#[derive(Debug, Default)]
+pub struct UnpackReport {
+    /// The destination itself was written as a file or symlink, or created
+    /// as a directory. An empty archive leaves this false.
+    pub destination_written: bool,
+    /// Extracted paths relative to the destination, including implied
+    /// directories. A file that lands as the destination itself is not
+    /// listed: it has no path below the destination.
+    pub entry_paths: Vec<PathBuf>,
+    /// Entry directories that existed before streamed extraction reached them.
+    ///
+    /// These paths are relative to the destination and are only collected when
+    /// extracting into a directory.
+    pub preexisting_dirs: Vec<PathBuf>,
+}
+
+/// Unpack a tar archive to `dest`, landing it the way `docker cp` does (see
+/// [`Landing`]).
+///
+/// Runs blocking I/O on a dedicated thread via `spawn_blocking`.
+pub async fn unpack(tar_path: PathBuf, dest: PathBuf, opts: UnpackContext) -> AcrylMicrovmResult<()> {
+    tokio::task::spawn_blocking(move || unpack_blocking(&tar_path, &dest, &opts))
+        .await
+        .map_err(|e| AcrylMicrovmError::Storage(format!("unpack task join error: {}", e)))?
+}
+
+fn unpack_blocking(tar_path: &Path, dest: &Path, opts: &UnpackContext) -> AcrylMicrovmResult<()> {
+    let mut tar_file = std::fs::File::open(tar_path).map_err(|e| {
+        AcrylMicrovmError::Storage(format!("failed to open tar {}: {}", tar_path.display(), e))
+    })?;
+    land(&mut tar_file, dest, opts, &|_| Ok(()), None)
+}
+
+/// Extract a tar archive read from `reader` to `dest`, each entry where
+/// [`Landing`] places it, once `refuse` has passed where it lands.
+fn extract_from_reader<R: Read>(
+    reader: R,
+    dest: &Path,
+    opts: &UnpackContext,
+    refuse: &Refusal<'_>,
+    mut report: Option<&mut UnpackReport>,
+) -> AcrylMicrovmResult<()> {
+    let mut seen = HashSet::new();
+    let mut record = |path: &Path, existing_root: Option<&Path>| {
+        if let Some(report) = report.as_deref_mut() {
+            record_paths(report, &mut seen, existing_root, path);
+        }
+    };
+    let mut landing = Landing::new(dest, opts.force_directory);
+    let mut archive = tar::Archive::new(reader);
+    // The same pass tar::Archive::unpack would run, with one addition: every
+    // extracted name is recorded (sanitized, with implied directories) so
+    // callers can hand the created paths to the box user and refuse entries
+    // the mounts shadow — without consuming the one-shot stream twice.
+    // Directory entries are delayed and sorted the way tar-rs does it
+    // (permissions).
+    let mut directories = Vec::new();
+    for entry in archive
+        .entries()
+        .map_err(|e| AcrylMicrovmError::Storage(format!("failed to read tar entries: {}", e)))?
+    {
+        let mut file =
+            entry.map_err(|e| AcrylMicrovmError::Storage(format!("failed to read tar entry: {}", e)))?;
+        let undecided = !landing.decided();
+        let placed = landing.place(&file)?;
+        // Before `prepare`, so a refused first entry leaves `dest` untouched.
+        if let Some(landed) = &placed {
+            refuse(&landed.name)?;
+        }
+        if undecided && landing.decided() {
+            landing.prepare(opts)?;
+        }
+        let Some(landed) = placed else {
+            continue;
+        };
+        record(&landed.name, Some(dest));
+        if file.header().entry_type() == tar::EntryType::Directory {
+            directories.push((file, landed));
+        } else {
+            unpack_at(&mut file, dest, &landed).map_err(|e| {
+                AcrylMicrovmError::Storage(format!("failed to extract archive: {}", with_causes(&e)))
+            })?;
+        }
+    }
+    // A root landing as `dest` sorts last, so its mode comes last.
+    directories.sort_by(|(_, a), (_, b)| b.name.cmp(&a.name));
+    for (mut dir, landed) in directories {
+        unpack_at(&mut dir, dest, &landed).map_err(|e| {
+            AcrylMicrovmError::Storage(format!("failed to extract archive: {}", with_causes(&e)))
+        })?;
+    }
+    if let Some(report) = report {
+        report.destination_written =
+            landing.decided() && (landing.lands_a_file() || !landing.dest_exists);
+    }
+    Ok(())
+}
+
+/// A caller's veto on where an entry lands, relative to the destination
+/// (empty for the destination itself), asked before anything is written
+/// there.
+type Refusal<'a> = dyn Fn(&Path) -> AcrylMicrovmResult<()> + Send + Sync + 'a;
+
+/// Unpack `reader` to `dest` the way `docker cp` lands a copy (see
+/// [`Landing`]), writing straight into `dest`: a failed copy keeps what it
+/// wrote.
+fn land<R: Read>(
+    reader: &mut R,
+    dest: &Path,
+    opts: &UnpackContext,
+    refuse: &Refusal<'_>,
+    report: Option<&mut UnpackReport>,
+) -> AcrylMicrovmResult<()> {
+    extract_from_reader(&mut *reader, dest, opts, refuse, report)?;
+    // Extraction can finish before the byte stream ends: tar-rs stops at the
+    // archive end marker. Drain the raw stream so a terminal producer error
+    // cannot become success.
+    io::copy(reader, &mut io::sink())
+        .map_err(|e| AcrylMicrovmError::Storage(format!("failed to drain tar stream: {}", e)))?;
+    Ok(())
+}
+
+/// Where an archive entry lands, relative to the destination.
+struct Landed {
+    /// Empty for the entry that becomes the destination itself.
+    name: PathBuf,
+    /// A hard link's target, relative to the destination.
+    link: Option<PathBuf>,
+}
+
+/// Where one archive's entries land, as `docker cp` lands a copy. The first
+/// entry decides; records about other entries (PAX headers, GNU long names)
+/// never do.
+///
+/// - A leading directory `X/` becomes a missing destination, trailing `/` or
+///   not: `X/a` lands as `a`, and a later entry outside `X/` fails the copy.
+///   An existing directory takes it under its own name, and an existing
+///   non-directory fails the copy. A leading `./` (`SRC/.`) roots nothing.
+/// - A leading file or symlink lands under its own name in an existing
+///   directory or in a missing destination the caller spelled with a
+///   trailing `/`. Otherwise one with a one-component name lands as the
+///   destination itself, and any entry after it fails the copy; a nested
+///   name (`app/main.py`, as leaves-only archives carry) lands under its
+///   own name when the destination is missing or a directory, and the
+///   copy fails when it is an existing non-directory. A trailing `/` that
+///   names an existing non-directory fails the copy.
+///
+/// Entries are written as they are read, so a failed copy keeps what it wrote.
+struct Landing {
+    dest: PathBuf,
+    dest_exists: bool,
+    dest_is_dir: bool,
+    /// `dest` takes every entry under its own name.
+    into_dir: bool,
+    /// `None` until the first entry decides it.
+    shape: Option<Shape>,
+}
+
+enum Shape {
+    /// The first entry, by its archive name, lands as the destination.
+    File(PathBuf),
+    /// Entries land under the destination, with the leading directory
+    /// stripped when it becomes the destination.
+    Tree { root: Option<PathBuf> },
+}
+
+impl Landing {
+    fn new(dest: &Path, force_directory: bool) -> Self {
+        let dest_is_dir = dest.is_dir();
+        Self {
+            dest: dest.to_path_buf(),
+            dest_exists: dest.exists(),
+            dest_is_dir,
+            into_dir: force_directory
+                || dest_is_dir
+                || dest.as_os_str().to_string_lossy().ends_with('/'),
+            shape: None,
+        }
+    }
+
+    fn decided(&self) -> bool {
+        self.shape.is_some()
+    }
+
+    fn lands_a_file(&self) -> bool {
+        matches!(self.shape, Some(Shape::File(_)))
+    }
+
+    /// What the first entry, of `kind` and sanitized `name`, makes of this
+    /// copy.
+    fn decide(&self, kind: tar::EntryType, name: Option<&Path>) -> AcrylMicrovmResult<Shape> {
+        if kind.is_dir() {
+            if self.dest_exists && !self.dest_is_dir {
+                return Err(AcrylMicrovmError::InvalidArgument(format!(
+                    "cannot copy a directory to {}, which is not a directory",
+                    self.dest.display()
+                )));
+            }
+            let root = name
+                .filter(|name| !self.dest_exists && name.components().count() == 1)
+                .map(Path::to_path_buf);
+            return Ok(Shape::Tree { root });
+        }
+        // A nested name (`app/main.py`) is one of many a leaves-only archive
+        // carries, so it lands under its own name.
+        let name = match name {
+            Some(name) if !self.into_dir && name.components().count() == 1 => name.to_path_buf(),
+            _ => return Ok(Shape::Tree { root: None }),
+        };
+        if kind.is_hard_link() {
+            return Err(AcrylMicrovmError::InvalidArgument(format!(
+                "archive starts with hard link {}: a copy to {} lands one entry, \
+                 leaving nothing to link to",
+                name.display(),
+                self.dest.display()
+            )));
+        }
+        Ok(Shape::File(name))
+    }
+
+    /// Ready the destination for what the first entry decided.
+    fn prepare(&self, opts: &UnpackContext) -> AcrylMicrovmResult<()> {
+        let dest = &self.dest;
+        if self.lands_a_file() {
+            if let Some(parent) = dest.parent().filter(|parent| !parent.exists()) {
+                if !opts.mkdir_parents {
+                    return Err(AcrylMicrovmError::Storage(format!(
+                        "parent directory of {} does not exist",
+                        dest.display()
+                    )));
+                }
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    AcrylMicrovmError::Storage(format!(
+                        "failed to create parent dir {}: {}",
+                        parent.display(),
+                        e
+                    ))
+                })?;
+            }
+        } else if !self.dest_exists {
+            if !opts.mkdir_parents {
+                return Err(AcrylMicrovmError::Storage(format!(
+                    "destination {} does not exist",
+                    dest.display()
+                )));
+            }
+            std::fs::create_dir_all(dest).map_err(|e| {
+                AcrylMicrovmError::Storage(format!(
+                    "failed to create destination {}: {}",
+                    dest.display(),
+                    e
+                ))
+            })?;
+        }
+        // A destination this copy creates holds nothing to overwrite.
+        if self.dest_exists && !opts.overwrite {
+            return Err(AcrylMicrovmError::Storage(format!(
+                "destination {} exists and overwrite=false",
+                dest.display()
+            )));
+        }
+        Ok(())
+    }
+
+    /// Where `entry` lands, or `None` for what extraction skips: records about
+    /// other entries, which `Entry::unpack` skips too, and names that are
+    /// empty or climb out with `..`.
+    fn place<R: Read>(&mut self, entry: &tar::Entry<'_, R>) -> AcrylMicrovmResult<Option<Landed>> {
+        let kind = entry.header().entry_type();
+        if kind.is_pax_global_extensions()
+            || kind.is_pax_local_extensions()
+            || kind.is_gnu_longname()
+            || kind.is_gnu_longlink()
+        {
+            return Ok(None);
+        }
+        let name = entry
+            .path()
+            .ok()
+            .and_then(|path| sanitize_entry_path(&path));
+        let first = self.shape.is_none();
+        if first {
+            // Extraction skips a file it cannot name, so that file decides
+            // nothing. A directory named `./` still leads.
+            if name.is_none() && !kind.is_dir() {
+                return Ok(None);
+            }
+            self.shape = Some(self.decide(kind, name.as_deref())?);
+        }
+        let Some(name) = name else {
+            return Ok(None);
+        };
+        let root = match &self.shape {
+            Some(Shape::File(_)) if first => {
+                return Ok(Some(Landed {
+                    name: PathBuf::new(),
+                    link: None,
+                }));
+            }
+            Some(Shape::File(file)) => {
+                return Err(AcrylMicrovmError::InvalidArgument(format!(
+                    "archive entry {} follows {}, the file the archive starts with: \
+                     a copy to {} lands that one file; copy into an existing directory \
+                     to land them all",
+                    name.display(),
+                    file.display(),
+                    self.dest.display()
+                )));
+            }
+            Some(Shape::Tree { root }) => root.as_deref(),
+            None => return Ok(None),
+        };
+        // A hard link without a target is tar-rs's error to report.
+        let link = match entry.link_name() {
+            Ok(Some(target)) if kind.is_hard_link() && !target.as_os_str().is_empty() => {
+                Some(target.into_owned())
+            }
+            _ => None,
+        };
+        let Some(root) = root else {
+            return Ok(Some(Landed { name, link }));
+        };
+        // Only a directory may land as the destination itself.
+        let under_root = |path: &Path, dir: bool| {
+            sanitize_entry_path(path)
+                .and_then(|path| Some(path.strip_prefix(root).ok()?.to_path_buf()))
+                .filter(|rest| dir || !rest.as_os_str().is_empty())
+                .ok_or_else(|| {
+                    AcrylMicrovmError::InvalidArgument(format!(
+                        "archive entry {} is outside {}/, the directory the archive starts \
+                         with: a copy to a missing destination lands only that directory's \
+                         contents; copy into an existing directory to keep the layout",
+                        path.display(),
+                        root.display()
+                    ))
+                })
+        };
+        Ok(Some(Landed {
+            name: under_root(&name, kind.is_dir())?,
+            link: link.map(|target| under_root(&target, false)).transpose()?,
+        }))
+    }
+}
+
+/// Unpack `entry` where `landed` says, after the checks
+/// `Entry::unpack_in` makes (`tar-0.4.45/src/entry.rs`). `unpack_in` takes
+/// the place from the entry's own name, so it cannot land an entry anywhere
+/// else; `Entry::unpack` writes the entry as `unpack_in` would.
+fn unpack_at<R: Read>(
+    entry: &mut tar::Entry<'_, R>,
+    dest: &Path,
+    landed: &Landed,
+) -> io::Result<()> {
+    if landed.name.as_os_str().is_empty() {
+        return entry.unpack(dest).map(drop);
+    }
+    let path = dest.join(&landed.name);
+    let parent = path.parent().unwrap_or(dest);
+    create_dirs_inside(dest, parent)?;
+    let base = inside(dest, parent)?;
+    match &landed.link {
+        // `Entry::unpack` would resolve the target from the working directory.
+        Some(target) => {
+            let target = base.join(target);
+            inside(&base, &target)?;
+            std::fs::hard_link(&target, &path).map_err(|e| {
+                let context = format!("hard linking {} to {}", target.display(), path.display());
+                io::Error::new(e.kind(), format!("{e} when {context}"))
+            })
+        }
+        None => entry.unpack(&path).map(drop),
+    }
+}
+
+/// Create the directories missing down to `dir`, each once its parent
+/// resolves inside `dest`, as tar-rs's `ensure_dir_created` does.
+fn create_dirs_inside(dest: &Path, dir: &Path) -> io::Result<()> {
+    let missing: Vec<&Path> = dir
+        .ancestors()
+        .take_while(|dir| dir.symlink_metadata().is_err())
+        .collect();
+    for dir in missing.into_iter().rev() {
+        if let Some(parent) = dir.parent() {
+            inside(dest, parent)?;
+        }
+        std::fs::create_dir_all(dir).map_err(|e| {
+            io::Error::new(e.kind(), format!("{e} when creating dir {}", dir.display()))
+        })?;
+    }
+    Ok(())
+}
+
+/// The canonical `dest`, once `path` resolves inside it, as tar-rs's
+/// `validate_inside_dst` checks: an earlier entry may be a symlink on the way.
+fn inside(dest: &Path, path: &Path) -> io::Result<PathBuf> {
+    let canonical = |path: &Path| {
+        path.canonicalize().map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("{e} while canonicalizing {}", path.display()),
+            )
+        })
+    };
+    let dest = canonical(dest)?;
+    if canonical(path)?.starts_with(&dest) {
+        return Ok(dest);
+    }
+    Err(io::Error::other(format!(
+        "{} resolves outside {}",
+        path.display(),
+        dest.display()
+    )))
+}
+
+/// Record `path` — sanitized, plus every directory its name implies,
+/// outermost first — in `report`, deduplicated through `seen`. A tar need not
+/// carry an entry for a directory it puts files in, and extraction conjures
+/// the missing ones regardless (`tar-0.4.45/src/entry.rs`,
+/// `ensure_dir_created`), so the implied directories are reported too: the
+/// guest hands the box user only what the report names. When `existing_root`
+/// is present, directories that predate their first archive occurrence are
+/// also recorded before extraction can create or replace them.
+fn record_paths(
+    report: &mut UnpackReport,
+    seen: &mut HashSet<PathBuf>,
+    existing_root: Option<&Path>,
+    path: &Path,
+) {
+    let Some(sanitized) = sanitize_entry_path(path) else {
+        return;
+    };
+    for step in implied_dirs_then_self(&sanitized) {
+        if seen.insert(step.clone()) {
+            if let Some(root) = existing_root {
+                if root.join(&step).is_dir() {
+                    report.preexisting_dirs.push(step.clone());
+                }
+            }
+            report.entry_paths.push(step);
+        }
+    }
+}
+
+// ── Entry names ───────────────────────────────────────────────────
+
+/// `path` preceded by every directory its own name implies, outermost first.
+///
+/// `a/b/c.txt` yields `a`, `a/b`, `a/b/c.txt`. Outermost first so a caller
+/// walking the list meets a directory before whatever sits inside it.
+fn implied_dirs_then_self(path: &Path) -> Vec<PathBuf> {
+    let mut chain: Vec<PathBuf> = path
+        .ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .collect();
+    chain.reverse();
+    chain
+}
+
+/// An archive entry name reduced to what extraction would actually create.
+///
+/// Mirrors tar-rs's own rule (`entry.rs`: `RootDir => continue`,
+/// `ParentDir => return Ok(false)`): drop the leading `/`, refuse anything
+/// containing `..`. `None` means extraction skipped it, so nothing downstream
+/// should touch it either.
+fn sanitize_entry_path(path: &Path) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => out.push(part),
+            // Leading `/` and `.` are dropped by extraction, not rejected.
+            Component::RootDir | Component::CurDir => continue,
+            Component::ParentDir | Component::Prefix(_) => return None,
+        }
+    }
+    (!out.as_os_str().is_empty()).then_some(out)
+}
+
+// ── Stream unpack ────────────────────────────────────────────────
+
+/// Blocking `Read` adapter draining a bounded channel, used to feed a
+/// `tar::Archive` from an async byte stream.
+struct PipeReader {
+    rx: mpsc::Receiver<io::Result<Vec<u8>>>,
+    pending: Option<(Vec<u8>, usize)>,
+}
+
+impl Read for PipeReader {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        loop {
+            if let Some((data, pos)) = &mut self.pending {
+                let remaining = &data[*pos..];
+                let n = remaining.len().min(buf.len());
+                buf[..n].copy_from_slice(&remaining[..n]);
+                *pos += n;
+                if *pos == data.len() {
+                    self.pending = None;
+                }
+                return Ok(n);
+            }
+            match self.rx.blocking_recv() {
+                Some(Ok(data)) => {
+                    if data.is_empty() {
+                        continue;
+                    }
+                    self.pending = Some((data, 0));
+                }
+                Some(Err(e)) => return Err(e),
+                None => return Ok(0),
+            }
+        }
+    }
+}
+
+/// Unpack a tar byte stream to `dest`, landing it the way `docker cp` does
+/// (see [`Landing`]): the first entry decides as it streams by, so nothing is
+/// staged.
+///
+/// Returns the extracted paths relative to `dest` (sanitized, implied
+/// directories included) and which of those directories already existed, so
+/// the caller can hand only newly created paths to the box user.
+pub async fn unpack_stream(
+    stream: BoxByteStream,
+    dest: PathBuf,
+    opts: UnpackContext,
+) -> AcrylMicrovmResult<UnpackReport> {
+    unpack_stream_refusing(stream, dest, opts, |_| Ok(())).await
+}
+
+/// [`unpack_stream`], asking `refuse` about each entry's landing path,
+/// relative to `dest`, before writing it. The guest refuses entries a mount
+/// would shadow this way, so a refused entry is never written; entries
+/// before it stay.
+pub async fn unpack_stream_refusing<F>(
+    mut stream: BoxByteStream,
+    dest: PathBuf,
+    opts: UnpackContext,
+    refuse: F,
+) -> AcrylMicrovmResult<UnpackReport>
+where
+    F: Fn(&Path) -> AcrylMicrovmResult<()> + Send + Sync + 'static,
+{
+    let (tx, rx) = mpsc::channel::<io::Result<Vec<u8>>>(COPY_CHUNKS_IN_FLIGHT);
+    let forward = tokio::spawn(async move {
+        while let Some(item) = stream.next().await {
+            if tx.send(item).await.is_err() {
+                break;
+            }
+        }
+    });
+    let mut reader = PipeReader { rx, pending: None };
+    let unpack = tokio::task::spawn_blocking(move || {
+        let mut report = UnpackReport::default();
+        land(&mut reader, &dest, &opts, &refuse, Some(&mut report))?;
+        Ok(report)
+    });
+    let result = unpack.await;
+    // Abort the forwarder before mapping the join result, so a panicked
+    // unpack task can't leak a forwarder that keeps draining the stream.
+    forward.abort();
+    result.map_err(|e| AcrylMicrovmError::Storage(format!("unpack task join error: {}", e)))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // ── Helpers ───────────────────────────────────────────────────
+
+    fn uc(overwrite: bool, mkdir_parents: bool, force_directory: bool) -> UnpackContext {
+        UnpackContext {
+            overwrite,
+            mkdir_parents,
+            force_directory,
+        }
+    }
+
+    fn default_unpack(overwrite: bool) -> UnpackContext {
+        uc(overwrite, true, false)
+    }
+
+    fn default_pack() -> PackContext {
+        PackContext {
+            follow_symlinks: true,
+            include_parent: true,
+        }
+    }
+
+    /// Create a tar containing a single file with the given entry name and content.
+    fn create_single_file_tar(tar_path: &Path, entry_name: &str, content: &[u8]) {
+        let tar_file = std::fs::File::create(tar_path).unwrap();
+        let mut builder = tar::Builder::new(tar_file);
+        let mut header = tar::Header::new_gnu();
+        header.set_size(content.len() as u64);
+        header.set_mode(0o644);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, entry_name, content)
+            .unwrap();
+        builder.finish().unwrap();
+    }
+
+    /// Every path under `root`, directories included — what extraction left
+    /// behind, read back off the disk rather than assumed.
+    fn extracted_paths(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        let mut pending = vec![root.to_path_buf()];
+        while let Some(dir) = pending.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    pending.push(path.clone());
+                }
+                found.push(path);
+            }
+        }
+        found
+    }
+
+    /// Create a tar containing a directory with files inside.
+    fn create_dir_tar(tar_path: &Path) {
+        let tar_file = std::fs::File::create(tar_path).unwrap();
+        let mut builder = tar::Builder::new(tar_file);
+
+        let mut dir_header = tar::Header::new_gnu();
+        dir_header.set_entry_type(tar::EntryType::Directory);
+        dir_header.set_size(0);
+        dir_header.set_mode(0o755);
+        dir_header.set_cksum();
+        builder
+            .append_data(&mut dir_header, "mydir/", &[] as &[u8])
+            .unwrap();
+
+        let content = b"inside dir";
+        let mut file_header = tar::Header::new_gnu();
+        file_header.set_size(content.len() as u64);
+        file_header.set_mode(0o644);
+        file_header.set_cksum();
+        builder
+            .append_data(&mut file_header, "mydir/file.txt", &content[..])
+            .unwrap();
+
+        builder.finish().unwrap();
+    }
+
+    // ── pack: single file ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pack_single_file() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("hello.txt");
+        std::fs::write(&src, b"hello").unwrap();
+
+        let tar_path = tmp.path().join("out.tar");
+        pack(
+            src,
+            tar_path.clone(),
+            PackContext {
+                follow_symlinks: true,
+                include_parent: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Verify tar contains exactly one entry with the filename
+        let tar_file = std::fs::File::open(&tar_path).unwrap();
+        let mut archive = tar::Archive::new(tar_file);
+        let entries: Vec<_> = archive.entries().unwrap().collect();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pack_empty_file() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("empty.txt");
+        std::fs::write(&src, b"").unwrap();
+
+        let tar_path = tmp.path().join("out.tar");
+        pack(
+            src,
+            tar_path.clone(),
+            PackContext {
+                follow_symlinks: true,
+                include_parent: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let dest = tmp.path().join("dest.txt");
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn pack_binary_content_fidelity() {
+        let tmp = TempDir::new().unwrap();
+        let data: Vec<u8> = (0..=255).collect();
+        let src = tmp.path().join("binary.bin");
+        std::fs::write(&src, &data).unwrap();
+
+        let tar_path = tmp.path().join("out.tar");
+        pack(
+            src,
+            tar_path.clone(),
+            PackContext {
+                follow_symlinks: true,
+                include_parent: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let dest = tmp.path().join("dest.bin");
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&dest).unwrap(), data);
+    }
+
+    // ── pack: a directory or its contents ─────────────────────────
+
+    #[tokio::test]
+    async fn pack_dir_include_parent_true() {
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("mydir");
+        std::fs::create_dir(&src_dir).unwrap();
+        std::fs::write(src_dir.join("a.txt"), "aaa").unwrap();
+        std::fs::write(src_dir.join("b.txt"), "bbb").unwrap();
+
+        let tar_path = tmp.path().join("out.tar");
+        pack(src_dir, tar_path.clone(), default_pack())
+            .await
+            .unwrap();
+
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+
+        // Files nested under mydir/
+        assert_eq!(
+            std::fs::read_to_string(dest.join("mydir").join("a.txt")).unwrap(),
+            "aaa"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("mydir").join("b.txt")).unwrap(),
+            "bbb"
+        );
+    }
+
+    /// Each entry's archived name and type, in archive order.
+    fn archived_entries(tar_path: &Path) -> Vec<(String, tar::EntryType)> {
+        let mut archive = tar::Archive::new(std::fs::File::open(tar_path).unwrap());
+        archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let name = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
+                (name, entry.header().entry_type())
+            })
+            .collect()
+    }
+
+    fn contents_pack() -> PackContext {
+        PackContext {
+            follow_symlinks: false,
+            include_parent: false,
+        }
+    }
+
+    /// The contents form still leads with an entry standing for the source:
+    /// `./`, a directory. Without it the archive of a one-file directory is
+    /// byte-identical to that file's own archive.
+    #[tokio::test]
+    async fn pack_dir_contents_is_rooted_at_dot() {
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("flatdir");
+        std::fs::create_dir(&src_dir).unwrap();
+        std::fs::write(src_dir.join("f.txt"), "flat").unwrap();
+
+        let tar_path = tmp.path().join("out.tar");
+        pack(src_dir, tar_path.clone(), contents_pack())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            archived_entries(&tar_path),
+            vec![
+                ("./".to_string(), tar::EntryType::Directory),
+                ("f.txt".to_string(), tar::EntryType::Regular),
+            ]
+        );
+
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        unpack(tar_path, dest.clone(), uc(true, false, true))
+            .await
+            .unwrap();
+
+        // File directly in dest, not under flatdir/
+        assert_eq!(std::fs::read_to_string(dest.join("f.txt")).unwrap(), "flat");
+    }
+
+    #[tokio::test]
+    async fn pack_contents_of_an_empty_dir_is_just_its_root() {
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("empty");
+        std::fs::create_dir(&src_dir).unwrap();
+
+        let tar_path = tmp.path().join("out.tar");
+        pack(src_dir, tar_path.clone(), contents_pack())
+            .await
+            .unwrap();
+
+        assert_eq!(
+            archived_entries(&tar_path),
+            vec![("./".to_string(), tar::EntryType::Directory)]
+        );
+    }
+
+    /// The `SRC/.` spelling is read off the caller's raw bytes, because a
+    /// `Path` round-trip eats the dot: `Path::new("/app/.").strip_prefix("/")`
+    /// yields `app`.
+    #[test]
+    fn a_trailing_dot_names_the_contents_and_survives_only_as_raw_bytes() {
+        use std::ffi::OsStr;
+        assert!(specifies_current_dir(OsStr::new("src/.")));
+        assert!(specifies_current_dir(OsStr::new("/a/b/.")));
+        assert!(specifies_current_dir(OsStr::new(".")));
+
+        // Trailing separators do not change what the path names.
+        assert!(specifies_current_dir(OsStr::new("./")));
+        assert!(specifies_current_dir(OsStr::new("src/./")));
+        assert!(specifies_current_dir(OsStr::new("/a/b/.///")));
+
+        assert!(!specifies_current_dir(OsStr::new("src")));
+        assert!(!specifies_current_dir(OsStr::new("src/")));
+        assert!(!specifies_current_dir(OsStr::new("src/.hidden")));
+        assert!(!specifies_current_dir(OsStr::new("src/..")));
+        assert!(!specifies_current_dir(OsStr::new("/")));
+        assert!(!specifies_current_dir(OsStr::new("")));
+
+        let dotted = Path::new("/app/.");
+        assert!(specifies_current_dir(dotted.as_os_str()));
+        let normalized = dotted.strip_prefix("/").unwrap();
+        assert!(
+            !specifies_current_dir(normalized.as_os_str()),
+            "a Path round-trip drops the dot, so deriving this late would read \
+             every `SRC/.` as `SRC`"
+        );
+    }
+
+    #[tokio::test]
+    async fn pack_empty_directory() {
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("emptydir");
+        std::fs::create_dir(&src_dir).unwrap();
+
+        let tar_path = tmp.path().join("out.tar");
+        pack(src_dir, tar_path.clone(), default_pack())
+            .await
+            .unwrap();
+
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+        assert!(dest.join("emptydir").is_dir());
+    }
+
+    #[tokio::test]
+    async fn pack_nested_directory() {
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("deep");
+        std::fs::create_dir_all(src_dir.join("a").join("b").join("c")).unwrap();
+        std::fs::write(
+            src_dir.join("a").join("b").join("c").join("file.txt"),
+            "deep",
+        )
+        .unwrap();
+        std::fs::write(src_dir.join("top.txt"), "top").unwrap();
+
+        let tar_path = tmp.path().join("out.tar");
+        pack(src_dir, tar_path.clone(), default_pack())
+            .await
+            .unwrap();
+
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(
+                dest.join("deep")
+                    .join("a")
+                    .join("b")
+                    .join("c")
+                    .join("file.txt")
+            )
+            .unwrap(),
+            "deep"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dest.join("deep").join("top.txt")).unwrap(),
+            "top"
+        );
+    }
+
+    // ── pack: symlinks ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pack_follow_symlinks_false_preserves_link() {
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("linkdir");
+        std::fs::create_dir(&src_dir).unwrap();
+        std::fs::write(src_dir.join("target.txt"), "target content").unwrap();
+        std::os::unix::fs::symlink("target.txt", src_dir.join("link.txt")).unwrap();
+
+        let tar_path = tmp.path().join("out.tar");
+        pack(
+            src_dir,
+            tar_path.clone(),
+            PackContext {
+                follow_symlinks: false,
+                include_parent: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+
+        let link_path = dest.join("linkdir").join("link.txt");
+        assert!(link_path
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_link(&link_path).unwrap().to_str().unwrap(),
+            "target.txt"
+        );
+    }
+
+    #[tokio::test]
+    async fn pack_follow_symlinks_true_dereferences() {
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("derefdir");
+        std::fs::create_dir(&src_dir).unwrap();
+        std::fs::write(src_dir.join("target.txt"), "deref content").unwrap();
+        std::os::unix::fs::symlink("target.txt", src_dir.join("link.txt")).unwrap();
+
+        let tar_path = tmp.path().join("out.tar");
+        pack(
+            src_dir,
+            tar_path.clone(),
+            PackContext {
+                follow_symlinks: true,
+                include_parent: true,
+            },
+        )
+        .await
+        .unwrap();
+
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+
+        let link_path = dest.join("derefdir").join("link.txt");
+        // Should be a regular file, not a symlink
+        assert!(link_path.is_file());
+        assert!(!link_path
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read_to_string(&link_path).unwrap(),
+            "deref content"
+        );
+    }
+
+    // ── pack: error cases ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn pack_nonexistent_source_errors() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("out.tar");
+        let result = pack(tmp.path().join("does-not-exist"), tar_path, default_pack()).await;
+        assert!(result.is_err());
+    }
+
+    // ── unpack: detection modes ──────────────────────────────────
+
+    #[tokio::test]
+    async fn unpack_single_file_to_nonexistent_path_uses_file_mode() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("single.tar");
+        create_single_file_tar(&tar_path, "hello.txt", b"hello");
+
+        let dest = tmp.path().join("output.txt");
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+        assert!(dest.is_file());
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn unpack_single_file_to_existing_dir_uses_dir_mode() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("single.tar");
+        create_single_file_tar(&tar_path, "hello.txt", b"hello");
+
+        let dest = tmp.path().to_path_buf(); // existing directory
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+        assert!(dest.join("hello.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn unpack_trailing_slash_forces_dir_mode() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("single.tar");
+        create_single_file_tar(&tar_path, "hello.txt", b"hello");
+
+        let dest = tmp.path().join("dirout");
+        std::fs::create_dir(&dest).unwrap();
+        let dest_with_slash = PathBuf::from(format!("{}/", dest.display()));
+        unpack(tar_path, dest_with_slash, default_unpack(true))
+            .await
+            .unwrap();
+        assert!(dest.join("hello.txt").is_file());
+    }
+
+    #[tokio::test]
+    async fn unpack_multi_entry_tar_uses_dir_mode() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("multi.tar");
+        create_dir_tar(&tar_path);
+
+        let dest = tmp.path().join("output");
+        std::fs::create_dir(&dest).unwrap();
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+
+        assert!(dest.join("mydir").join("file.txt").is_file());
+        assert_eq!(
+            std::fs::read_to_string(dest.join("mydir").join("file.txt")).unwrap(),
+            "inside dir"
+        );
+    }
+
+    /// A lone directory entry is a single-root archive: it becomes the
+    /// missing destination, as `docker cp` lands an empty directory.
+    #[tokio::test]
+    async fn unpack_single_dir_entry_becomes_a_missing_dest() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("dir_only.tar");
+
+        let tar_file = std::fs::File::create(&tar_path).unwrap();
+        let mut builder = tar::Builder::new(tar_file);
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Directory);
+        header.set_size(0);
+        header.set_mode(0o755);
+        header.set_cksum();
+        builder
+            .append_data(&mut header, "somedir/", &[] as &[u8])
+            .unwrap();
+        builder.finish().unwrap();
+
+        let dest = tmp.path().join("output");
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+        assert!(dest.is_dir());
+        assert_eq!(landed(&dest), Vec::<PathBuf>::new());
+    }
+
+    /// An empty archive has no first entry to land, so nothing lands.
+    #[tokio::test]
+    async fn unpack_empty_tar_lands_nothing() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("empty.tar");
+
+        let tar_file = std::fs::File::create(&tar_path).unwrap();
+        let builder = tar::Builder::new(tar_file);
+        builder.into_inner().unwrap();
+
+        let dest = tmp.path().join("output");
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+        assert!(!dest.exists());
+    }
+
+    // ── unpack: force_directory ──────────────────────────────────
+
+    #[tokio::test]
+    async fn force_directory_overrides_single_file_detection() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("file.txt");
+        std::fs::write(&src, b"data").unwrap();
+
+        let tar_path = tmp.path().join("out.tar");
+        pack(
+            src,
+            tar_path.clone(),
+            PackContext {
+                follow_symlinks: true,
+                include_parent: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let dest = tmp.path().join("dir_dest");
+        std::fs::create_dir(&dest).unwrap();
+        unpack(tar_path, dest.clone(), uc(true, false, true))
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dest.join("file.txt")).unwrap(),
+            "data"
+        );
+    }
+
+    // ── unpack: overwrite ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn unpack_overwrite_true_replaces_file() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("file.tar");
+        create_single_file_tar(&tar_path, "data.txt", b"new content");
+
+        let dest = tmp.path().join("data.txt");
+        std::fs::write(&dest, b"old content").unwrap();
+
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "new content");
+    }
+
+    #[tokio::test]
+    async fn unpack_overwrite_false_rejects_existing_file() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("file.tar");
+        create_single_file_tar(&tar_path, "data.txt", b"new content");
+
+        let dest = tmp.path().join("data.txt");
+        std::fs::write(&dest, b"old content").unwrap();
+
+        let result = unpack(tar_path, dest.clone(), default_unpack(false)).await;
+        assert!(result.is_err());
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "old content");
+    }
+
+    #[tokio::test]
+    async fn unpack_overwrite_false_rejects_existing_dir() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("dir.tar");
+        create_dir_tar(&tar_path);
+
+        let dest = tmp.path().join("output");
+        std::fs::create_dir(&dest).unwrap();
+
+        let result = unpack(tar_path, dest, uc(false, false, false)).await;
+        assert!(result.is_err());
+    }
+
+    // ── unpack: mkdir_parents ────────────────────────────────────
+
+    #[tokio::test]
+    async fn unpack_mkdir_parents_creates_parent_dirs_for_file() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("file.tar");
+        create_single_file_tar(&tar_path, "data.txt", b"content");
+
+        let dest = tmp.path().join("a").join("b").join("c").join("data.txt");
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+
+        assert!(dest.is_file());
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "content");
+    }
+
+    #[tokio::test]
+    async fn unpack_mkdir_parents_creates_dest_dir() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("dir.tar");
+        create_dir_tar(&tar_path);
+
+        let dest = tmp.path().join("x").join("y").join("z");
+        unpack(tar_path, dest.clone(), uc(true, true, true))
+            .await
+            .unwrap();
+        assert!(dest.join("file.txt").is_file());
+    }
+
+    /// A failed extraction must carry the errno, not just the operation.
+    ///
+    /// `tar`'s own `Display` stops at "failed to create `<path>`", which is how
+    /// a real diagnosis once stalled: the message named the path and hid that
+    /// the cause was ENOTDIR. The reason has to survive into `AcrylMicrovmError`.
+    ///
+    /// The failure must originate *inside* `archive.unpack`, so `dest` is created
+    /// up front: that makes `if !dest.exists()` false and skips the arm's own
+    /// `create_dir_all`, whose `map_err` already formats the io::Error and would
+    /// mask what is being tested.
+    ///
+    /// `create_dir_tar` carries `mydir/file.txt`. tar defers directory entries to
+    /// the end of extraction, so the file is unpacked first, and `ensure_dir_created`
+    /// is a no-op because `dest/mydir` already exists — as a regular file. The
+    /// failure is therefore creating the *file* beneath a non-directory, which the
+    /// kernel refuses with ENOTDIR.
+    #[tokio::test]
+    async fn unpack_error_carries_the_cause_not_just_the_operation() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("dir.tar");
+        create_dir_tar(&tar_path);
+
+        let dest = tmp.path().join("dest");
+        std::fs::create_dir(&dest).unwrap();
+        // `mydir` must be a directory for the archive to extract; make it a file.
+        std::fs::write(dest.join("mydir"), b"blocker").unwrap();
+
+        let err = unpack(tar_path, dest, uc(true, true, true))
+            .await
+            .expect_err("extracting beneath a regular file must fail");
+
+        let msg = err.to_string();
+        // Reverted, this reads "failed to unpack `…/dest/mydir/file.txt`" and stops
+        // there — the operation named, the reason gone. ENOTDIR is 20 on both Linux
+        // and macOS; accept either rendering of it.
+        assert!(
+            msg.contains("Not a directory") || msg.contains("os error 20"),
+            "error must name ENOTDIR, not just the operation, got: {msg}"
+        );
+    }
+
+    // ── entry names ──────────────────────────────────────────────
+
+    /// The tar is caller-supplied. An entry that is absolute or climbs out is
+    /// skipped by extraction, so it must be skipped here too — otherwise
+    /// `dest.join(entry)` escapes, and in the guest that hands a root-owned
+    /// chown a file this copy never created.
+    #[test]
+    fn names_that_escape_the_destination_are_dropped() {
+        assert_eq!(sanitize_entry_path(Path::new("../../etc/shadow")), None);
+        assert_eq!(sanitize_entry_path(Path::new("a/../../b")), None);
+        assert_eq!(sanitize_entry_path(Path::new("..")), None);
+    }
+
+    /// An absolute entry keeps its tail, matching extraction stripping the
+    /// leading `/` rather than refusing the entry outright.
+    #[test]
+    fn absolute_names_are_made_relative() {
+        assert_eq!(
+            sanitize_entry_path(Path::new("/etc/shadow")),
+            Some(PathBuf::from("etc/shadow"))
+        );
+    }
+
+    #[test]
+    fn ordinary_names_survive() {
+        assert_eq!(
+            sanitize_entry_path(Path::new("./dir/file.txt")),
+            Some(PathBuf::from("dir/file.txt"))
+        );
+        assert_eq!(sanitize_entry_path(Path::new(".")), None);
+    }
+
+    /// Nothing extraction creates may go unreported.
+    ///
+    /// A tar need not carry an entry for a directory it puts files in, and
+    /// plenty of writers emit only leaves — `PUT /boxes/{id}/files` takes any
+    /// `application/x-tar` the caller built. Extraction still conjures the
+    /// directories (`tar-0.4.45/src/entry.rs`, `ensure_dir_created`), so a
+    /// report that stops at the leaves under-reports what this copy made, and
+    /// the guest hands the box user only what the report names: the file
+    /// arrives owned by the workload inside a directory still owned by root,
+    /// which is POL-304 again one level up.
+    #[tokio::test]
+    async fn the_report_names_the_directories_a_nested_entry_implies() {
+        use tar::EntryType::Regular;
+        let tmp = TempDir::new().unwrap();
+        let entries = [("app/main.py", Regular, ""), ("app/util.py", Regular, "")];
+        let dest = tmp.path().join("dest");
+
+        let report = unpack_stream(archive_of(&entries), dest.clone(), uc(true, true, false))
+            .await
+            .unwrap();
+
+        let named: std::collections::HashSet<PathBuf> = report
+            .entry_paths
+            .iter()
+            .map(|rel| dest.join(rel))
+            .collect();
+        for created in extracted_paths(&dest) {
+            assert!(
+                named.contains(&created),
+                "{} was created by extraction but never named; named: {:?}",
+                created.display(),
+                report.entry_paths
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unpack_no_mkdir_parents_errors_on_missing_parent() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("file.tar");
+        create_single_file_tar(&tar_path, "data.txt", b"content");
+
+        let dest = tmp.path().join("nonexistent").join("data.txt");
+        let result = unpack(tar_path, dest, uc(true, false, false)).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn unpack_no_mkdir_parents_errors_on_missing_dest_dir() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("dir.tar");
+        create_dir_tar(&tar_path);
+
+        let dest = tmp.path().join("nonexistent");
+        let result = unpack(tar_path, dest, uc(true, false, true)).await;
+        assert!(result.is_err());
+    }
+
+    // ── roundtrip: pack + unpack ─────────────────────────────────
+
+    #[tokio::test]
+    async fn roundtrip_single_file() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("hello.txt");
+        std::fs::write(&src, b"hello").unwrap();
+
+        let tar_path = tmp.path().join("out.tar");
+        pack(
+            src,
+            tar_path.clone(),
+            PackContext {
+                follow_symlinks: true,
+                include_parent: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let dest = tmp.path().join("dest.txt");
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "hello");
+    }
+
+    #[tokio::test]
+    async fn roundtrip_dir_with_parent() {
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("src");
+        std::fs::create_dir(&src_dir).unwrap();
+        std::fs::write(src_dir.join("hello.txt"), b"hello").unwrap();
+
+        let tar_path = tmp.path().join("out.tar");
+        pack(src_dir, tar_path.clone(), default_pack())
+            .await
+            .unwrap();
+
+        let dest_dir = tmp.path().join("dest");
+        std::fs::create_dir(&dest_dir).unwrap();
+        unpack(tar_path, dest_dir.clone(), default_unpack(true))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(dest_dir.join("src").join("hello.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    /// Regression test for #238: copy_in creates directory when destination is a file path.
+    #[tokio::test]
+    async fn issue_238_file_to_file_path_not_directory() {
+        let tmp = TempDir::new().unwrap();
+        let src_file = tmp.path().join("script.py");
+        std::fs::write(&src_file, b"print('hello')\n").unwrap();
+
+        let tar_path = tmp.path().join("issue238.tar");
+        pack(
+            src_file,
+            tar_path.clone(),
+            PackContext {
+                follow_symlinks: true,
+                include_parent: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir(&workspace).unwrap();
+        let dest_file = workspace.join("script.py");
+        unpack(tar_path, dest_file.clone(), default_unpack(true))
+            .await
+            .unwrap();
+
+        assert!(
+            dest_file.is_file(),
+            "script.py should be a file (issue #238)"
+        );
+        assert!(
+            !dest_file.is_dir(),
+            "script.py must NOT be a directory (issue #238)"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&dest_file).unwrap(),
+            "print('hello')\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn roundtrip_file_to_existing_dir_extracts_inside() {
+        let tmp = TempDir::new().unwrap();
+        let src_file = tmp.path().join("source.py");
+        std::fs::write(&src_file, b"print('hello')").unwrap();
+        let tar_path = tmp.path().join("file.tar");
+        pack(
+            src_file,
+            tar_path.clone(),
+            PackContext {
+                follow_symlinks: true,
+                include_parent: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let dest_dir = tmp.path().join("workspace");
+        std::fs::create_dir(&dest_dir).unwrap();
+        unpack(tar_path, dest_dir.clone(), default_unpack(true))
+            .await
+            .unwrap();
+
+        let extracted = dest_dir.join("source.py");
+        assert!(extracted.is_file());
+        assert_eq!(
+            std::fs::read_to_string(&extracted).unwrap(),
+            "print('hello')"
+        );
+    }
+
+    #[tokio::test]
+    async fn roundtrip_filename_with_spaces() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("my file.txt");
+        std::fs::write(&src, "spaces\n").unwrap();
+
+        let tar_path = tmp.path().join("out.tar");
+        pack(
+            src,
+            tar_path.clone(),
+            PackContext {
+                follow_symlinks: true,
+                include_parent: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let dest = tmp.path().join("my file out.txt");
+        unpack(tar_path, dest.clone(), default_unpack(true))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "spaces\n");
+    }
+
+    // ── streaming pack/unpack round-trips ────────────────────────
+
+    // ── streaming failure-path machinery ──────────────────────────────
+
+    /// A writer that panics on its first write. Subsequent writes succeed so
+    /// the drop-time `Builder::finish` (tar::Builder::Drop calls finish, which
+    /// writes the trailer) cannot double-panic during the unwind.
+    struct PanicWriter(bool);
+    impl Write for PanicWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            if self.0 {
+                self.0 = false;
+                panic!("injected pack panic")
+            }
+            Ok(0)
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn pack_task_body_surfaces_panic_as_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("p.txt");
+        std::fs::write(&src, b"x").unwrap();
+
+        let result = pack_task_body(
+            &src,
+            PanicWriter(true),
+            &PackContext {
+                follow_symlinks: true,
+                include_parent: false,
+            },
+        );
+        assert!(
+            matches!(result, Err(AcrylMicrovmError::Internal(_))),
+            "a panicking pack must surface as Internal, got {result:?}"
+        );
+    }
+
+    /// PipeWriter must deliver sub-chunk pending bytes on flush — the final
+    /// partial chunk of a small archive rides on this, not on Drop. Plain
+    /// (non-runtime) thread: `blocking_send` panics inside a tokio runtime.
+    #[test]
+    fn pipe_writer_flush_delivers_pending_bytes() {
+        let (tx, mut rx) = mpsc::channel(4);
+        let mut writer = PipeWriter {
+            tx,
+            pending: Vec::with_capacity(COPY_CHUNK_SIZE),
+        };
+        writer.write_all(b"tail bytes").unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        let chunk = rx
+            .blocking_recv()
+            .expect("flush must deliver the chunk")
+            .unwrap();
+        assert_eq!(chunk, b"tail bytes");
+        assert!(
+            rx.blocking_recv().is_none(),
+            "dropped sender must signal EOF"
+        );
+    }
+
+    /// A consumer that dropped the stream must surface as BrokenPipe from
+    /// flush — the pack task then reports a terminal Err instead of silently
+    /// truncating. Small writes stay buffered, so the failure only shows at
+    /// flush time (which is exactly what pack_blocking's explicit flush
+    /// after finish exists to observe).
+    #[test]
+    fn pipe_writer_reports_broken_pipe_on_dropped_consumer() {
+        let (tx, rx) = mpsc::channel(4);
+        drop(rx); // consumer gone before any send
+        let mut writer = PipeWriter {
+            tx,
+            pending: Vec::with_capacity(COPY_CHUNK_SIZE),
+        };
+        writer.write_all(b"lost bytes").unwrap(); // buffered, no send yet
+        let err = writer.flush().unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    #[tokio::test]
+    async fn stream_pack_reports_source_is_dir() {
+        let tmp = TempDir::new().unwrap();
+
+        let file = tmp.path().join("f.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let (is_dir, _stream) = pack_stream(file, default_pack()).await.unwrap();
+        assert!(!is_dir);
+
+        let dir = tmp.path().join("d");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::write(dir.join("f.txt"), b"x").unwrap();
+        let (is_dir, _stream) = pack_stream(dir, default_pack()).await.unwrap();
+        assert!(is_dir);
+    }
+
+    #[tokio::test]
+    async fn stream_pack_nonexistent_source_errors() {
+        let tmp = TempDir::new().unwrap();
+        let result = pack_stream(tmp.path().join("does-not-exist"), default_pack()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn stream_roundtrip_single_file() {
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("hello.txt");
+        std::fs::write(&src, b"streaming hello").unwrap();
+
+        let (source_is_dir, stream) = pack_stream(
+            src,
+            PackContext {
+                follow_symlinks: true,
+                include_parent: false,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!source_is_dir);
+
+        let dest = tmp.path().join("dest.txt");
+        let report = unpack_stream(stream, dest.clone(), uc(true, true, false))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "streaming hello");
+        assert_eq!(
+            report.entry_paths,
+            Vec::<PathBuf>::new(),
+            "a file landing as the destination has no path below it to report"
+        );
+    }
+
+    /// POL-593: a directory streamed to a missing destination becomes it, as
+    /// `docker cp SRC DEST` lands it, and the report names where entries landed.
+    #[tokio::test]
+    async fn stream_dir_to_a_missing_dest_becomes_it() {
+        let tmp = TempDir::new().unwrap();
+        let src_dir = tmp.path().join("s");
+        std::fs::create_dir_all(src_dir.join("sub")).unwrap();
+        std::fs::write(src_dir.join("a.txt"), "aaa").unwrap();
+        std::fs::write(src_dir.join("sub").join("b.txt"), "bbb").unwrap();
+
+        let (source_is_dir, stream) = pack_stream(
+            src_dir,
+            PackContext {
+                follow_symlinks: true,
+                include_parent: true,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(source_is_dir);
+
+        let dest = tmp.path().join("out");
+        let report = unpack_stream(stream, dest.clone(), uc(true, true, true))
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(dest.join("a.txt")).unwrap(), "aaa");
+        assert_eq!(
+            std::fs::read_to_string(dest.join("sub").join("b.txt")).unwrap(),
+            "bbb"
+        );
+        for expected in ["a.txt", "sub", "sub/b.txt"] {
+            assert!(
+                report.entry_paths.contains(&PathBuf::from(expected)),
+                "created paths missing {expected}: {:?}",
+                report.entry_paths
+            );
+        }
+    }
+
+    // ── landing each entry ───────────────────────────────────────
+
+    /// A one-chunk stream of `(name, kind, link target)` entries, as a caller
+    /// may build one; a regular file holds its own name.
+    fn archive_of(entries: &[(&str, tar::EntryType, &str)]) -> BoxByteStream {
+        let mut builder = tar::Builder::new(Vec::new());
+        for &(name, kind, target) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_entry_type(kind);
+            header.set_mode(0o755);
+            let data = if kind.is_file() { name.as_bytes() } else { &[] };
+            header.set_size(data.len() as u64);
+            if kind.is_hard_link() || kind.is_symlink() {
+                builder.append_link(&mut header, name, target).unwrap();
+            } else {
+                builder.append_data(&mut header, name, data).unwrap();
+            }
+        }
+        Box::pin(futures::stream::iter([Ok(builder.into_inner().unwrap())]))
+    }
+
+    /// A PAX global header (`git archive` leads with one) describes the
+    /// archive; extraction creates nothing for it, so it is not reported.
+    #[tokio::test]
+    async fn a_pax_global_header_is_not_reported() {
+        use tar::EntryType::{Regular, XGlobalHeader};
+        let tmp = TempDir::new().unwrap();
+        let entries = [("pax_global_header", XGlobalHeader, ""), ("a", Regular, "")];
+
+        let report = unpack_stream(
+            archive_of(&entries),
+            tmp.path().join("out"),
+            uc(true, true, true),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.entry_paths, vec![PathBuf::from("a")]);
+    }
+
+    /// A hard link's target names another entry, found in the destination.
+    #[tokio::test]
+    async fn hard_links_resolve_in_the_destination() {
+        use std::os::unix::fs::MetadataExt;
+        use tar::EntryType::{Directory, Link, Regular};
+        let tmp = TempDir::new().unwrap();
+        let dest = tmp.path().to_path_buf();
+        let entries = [
+            ("X/", Directory, ""),
+            ("X/a", Regular, ""),
+            ("X/h", Link, "X/a"),
+        ];
+
+        unpack_stream(archive_of(&entries), dest.clone(), uc(true, true, true))
+            .await
+            .unwrap();
+
+        let inode = |name: &str| std::fs::metadata(dest.join(name)).unwrap().ino();
+        assert_eq!(inode("X/h"), inode("X/a"));
+    }
+
+    /// A failure names the paths involved, as tar-rs's own errors do.
+    #[tokio::test]
+    async fn landing_errors_name_their_paths() {
+        use tar::EntryType::Link;
+        let tmp = TempDir::new().unwrap();
+        let entries = [("h", Link, "missing-target")];
+
+        let err = unpack_stream(
+            archive_of(&entries),
+            tmp.path().to_path_buf(),
+            uc(true, true, true),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.to_string().contains("missing-target"), "{err}");
+    }
+
+    /// Nothing lands outside the destination: not through a symlink an
+    /// earlier entry made, nor as a hard link to a file outside it. These are
+    /// the checks `unpack_in` makes, which landing makes itself.
+    #[tokio::test]
+    async fn entries_cannot_reach_out_of_the_destination() {
+        use std::os::unix::fs::MetadataExt;
+        use tar::EntryType::{Directory, Link, Regular, Symlink};
+        let tmp = TempDir::new().unwrap();
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let secret = outside.join("secret");
+        std::fs::write(&secret, "s").unwrap();
+        let through_symlink = [
+            ("X/", Directory, ""),
+            ("X/s", Symlink, outside.to_str().unwrap()),
+            ("X/s/f", Regular, ""),
+        ];
+        let hard_link_out = [
+            ("X/", Directory, ""),
+            ("X/h", Link, secret.to_str().unwrap()),
+        ];
+        for (i, entries) in [&through_symlink[..], &hard_link_out[..]]
+            .iter()
+            .enumerate()
+        {
+            for exists in [false, true] {
+                let dest = tmp.path().join(format!("out-{i}-{exists}"));
+                if exists {
+                    std::fs::create_dir(&dest).unwrap();
+                }
+
+                let result = unpack_stream(archive_of(entries), dest, uc(true, true, true)).await;
+
+                assert!(result.is_err(), "case {i}, exists={exists}");
+                assert_eq!(std::fs::read_dir(&outside).unwrap().count(), 1);
+                assert_eq!(std::fs::metadata(&secret).unwrap().nlink(), 1);
+            }
+        }
+    }
+
+    /// A file with holes travels as a GNU sparse entry (ACRYL microVMs' packer
+    /// leaves tar-rs's sparse detection on) and lands with its holes.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn sparse_files_land_with_their_holes() {
+        use std::os::unix::fs::MetadataExt;
+        let tmp = TempDir::new().unwrap();
+        let src = tmp.path().join("s");
+        std::fs::create_dir(&src).unwrap();
+        let image = std::fs::File::create(src.join("disk.img")).unwrap();
+        image.set_len(1 << 20).unwrap();
+        let tar_path = tmp.path().join("s.tar");
+        pack(src, tar_path.clone(), contents_pack()).await.unwrap();
+        let kinds = archived_entries(&tar_path);
+        assert!(kinds
+            .iter()
+            .any(|(_, kind)| *kind == tar::EntryType::GNUSparse));
+
+        let dest = tmp.path().join("out");
+        unpack(tar_path, dest.clone(), uc(true, true, true))
+            .await
+            .unwrap();
+
+        let landed = std::fs::metadata(dest.join("disk.img")).unwrap();
+        assert_eq!(landed.len(), 1 << 20);
+        assert_eq!(landed.blocks(), 0, "the hole must not be written out");
+    }
+
+    // ── streaming landing: docker cp's rule ──────────────────────
+
+    /// `parent/s/sub/b.txt`: the contents are one directory, so only the
+    /// leading `./` of `SRC/.` keeps `sub` from passing for the archive root.
+    fn source_tree(parent: &Path) -> PathBuf {
+        let src = parent.join("s");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("sub").join("b.txt"), "b").unwrap();
+        src
+    }
+
+    /// Stream `src` as a copy does, `SRC` or (`contents`) `SRC/.`, to `dest`.
+    async fn stream_copy(src: &Path, contents: bool, dest: &Path) -> AcrylMicrovmResult<UnpackReport> {
+        let opts = PackContext {
+            follow_symlinks: false,
+            include_parent: !contents,
+        };
+        let (_, stream) = pack_stream(src.to_path_buf(), opts).await?;
+        unpack_stream(stream, dest.to_path_buf(), uc(true, true, true)).await
+    }
+
+    /// Paths under `root`, relative to it and sorted, read off the disk.
+    fn landed(root: &Path) -> Vec<PathBuf> {
+        let mut found: Vec<PathBuf> = extracted_paths(root)
+            .iter()
+            .map(|path| path.strip_prefix(root).unwrap().to_path_buf())
+            .collect();
+        found.sort();
+        found
+    }
+
+    fn paths(names: &[&str]) -> Vec<PathBuf> {
+        names.iter().map(PathBuf::from).collect()
+    }
+
+    /// The rest of docker cp's table: an existing destination keeps `SRC`
+    /// under its own name, and `SRC/.` lands the contents either way. The
+    /// report matches the disk.
+    #[tokio::test]
+    async fn stream_dirs_land_the_way_docker_cp_does() {
+        // (`SRC/.`, destination exists, what lands in the destination)
+        let cases: [(bool, bool, &[&str]); 3] = [
+            (false, true, &["s", "s/sub", "s/sub/b.txt"]),
+            (true, false, &["sub", "sub/b.txt"]),
+            (true, true, &["sub", "sub/b.txt"]),
+        ];
+        for (contents, exists, expected) in cases {
+            let tmp = TempDir::new().unwrap();
+            let dest = tmp.path().join("out");
+            if exists {
+                std::fs::create_dir(&dest).unwrap();
+            }
+
+            let report = stream_copy(&source_tree(tmp.path()), contents, &dest)
+                .await
+                .unwrap();
+
+            let case = format!("contents={contents} exists={exists}");
+            let mut reported = report.entry_paths;
+            reported.sort();
+            assert_eq!(landed(&dest), paths(expected), "{case}");
+            assert_eq!(reported, paths(expected), "{case}");
+        }
+    }
+
+    /// `overwrite=false` refuses an existing destination only: one the copy
+    /// creates holds nothing to overwrite.
+    #[tokio::test]
+    async fn a_missing_dest_needs_no_overwrite() {
+        let tmp = TempDir::new().unwrap();
+        let src = source_tree(tmp.path());
+        let (_, stream) = pack_stream(src.clone(), default_pack()).await.unwrap();
+        unpack_stream(stream, tmp.path().join("streamed"), uc(false, true, true))
+            .await
+            .unwrap();
+
+        let tar_path = tmp.path().join("s.tar");
+        pack(src, tar_path.clone(), default_pack()).await.unwrap();
+        unpack(tar_path, tmp.path().join("unpacked"), uc(false, true, true))
+            .await
+            .unwrap();
+    }
+
+    /// What a rooted archive lands in a new destination. A PAX global header
+    /// (`git archive --prefix=X/` leads with one) describes the archive, so
+    /// `X` is still the root; a hard link's target is re-rooted with it.
+    #[tokio::test]
+    async fn rooted_archives_land_their_contents() {
+        use tar::EntryType::{Directory, Link, Regular, XGlobalHeader};
+        type ArchiveCase<'a> = (&'a [(&'a str, tar::EntryType, &'a str)], &'a [&'a str]);
+        let cases: [ArchiveCase<'_>; 2] = [
+            (
+                &[
+                    ("pax_global_header", XGlobalHeader, ""),
+                    ("X/", Directory, ""),
+                    ("X/a", Regular, ""),
+                ],
+                &["a"],
+            ),
+            (
+                &[
+                    ("X/", Directory, ""),
+                    ("X/a", Regular, ""),
+                    ("X/h", Link, "X/a"),
+                ],
+                &["a", "h"],
+            ),
+        ];
+        for (entries, expected) in cases {
+            let tmp = TempDir::new().unwrap();
+            let dest = tmp.path().join("out");
+
+            let report = unpack_stream(archive_of(entries), dest.clone(), uc(true, true, true))
+                .await
+                .unwrap();
+
+            assert_eq!(landed(&dest), paths(expected));
+            assert_eq!(report.entry_paths, paths(expected));
+        }
+    }
+
+    /// Once an archive led by `b/` has landed `b`'s contents in a new
+    /// destination, an entry outside `b/` cannot land: the copy fails as the
+    /// caller's error and keeps what it wrote.
+    #[tokio::test]
+    async fn entries_outside_the_root_fail_a_copy_to_a_missing_dest() {
+        use tar::EntryType::{Directory, Link, Regular};
+        let led = [("b/", Directory, ""), ("b/c.txt", Regular, "")];
+        let outside = [
+            ("a.txt", Regular, ""),
+            // `bx` starts with `b` but is not under it.
+            ("bx/y", Regular, ""),
+            ("b/h", Link, "a.txt"),
+        ];
+        for last in outside {
+            let tmp = TempDir::new().unwrap();
+            let dest = tmp.path().join("out");
+
+            let archive = archive_of(&[led[0], led[1], last]);
+            let err = unpack_stream(archive, dest.clone(), uc(true, true, true))
+                .await
+                .unwrap_err();
+
+            assert!(matches!(err, AcrylMicrovmError::InvalidArgument(_)), "{err}");
+            assert_eq!(landed(&dest), paths(&["c.txt"]), "{last:?}");
+        }
+    }
+
+    /// Entries land straight in the destination, so a stream that fails
+    /// mid-archive keeps what it wrote.
+    #[tokio::test]
+    async fn a_failed_copy_keeps_what_it_wrote() {
+        let tmp = TempDir::new().unwrap();
+        let tar_path = tmp.path().join("s.tar");
+        pack(source_tree(tmp.path()), tar_path.clone(), default_pack())
+            .await
+            .unwrap();
+        let mut archive = std::fs::read(&tar_path).unwrap();
+        // `s/`, `s/sub/`, then `s/sub/b.txt`: a header and one data block.
+        archive.truncate(4 * 512);
+        let severed: BoxByteStream = Box::pin(futures::stream::iter([
+            Ok(archive),
+            Err(io::Error::other("connection reset")),
+        ]));
+        let dest = tmp.path().join("out");
+
+        let result = unpack_stream(severed, dest.clone(), uc(true, true, true)).await;
+
+        assert!(result.is_err());
+        assert_eq!(landed(&dest), paths(&["sub", "sub/b.txt"]));
+    }
+
+    /// The root's mode lands on the destination after everything inside it,
+    /// so a read-only source root still lands whole.
+    #[tokio::test]
+    async fn stream_read_only_dir_to_a_missing_dest_keeps_its_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let set_mode = |path: &Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        };
+        let tmp = TempDir::new().unwrap();
+        let src = source_tree(tmp.path());
+        let dest = tmp.path().join("out");
+        set_mode(&src, 0o555).unwrap();
+
+        let result = stream_copy(&src, false, &dest).await;
+        let mode = std::fs::metadata(&dest).map(|meta| meta.permissions().mode() & 0o777);
+        // Writable again, so `TempDir` can clean up.
+        for dir in [&src, &dest] {
+            let _ = set_mode(dir, 0o755);
+        }
+
+        result.unwrap();
+        assert_eq!(mode.unwrap(), 0o555);
+        assert_eq!(landed(&dest), paths(&["sub", "sub/b.txt"]));
+    }
+
+    /// Land `entries` at `<tmp>/out` without `force_directory`, once from a
+    /// file and once from a stream, after `prepare` has set up `out`.
+    async fn land_both(
+        entries: &[(&str, tar::EntryType, &str)],
+        prepare: fn(&Path),
+    ) -> Vec<(TempDir, PathBuf, AcrylMicrovmResult<()>)> {
+        let bytes: Vec<u8> = archive_of(entries).map(Result::unwrap).concat().await;
+        let mut landings = Vec::new();
+        for streamed in [false, true] {
+            let tmp = TempDir::new().unwrap();
+            let dest = tmp.path().join("out");
+            prepare(&dest);
+            let result = if streamed {
+                let stream: BoxByteStream = Box::pin(futures::stream::iter([Ok(bytes.clone())]));
+                unpack_stream(stream, dest.clone(), uc(true, true, false))
+                    .await
+                    .map(drop)
+            } else {
+                let tar_path = tmp.path().join("in.tar");
+                std::fs::write(&tar_path, &bytes).unwrap();
+                unpack(tar_path, dest.clone(), uc(true, true, false)).await
+            };
+            landings.push((tmp, dest, result));
+        }
+        landings
+    }
+
+    /// With no directory to land in, an archive led by anything but a
+    /// directory lands that entry as the destination, as `docker cp` lands a
+    /// file: a symlink too. A PAX global header describes the archive, so the
+    /// entry after it leads.
+    #[tokio::test]
+    async fn a_leading_non_directory_becomes_the_dest() {
+        use tar::EntryType::{Regular, Symlink, XGlobalHeader};
+        let symlink = [("l", Symlink, "target")];
+        let git_archive = [("pax_global_header", XGlobalHeader, ""), ("a", Regular, "")];
+
+        for (_tmp, dest, result) in land_both(&symlink, |_| {}).await {
+            result.unwrap();
+            assert_eq!(std::fs::read_link(&dest).unwrap(), PathBuf::from("target"));
+        }
+        for (_tmp, dest, result) in land_both(&git_archive, |_| {}).await {
+            result.unwrap();
+            assert_eq!(std::fs::read_to_string(&dest).unwrap(), "a");
+        }
+    }
+
+    /// A copy to a file lands one entry: anything after the file that leads
+    /// the archive fails the copy as the caller's error, and the file stays.
+    #[tokio::test]
+    async fn entries_after_a_leading_file_fail_the_copy() {
+        use tar::EntryType::Regular;
+        let entries = [("a", Regular, ""), ("b", Regular, "")];
+
+        for (_tmp, dest, result) in land_both(&entries, |_| {}).await {
+            let err = result.unwrap_err();
+            assert!(matches!(err, AcrylMicrovmError::InvalidArgument(_)), "{err}");
+            assert_eq!(std::fs::read_to_string(&dest).unwrap(), "a");
+        }
+    }
+
+    /// A directory cannot land on a file: the copy is the caller's error and
+    /// leaves the file as it was.
+    #[tokio::test]
+    async fn a_directory_cannot_land_on_a_file() {
+        use tar::EntryType::{Directory, Regular};
+        let entries = [("X/", Directory, ""), ("X/a", Regular, "")];
+
+        for (_tmp, dest, result) in
+            land_both(&entries, |dest| std::fs::write(dest, "file").unwrap()).await
+        {
+            let err = result.unwrap_err();
+            assert!(matches!(err, AcrylMicrovmError::InvalidArgument(_)), "{err}");
+            assert_eq!(std::fs::read_to_string(&dest).unwrap(), "file");
+        }
+    }
+
+    /// A hard link that leads an archive has no entry before it to link to.
+    #[tokio::test]
+    async fn a_leading_hard_link_is_refused() {
+        use tar::EntryType::Link;
+        let entries = [("h", Link, "a")];
+
+        for (_tmp, dest, result) in land_both(&entries, |_| {}).await {
+            let err = result.unwrap_err();
+            assert!(matches!(err, AcrylMicrovmError::InvalidArgument(_)), "{err}");
+            assert!(dest.symlink_metadata().is_err());
+        }
+    }
+
+    /// A refused entry is never written: the veto is asked where each entry
+    /// lands, relative to the destination, before extraction writes it.
+    /// Entries before it stay, as any failed copy keeps what it wrote.
+    #[tokio::test]
+    async fn a_refused_entry_is_never_written() {
+        use tar::EntryType::{Directory, Regular};
+        let tmp = TempDir::new().unwrap();
+        let entries = [
+            ("X/", Directory, ""),
+            ("X/a", Regular, ""),
+            ("X/hosts", Regular, ""),
+            ("X/b", Regular, ""),
+        ];
+        let dest = tmp.path().join("out");
+        let asked = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = std::sync::Arc::clone(&asked);
+
+        let err = unpack_stream_refusing(
+            archive_of(&entries),
+            dest.clone(),
+            uc(true, true, false),
+            move |landed: &Path| {
+                seen.lock().unwrap().push(landed.to_path_buf());
+                if landed == Path::new("hosts") {
+                    return Err(AcrylMicrovmError::Unsupported("hosts is shadowed".into()));
+                }
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(err, AcrylMicrovmError::Unsupported(_)), "{err}");
+        assert_eq!(*asked.lock().unwrap(), paths(&["", "a", "hosts"]));
+        assert_eq!(landed(&dest), paths(&["a"]));
+    }
+}

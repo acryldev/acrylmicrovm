@@ -1,0 +1,38 @@
+# Modified by ACRYL, 2026
+[package]
+name = "acrylmicrovm-node"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Node.js bindings for AcrylMicrovm - embeddable VM runtime for secure code execution"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# Core ACRYL microVMs dependencies
+acrylmicrovm = { path = "../../src/acrylmicrovm", features = ["rest"] }
+acrylmicrovm-shared.workspace = true
+
+# napi-rs for Node.js bindings
+napi = { version = "3.16.1", features = ["async", "napi8", "tokio_rt", "serde-json"] }
+napi-derive = "3.7.0"
+serde_json = "1.0"
+
+# Async runtime
+tokio = { version = "1.37", features = ["io-util", "net", "sync", "rt-multi-thread"] }
+futures = "0.3"
+
+# Logging
+tracing = "0.1"
+
+[build-dependencies]
+napi-build = "2.6.0"
+
+[profile.release]
+lto = true
+strip = true  # Strip symbols for smaller binaries
+codegen-units = 1
+opt-level = 3

@@ -1,0 +1,315 @@
+// Modified by ACRYL, 2026
+//! SSH control with implicit startup restricted to configuration.
+
+use std::{fmt, sync::Arc, time::Duration};
+
+use acrylmicrovm_shared::{self as proto, AcrylMicrovmError, AcrylMicrovmResult, constants::ssh::DRAIN_TIMEOUT};
+use serde::{Deserialize, Serialize};
+
+use super::box_impl::BoxImpl;
+use crate::runtime::backend::BoxBackend;
+
+// Allow guest cleanup plus communication and scheduling overhead after startup.
+const SSH_TIMEOUT: Duration = Duration::from_secs(DRAIN_TIMEOUT.as_secs() + 5);
+
+enum StartupPolicy {
+    AllowStart,
+    ExistingVmOnly,
+    RequireRunning,
+}
+
+/// Complete guest SSH configuration, persisted on the container disk.
+///
+/// Configuration deserializes strictly; REST serialization stays internal.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshConfig {
+    pub listen_address: String,
+    pub host_private_key: String,
+    pub accounts: Vec<SshAccount>,
+}
+
+/// Credentials accepted for one SSH login (not a container OS identity).
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshAccount {
+    pub login: String,
+    #[serde(default)]
+    pub authorized_keys: Vec<String>,
+    #[serde(default)]
+    pub ca: Option<SshCaConfig>,
+}
+
+/// Certificate authority and required certificate principal.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SshCaConfig {
+    pub public_key: String,
+    pub principal: String,
+}
+
+impl fmt::Debug for SshConfig {
+    /// Retain the listener address for diagnostics without exposing the host key.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SshConfig")
+            .field("listen_address", &self.listen_address)
+            .field("host_private_key", &"[REDACTED]")
+            .field("accounts", &self.accounts)
+            .finish()
+    }
+}
+
+impl fmt::Debug for SshAccount {
+    /// Identify the login while redacting its authorized keys and CA credentials.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SshAccount")
+            .field("login", &self.login)
+            .field("authorized_keys", &"[REDACTED]")
+            .field("ca", &self.ca)
+            .finish()
+    }
+}
+
+impl fmt::Debug for SshCaConfig {
+    /// Redact both the CA key and principal from credential diagnostics.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SshCaConfig")
+            .field("public_key", &"[REDACTED]")
+            .field("principal", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Guest listener state and public host identity; contains no credentials.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SshStatus {
+    pub enabled: bool,
+    pub generation: u64,
+    pub listen_address: String,
+    pub host_public_key: String,
+    pub host_key_fingerprint: String,
+}
+
+/// Owned SSH control handle; only configuration may implicitly start the box.
+///
+/// `configure()` may start boxes using the image's default command.
+/// With an explicit `BoxOptions.cmd` or `entrypoint`, a Configured or Stopped box returns
+/// `InvalidState`: call `LiteBox::start()` first. This also applies to fresh
+/// handles obtained through `runtime.get()` after stopping the box.
+///
+/// `status()`, `enable()` and `disable()` never start the VM or its main command.
+/// On local Configured or Stopped boxes, enable/disable return `InvalidState`.
+/// Status on valid Configured or Stopped handles returns generation zero and
+/// empty address and host identity fields. Running handles use the existing guest,
+/// including after runtime recovery or attach before start. Spent handles return
+/// `Stopped`; other lifecycle states return `InvalidState`. Status is an observation
+/// at call time and does not prevent a concurrent `configure()` from enabling SSH.
+/// Disable while running to persist the disabled switch.
+///
+/// For the local backend, after startup each operation has a total 15-second
+/// budget: the guest's 10-second cleanup limit plus 5 seconds for
+/// communication and scheduling, from interface acquisition through the RPC;
+/// VM and container startup do not. Guest `DeadlineExceeded` remains
+/// [`AcrylMicrovmError::Rpc`] with the original status context. Runtime shutdown
+/// rejects new operations and cancels interface acquisition and RPCs; in-progress
+/// VM initialization finishes before cancellation is returned. Operations are
+/// not retried, and timeout or cancellation does not undo a configuration the
+/// guest already applied. REST-backed handles support all four operations
+/// with one HTTP request each. The SSH guide (`docs/guides/ssh.md`) owns the
+/// HTTP contract.
+#[derive(Clone)]
+pub struct SshHandle {
+    backend: Arc<dyn BoxBackend>,
+}
+
+impl fmt::Debug for SshHandle {
+    /// Identify the box without traversing backend state or guest credentials.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SshHandle")
+            .field("box_id", self.backend.id())
+            .finish_non_exhaustive()
+    }
+}
+
+impl SshHandle {
+    /// Retain the backend without starting it; the backend decides SSH support.
+    pub(super) fn new(backend: Arc<dyn BoxBackend>) -> Self {
+        Self { backend }
+    }
+
+    /// Persist and enable SSH configuration, disconnecting existing clients.
+    /// Startup follows the policy described on [`SshHandle`].
+    pub async fn configure(&self, config: SshConfig) -> AcrylMicrovmResult<SshStatus> {
+        self.backend.ssh_configure(config).await
+    }
+
+    /// Enable saved configuration without restarting a healthy SSH listener.
+    /// Requires a running local box and an existing configuration.
+    pub async fn enable(&self) -> AcrylMicrovmResult<SshStatus> {
+        self.backend.ssh_enable().await
+    }
+
+    /// Query SSH state without starting the VM or container main command.
+    pub async fn status(&self) -> AcrylMicrovmResult<SshStatus> {
+        self.backend.ssh_status().await
+    }
+
+    /// Stop SSH and disconnect clients, retaining credentials. Repeated calls are supported.
+    /// Requires a running local box; never starts the VM or container main command.
+    pub async fn disable(&self) -> AcrylMicrovmResult<SshStatus> {
+        self.backend.ssh_disable().await
+    }
+}
+
+/// Local SSH control policy; `BoxBackend` forwards to these verbatim.
+impl BoxImpl {
+    pub(crate) async fn ssh_configure(&self, config: SshConfig) -> AcrylMicrovmResult<SshStatus> {
+        self.run_ssh(
+            "configure",
+            StartupPolicy::AllowStart,
+            proto::SshControlRequest {
+                config: Some(config_to_proto(config)),
+                enable: Some(true),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn ssh_enable(&self) -> AcrylMicrovmResult<SshStatus> {
+        self.run_ssh(
+            "enable",
+            StartupPolicy::RequireRunning,
+            proto::SshControlRequest {
+                config: None,
+                enable: Some(true),
+            },
+        )
+        .await
+    }
+
+    pub(crate) async fn ssh_status(&self) -> AcrylMicrovmResult<SshStatus> {
+        self.run_ssh(
+            "status",
+            StartupPolicy::ExistingVmOnly,
+            proto::SshControlRequest::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn ssh_disable(&self) -> AcrylMicrovmResult<SshStatus> {
+        self.run_ssh(
+            "disable",
+            StartupPolicy::RequireRunning,
+            proto::SshControlRequest {
+                config: None,
+                enable: Some(false),
+            },
+        )
+        .await
+    }
+
+    /// Share control policy without cancelling VM initialization midway through
+    /// its transfer of resources into LiveState, matching exec's startup boundary.
+    async fn run_ssh(
+        &self,
+        name: &str,
+        startup: StartupPolicy,
+        request: proto::SshControlRequest,
+    ) -> AcrylMicrovmResult<SshStatus> {
+        let stopped =
+            || AcrylMicrovmError::Stopped(format!("SSH {name}: box {} stopped", self.config.id));
+        if self.shutdown_token.is_cancelled() {
+            return Err(stopped());
+        }
+        let session = match startup {
+            StartupPolicy::AllowStart => self.ssh_session().await.map(Some),
+            StartupPolicy::ExistingVmOnly | StartupPolicy::RequireRunning => {
+                self.existing_ssh_session()
+            }
+        }
+        .map_err(|error| match error {
+            AcrylMicrovmError::Stopped(_) => stopped(),
+            error => error,
+        })?;
+        tokio::select! {
+            biased;
+            _ = self.shutdown_token.cancelled() => Err(stopped()),
+            result = tokio::time::timeout(SSH_TIMEOUT, async {
+                let Some(session) = session else {
+                    if matches!(startup, StartupPolicy::RequireRunning) {
+                        return Err(AcrylMicrovmError::InvalidState(format!(
+                            "SSH {name}: box {} is not running; start it first", self.config.id
+                        )));
+                    }
+                    return Ok(SshStatus {
+                        enabled: false,
+                        generation: 0,
+                        listen_address: String::new(),
+                        host_public_key: String::new(),
+                        host_key_fingerprint: String::new(),
+                    });
+                };
+                let response = session.ssh().await?.control(request).await
+                    .map_err(|status| map_tonic_err(name, *status))?;
+                status_from_proto(name, response.status)
+            }) => result.unwrap_or_else(|_| Err(AcrylMicrovmError::Rpc(format!(
+                "SSH {name}: timed out after {} seconds for box {}",
+                SSH_TIMEOUT.as_secs(), self.config.id
+            )))),
+        }
+    }
+}
+
+/// Preserve each login's credentials when crossing from the public API to the wire.
+fn config_to_proto(config: SshConfig) -> proto::SshConfig {
+    proto::SshConfig {
+        listen_address: config.listen_address,
+        host_private_key: config.host_private_key,
+        accounts: config
+            .accounts
+            .into_iter()
+            .map(|account| proto::SshAccount {
+                login: account.login,
+                authorized_keys: account.authorized_keys,
+                ca: account.ca.map(|ca| proto::SshCaConfig {
+                    public_key: ca.public_key,
+                    principal: ca.principal,
+                }),
+            })
+            .collect(),
+    }
+}
+
+/// Reject a missing status instead of treating an incomplete reply as disabled SSH.
+fn status_from_proto(name: &str, status: Option<proto::SshStatus>) -> AcrylMicrovmResult<SshStatus> {
+    let status = status
+        .ok_or_else(|| AcrylMicrovmError::Internal(format!("SSH {name}: response missing status")))?;
+    Ok(SshStatus {
+        enabled: status.enabled,
+        generation: status.generation,
+        listen_address: status.listen_address,
+        host_public_key: status.host_public_key,
+        host_key_fingerprint: status.host_key_fingerprint,
+    })
+}
+
+/// Preserve actionable guest error categories and include the failed SSH operation.
+fn map_tonic_err(name: &str, status: tonic::Status) -> AcrylMicrovmError {
+    let message = format!("SSH {name}: {status}");
+    match status.code() {
+        tonic::Code::InvalidArgument => AcrylMicrovmError::InvalidArgument(message),
+        tonic::Code::FailedPrecondition => AcrylMicrovmError::InvalidState(message),
+        tonic::Code::Unimplemented => AcrylMicrovmError::Unsupported(message),
+        _ => AcrylMicrovmError::Rpc(message),
+    }
+}
+
+const _: () = {
+    /// Reject public SSH types that cannot be shared across async tasks.
+    const fn assert_send_sync<T: Send + Sync>() {}
+    let _ = assert_send_sync::<SshHandle>;
+    let _ = assert_send_sync::<SshConfig>;
+    let _ = assert_send_sync::<SshAccount>;
+    let _ = assert_send_sync::<SshCaConfig>;
+    let _ = assert_send_sync::<SshStatus>;
+};

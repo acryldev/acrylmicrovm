@@ -1,0 +1,5 @@
+# Modified by ACRYL, 2026
+interface:
+  display_name: "AcrylMicrovm"
+  short_description: "Build, deploy and update AcrylMicrovm cloud apps"
+  default_prompt: "Use $acrylmicrovm to build or adapt an app, deploy it and verify its public URL."

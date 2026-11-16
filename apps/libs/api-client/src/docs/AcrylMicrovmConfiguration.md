@@ -1,0 +1,46 @@
+# AcrylMicrovmConfiguration
+
+
+## Properties
+
+Name | Type | Description | Notes
+------------ | ------------- | ------------- | -------------
+**turnstile** | [**TurnstileConfig**](TurnstileConfig.md) |  | [optional] [default to undefined]
+**version** | **string** | ACRYL microVMs version | [default to undefined]
+**posthog** | [**PosthogConfig**](PosthogConfig.md) | PostHog configuration | [optional] [default to undefined]
+**oidc** | [**OidcConfig**](OidcConfig.md) | OIDC configuration | [default to undefined]
+**linkedAccountsEnabled** | **boolean** | Whether linked accounts are enabled | [default to undefined]
+**announcements** | [**{ [key: string]: Announcement; }**](Announcement.md) | System announcements | [default to undefined]
+**pylonAppId** | **string** | Pylon application ID | [optional] [default to undefined]
+**proxyTemplateUrl** | **string** | Proxy template URL | [default to undefined]
+**dashboardUrl** | **string** | Dashboard URL | [default to undefined]
+**maintananceMode** | **boolean** | Whether maintenance mode is enabled | [default to undefined]
+**environment** | **string** | Current environment | [default to undefined]
+**billingApiUrl** | **string** | Billing API URL | [optional] [default to undefined]
+**analyticsApiUrl** | **string** | Analytics API URL | [optional] [default to undefined]
+**rateLimit** | [**RateLimitConfig**](RateLimitConfig.md) | Rate limit configuration | [optional] [default to undefined]
+
+## Example
+
+```typescript
+import { AcrylMicrovmConfiguration } from './api';
+
+const instance: AcrylMicrovmConfiguration = {
+    turnstile,
+    version,
+    posthog,
+    oidc,
+    linkedAccountsEnabled,
+    announcements,
+    pylonAppId,
+    proxyTemplateUrl,
+    dashboardUrl,
+    maintananceMode,
+    environment,
+    billingApiUrl,
+    analyticsApiUrl,
+    rateLimit,
+};
+```
+
+[[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)

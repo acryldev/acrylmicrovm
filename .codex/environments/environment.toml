@@ -1,0 +1,6 @@
+# Modified by ACRYL, 2026
+version = 1
+name = "AcrylMicrovm"
+
+[setup]
+script = "make setup:submodules"

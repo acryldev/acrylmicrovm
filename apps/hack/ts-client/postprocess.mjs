@@ -1,0 +1,204 @@
+#!/usr/bin/env node
+// Normalizes generated TypeScript API clients: adds the package-version
+// User-Agent, prunes unused template imports, and repairs parameter docs the
+// upstream generator renders ambiguously.
+// Usage: postprocess.mjs <src-dir> <client-name>
+//
+// Node rather than sed: the generator's output needs structured edits across
+// configuration, API, and documentation files. GNU and BSD sed disagree on
+// in-place editing (`-i` takes a mandatory suffix on BSD) and on `a\` line
+// insertion, so a sed implementation silently works on CI and fails on macOS.
+
+import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs'
+
+const [srcDir, clientName] = process.argv.slice(2)
+
+if (!srcDir || !clientName) {
+  console.error('Usage: postprocess.mjs <src-dir> <client-name>')
+  process.exit(1)
+}
+
+const configPath = `${srcDir}/configuration.ts`
+let config = readFileSync(configPath, 'utf8')
+
+function importedIdentifier(specifier) {
+  return specifier
+    .replace(/^type\s+/, '')
+    .split(/\s+as\s+/)
+    .at(-1)
+}
+
+function pruneUnusedImports(source, modulePath) {
+  const escapedModulePath = modulePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const importPattern = new RegExp(`^import \\{ ([^\\n]+) \\} from '${escapedModulePath}';$`, 'm')
+  const match = source.match(importPattern)
+
+  if (!match) return source
+
+  const sourceWithoutImport = source
+    .replace(match[0], '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/\/\/.*$/gm, '')
+  const usedSpecifiers = match[1]
+    .split(',')
+    .map((specifier) => specifier.trim())
+    .filter((specifier) => {
+      const identifier = importedIdentifier(specifier)
+      return identifier && new RegExp(`\\b${identifier}\\b`).test(sourceWithoutImport)
+    })
+
+  return source.replace(
+    match[0],
+    usedSpecifiers.length ? `import { ${usedSpecifiers.join(', ')} } from '${modulePath}';` : '',
+  )
+}
+
+function fixParameterDocumentation(source) {
+  return source
+    .split('\n')
+    .map((line) => {
+      if (line.startsWith('let ') && !line.includes('(optional)')) {
+        line = line.replace(' (default to undefined)', '')
+      }
+
+      if (line.startsWith('| **')) {
+        line = line.replace(/\[\*\*(.+?)\*\*\]\*\*Array<[^>\n]+>\*\*/g, (_match, scalarType) => {
+          return `[**${scalarType.replaceAll(' | ', ' &#124; ')}**]`
+        })
+        line = line.replace(/\*\*Array<([^>\n]+)>\*\*/g, (arrayType, members) => {
+          const fallbackMember = '&#39;11184809&#39;'
+          const memberList = members.split(' &#124; ')
+          const validMembers = memberList.filter((member) => member !== fallbackMember)
+
+          return validMembers.length === memberList.length ? arrayType : `**Array<${validMembers.join(' &#124; ')}>**`
+        })
+
+        if (!line.includes('(optional)')) {
+          line = line.replace('| defaults to undefined|', '| |')
+        }
+      }
+
+      return line
+    })
+    .join('\n')
+}
+
+// The generated User-Agent value is a TS template literal, so the
+// `${packageJson.version}` below must reach the file verbatim.
+const userAgent = '`' + clientName + '/${packageJson.version}`'
+
+// 1. Import the version right after the generator's "do not edit" header.
+const header = /(Do not edit the class manually\.\n \*\/\n)/
+if (!header.test(config)) {
+  console.error(`ERROR: generator header not found in ${configPath}`)
+  process.exit(1)
+}
+config = config.replace(header, `$1\nimport * as packageJson from '../package.json';\n`)
+
+// 2. Set the User-Agent — replacing the generator's own header if it emitted
+//    one, otherwise inserting ours ahead of the caller-supplied spread.
+const existing = /'User-Agent': `[^`]*`/
+const spread = '...param.baseOptions?.headers,'
+
+if (existing.test(config)) {
+  config = config.replace(existing, `'User-Agent': ${userAgent}`)
+} else if (config.includes(spread)) {
+  config = config.replace(spread, `'User-Agent': ${userAgent},\n                ${spread}`)
+} else {
+  console.error(`ERROR: no User-Agent header and no baseOptions spread in ${configPath}`)
+  process.exit(1)
+}
+
+writeFileSync(configPath, config)
+
+// Preserve the original sixth- and eighth-position Axios options as new list filters are added.
+const adminPath = `${srcDir}/api/admin-api.ts`
+if (existsSync(adminPath)) {
+  let admin = readFileSync(adminPath, 'utf8')
+  const scopeParameter = 'boxCountScope?: AdminListOrganizationsOverviewBoxCountScopeEnum,'
+  const includeParameter = 'include?: AdminListOrganizationsOverviewIncludeEnum,'
+  const requestEntry = /(adminListOrganizationsOverview: async \([^\n]+\): Promise<RequestArgs> => \{\n)/g
+  // The API rejects the generator's unknown-value member, so include offers only memberEmails.
+  const unknownInclude =
+    "export const AdminListOrganizationsOverviewIncludeEnum = {\n    MEMBER_EMAILS: 'memberEmails',\n    UNKNOWN_DEFAULT_OPEN_API: '11184809',\n"
+  if (
+    admin.split(scopeParameter).length - 1 !== 4 ||
+    admin.split(includeParameter).length - 1 !== 4 ||
+    admin.split(unknownInclude).length - 1 !== 1 ||
+    [...admin.matchAll(requestEntry)].length !== 1
+  ) {
+    throw new Error(`Unexpected organization-list signatures in ${adminPath}; review request-options compatibility`)
+  }
+  admin = admin
+    .replace(unknownInclude, unknownInclude.replace("    UNKNOWN_DEFAULT_OPEN_API: '11184809',\n", ''))
+    .replaceAll(
+      scopeParameter,
+      'boxCountScope?: AdminListOrganizationsOverviewBoxCountScopeEnum | RawAxiosRequestConfig,',
+    )
+    .replaceAll(includeParameter, 'include?: AdminListOrganizationsOverviewIncludeEnum | RawAxiosRequestConfig,')
+    .replace(
+      requestEntry,
+      `$1            // Legacy callers pass Axios options before the optional inventory filters.
+            if (typeof boxCountScope === 'object' && boxCountScope !== null) {
+                options = boxCountScope;
+                boxCountScope = undefined;
+            }
+            if (typeof include === 'object' && include !== null) {
+                options = include;
+                include = undefined;
+            }
+`,
+    )
+    .replaceAll(
+      '@param {AdminListOrganizationsOverviewBoxCountScopeEnum} [boxCountScope]',
+      '@param {AdminListOrganizationsOverviewBoxCountScopeEnum | RawAxiosRequestConfig} [boxCountScope] Legacy Axios options, or:',
+    )
+    .replaceAll(
+      '@param {AdminListOrganizationsOverviewIncludeEnum} [include]',
+      '@param {AdminListOrganizationsOverviewIncludeEnum | RawAxiosRequestConfig} [include] Legacy Axios options, or:',
+    )
+    .replace(/\/\*\*[\s\S]*?\*\//g, (block) =>
+      block.includes('boxCountScope') ? block.replace(/[ \t]+$/gm, '') : block,
+    )
+  writeFileSync(adminPath, admin)
+}
+
+const apiDir = `${srcDir}/api`
+if (existsSync(apiDir)) {
+  for (const fileName of readdirSync(apiDir).filter((fileName) => fileName.endsWith('.ts'))) {
+    const apiPath = `${apiDir}/${fileName}`
+    const generatedApi = readFileSync(apiPath, 'utf8')
+    const prunedApi = pruneUnusedImports(pruneUnusedImports(generatedApi, '../common'), '../base')
+
+    if (prunedApi !== generatedApi) writeFileSync(apiPath, prunedApi)
+  }
+}
+
+const docsDir = `${srcDir}/docs`
+if (existsSync(docsDir)) {
+  for (const fileName of readdirSync(docsDir).filter((fileName) => fileName.endsWith('.md'))) {
+    const docsPath = `${docsDir}/${fileName}`
+    const generatedDocs = readFileSync(docsPath, 'utf8')
+    const fixedDocs = fixParameterDocumentation(generatedDocs)
+
+    if (fixedDocs !== generatedDocs) writeFileSync(docsPath, fixedDocs)
+  }
+}
+
+// Axios exposes ISO date-time strings. Keep this mapping local to the new
+// onboarding contracts; other generated model timestamp contracts stay intact.
+for (const [model, fields] of Object.entries({
+  'onboarding-dto': ['submittedAt'],
+  'prompt-draft-dto': ['updatedAt'],
+  'prompt-handoff-dto': ['createdAt', 'copiedAt'],
+})) {
+  const modelPath = `${srcDir}/models/${model}.ts`
+  if (!existsSync(modelPath)) continue
+  let source = readFileSync(modelPath, 'utf8')
+  for (const field of fields) {
+    source = source.replace(new RegExp(`('${field}'\\??: )Date`, 'g'), '$1string')
+  }
+  writeFileSync(modelPath, source)
+}
+
+console.log(`Postprocessed TypeScript client at ${srcDir}`)

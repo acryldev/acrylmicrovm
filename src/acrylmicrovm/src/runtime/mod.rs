@@ -1,0 +1,31 @@
+// Modified by ACRYL, 2026
+pub mod advanced_options;
+pub mod auth;
+pub(crate) mod backend;
+pub mod checkpoints;
+pub mod constants;
+pub mod cpu_count;
+pub mod domains;
+pub mod id;
+pub mod images;
+pub mod layout;
+pub(crate) mod lock;
+pub mod options;
+pub mod registries;
+pub(crate) mod signal_handler;
+pub mod types;
+pub mod volumes;
+
+mod core;
+#[cfg(feature = "embedded-runtime")]
+pub(crate) mod embedded;
+mod import;
+pub(crate) mod rt_impl;
+
+pub use auth::{AuthHandle, Principal};
+pub use checkpoints::{CheckpointHandle, CheckpointInfo, CheckpointState};
+pub use core::AcrylMicrovmRuntime;
+pub use domains::{Domain, DomainHandle, DomainList, DomainTarget};
+pub use images::ImageHandle;
+pub use registries::{NewRegistryCredential, RegistryCredential, RegistryHandle};
+pub use volumes::VolumeHandle;

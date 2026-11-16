@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "profile": "acrylmicrovm",
+  "repository": "acryldev/acrylmicrovm",
+  "tooling": {
+    "repository": "acryldev/agent-tooling",
+    "ref": "main"
+  },
+  "checks": [
+    {
+      "name": "format",
+      "command": "make fmt:check"
+    },
+    {
+      "name": "lint",
+      "command": "make lint"
+    },
+    {
+      "name": "test",
+      "command": "make test"
+    }
+  ]
+}

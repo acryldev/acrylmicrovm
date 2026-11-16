@@ -1,0 +1,711 @@
+// Modified by ACRYL, 2026
+//! High-level sandbox runtime structures.
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
+
+use crate::experimental::ExperimentalFeatures;
+use crate::litebox::LiteBox;
+use crate::metrics::RuntimeMetrics;
+use crate::runtime::backend::RuntimeBackend;
+use crate::runtime::checkpoints::{CheckpointBackend, CheckpointHandle};
+use crate::runtime::images::ImageBackend;
+use crate::runtime::options::{BoxArchive, BoxOptions, AcrylMicrovmOptions};
+use crate::runtime::registries::RegistryBackend;
+use crate::runtime::rt_impl::{LocalRuntime, RuntimeImpl};
+use crate::runtime::signal_handler::install_signal_handler;
+use crate::runtime::types::BoxInfo;
+use crate::runtime::volumes::VolumeBackend;
+use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
+
+#[cfg(feature = "rest")]
+use crate::rest::runtime::RestRuntime;
+// ============================================================================
+// GLOBAL DEFAULT RUNTIME
+// ============================================================================
+
+/// Global default runtime singleton (lazy initialization).
+///
+/// This runtime uses `AcrylMicrovmOptions::default()` for configuration.
+/// Most applications should use this instead of creating custom runtimes.
+static DEFAULT_RUNTIME: OnceLock<AcrylMicrovmRuntime> = OnceLock::new();
+
+/// Flag to ensure atexit handler is only registered once.
+static ATEXIT_INSTALLED: AtomicBool = AtomicBool::new(false);
+
+/// Atexit handler: stops non-detached boxes on normal process exit.
+///
+/// The default runtime is `static` (never drops), so `Drop` won't fire.
+/// This atexit handler covers the normal exit path. Signal handler covers
+/// SIGTERM/SIGINT. Together they ensure all exit paths are handled.
+extern "C" fn shutdown_on_exit() {
+    if let Some(rt) = DEFAULT_RUNTIME.get() {
+        rt.backend.shutdown_sync();
+    }
+}
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+/// AcrylMicrovmRuntime provides the main entry point for creating and managing Boxes.
+///
+/// **Architecture**: Backend-agnostic — delegates to a `RuntimeBackend` implementation.
+/// The default backend manages local VMs. Alternative backends (e.g., REST API)
+/// can be selected via named constructors.
+///
+/// **Lock Behavior** (local backend): Only one local runtime can use a given
+/// `ACRYLMICROVM_HOME` directory at a time. The filesystem lock is automatically
+/// released when dropped.
+///
+/// **Cloning**: Runtime is cheaply cloneable via `Arc` - all clones share the same state.
+#[derive(Clone)]
+pub struct AcrylMicrovmRuntime {
+    backend: Arc<dyn RuntimeBackend>,
+    checkpoint_backend: Option<Arc<dyn CheckpointBackend>>,
+    /// Image capability — an `Arc` view of the same backend, local or REST.
+    image_backend: Arc<dyn ImageBackend>,
+    /// Named-volume capability — an `Arc` view of the same backend (local or
+    /// REST), mirroring `image_backend` / `images()`. Surfaced via `volumes()`.
+    /// The concrete backend returns `Unsupported` until one is wired up.
+    volume_backend: Option<Arc<dyn VolumeBackend>>,
+    /// Identity capability — `Some` only for backends with a notion of
+    /// remote identity (currently REST; an `Arc` view of the same backend,
+    /// not a second client). Surfaced via `auth()`, mirroring
+    /// `image_backend` / `images()`.
+    auth_backend: Option<Arc<dyn crate::runtime::auth::AuthBackend>>,
+    /// Registry-login capability — `Some` only for REST, like `auth_backend`.
+    /// Surfaced via `registries()`.
+    registry_backend: Option<Arc<dyn RegistryBackend>>,
+    /// Organization domains — `Some` only for REST, like `auth_backend`.
+    /// Surfaced via `domains()`.
+    domain_backend: Option<Arc<dyn crate::runtime::domains::DomainBackend>>,
+}
+
+// ============================================================================
+// RUNTIME IMPLEMENTATION
+// ============================================================================
+
+impl AcrylMicrovmRuntime {
+    /// Create a new AcrylMicrovmRuntime with the provided options (local backend).
+    ///
+    /// **Prepare Before Execute**: All setup (filesystem, locks, managers) completes
+    /// before returning. No partial initialization states.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - Another `AcrylMicrovmRuntime` is already using the same home directory
+    /// - Filesystem initialization fails
+    /// - Image API initialization fails
+    pub fn new(options: AcrylMicrovmOptions) -> AcrylMicrovmResult<Self> {
+        let local = LocalRuntime(RuntimeImpl::new(options)?);
+        Ok(Self::from_local(local))
+    }
+
+    pub(crate) fn new_with_experimental_features(
+        options: AcrylMicrovmOptions,
+        features: ExperimentalFeatures,
+    ) -> AcrylMicrovmResult<Self> {
+        let local = LocalRuntime(RuntimeImpl::new_with_experimental_features(
+            options, features,
+        )?);
+        Ok(Self::from_local(local))
+    }
+
+    /// Build a local runtime without host validation, for tests on hosts without
+    /// usable virtualization, such as CI runners. Callers must not exercise VM or
+    /// hypervisor operations.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn new_for_test(options: AcrylMicrovmOptions) -> AcrylMicrovmResult<Self> {
+        let local = LocalRuntime(RuntimeImpl::new_for_test(options)?);
+        Ok(Self::from_local(local))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn new_for_test_with_features(
+        options: AcrylMicrovmOptions,
+        features: ExperimentalFeatures,
+    ) -> AcrylMicrovmResult<Self> {
+        Ok(Self::from_local(LocalRuntime(RuntimeImpl::initialize(
+            options, features,
+        )?)))
+    }
+
+    pub(super) fn from_local(local: LocalRuntime) -> Self {
+        let backend_arc = Arc::new(local);
+        let image_backend = Arc::clone(&backend_arc) as Arc<dyn ImageBackend>;
+        let volume_backend = Arc::clone(&backend_arc) as Arc<dyn VolumeBackend>;
+        Self {
+            backend: backend_arc,
+            checkpoint_backend: None,
+            image_backend,
+            volume_backend: Some(volume_backend),
+            auth_backend: None,
+            registry_backend: None,
+            domain_backend: None,
+        }
+    }
+
+    /// Create a REST-backed runtime connecting to a remote ACRYL microVMs API server.
+    ///
+    /// All box operations are delegated to the remote server via HTTP.
+    /// The server manages its own VM lifecycle — this client just sends requests.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use acrylmicrovm::runtime::AcrylMicrovmRuntime;
+    /// use acrylmicrovm::AcrylMicrovmRestOptions;
+    ///
+    /// let runtime = AcrylMicrovmRuntime::rest(
+    ///     AcrylMicrovmRestOptions::new("https://api.example.com")
+    ///         .with_api_key("blk_live_opaque".into())
+    /// )?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    #[cfg(feature = "rest")]
+    pub fn rest(config: crate::rest::options::AcrylMicrovmRestOptions) -> AcrylMicrovmResult<Self> {
+        let rest_runtime = Arc::new(RestRuntime::new(&config)?);
+        let auth_backend = Arc::clone(&rest_runtime) as Arc<dyn crate::runtime::auth::AuthBackend>;
+        let image_backend = Arc::clone(&rest_runtime) as Arc<dyn ImageBackend>;
+        let volume_backend = Arc::clone(&rest_runtime) as Arc<dyn VolumeBackend>;
+        let registry_backend = Arc::clone(&rest_runtime) as Arc<dyn RegistryBackend>;
+        let domain_backend =
+            Arc::clone(&rest_runtime) as Arc<dyn crate::runtime::domains::DomainBackend>;
+        let checkpoint_backend = Arc::clone(&rest_runtime) as Arc<dyn CheckpointBackend>;
+        Ok(Self {
+            backend: rest_runtime,
+            checkpoint_backend: Some(checkpoint_backend),
+            image_backend,
+            volume_backend: Some(volume_backend),
+            auth_backend: Some(auth_backend),
+            registry_backend: Some(registry_backend),
+            domain_backend: Some(domain_backend),
+        })
+    }
+
+    /// Create a new runtime with default options.
+    ///
+    /// This is equivalent to `AcrylMicrovmRuntime::new(AcrylMicrovmOptions::default())`
+    /// but returns a `Result` instead of panicking.
+    ///
+    /// Prefer `default_runtime()` for most use cases (shares global instance).
+    /// Use this when you need an owned, non-global runtime with default config.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use acrylmicrovm::runtime::AcrylMicrovmRuntime;
+    ///
+    /// let runtime = AcrylMicrovmRuntime::with_defaults()?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn with_defaults() -> AcrylMicrovmResult<Self> {
+        Self::new(AcrylMicrovmOptions::default())
+    }
+
+    /// Get or initialize the default global runtime with automatic signal handling.
+    ///
+    /// This runtime uses `AcrylMicrovmOptions::default()` for configuration.
+    /// The runtime is created lazily on first access and reused for all
+    /// subsequent calls.
+    ///
+    /// **Signal Handling**: On first call, this also installs SIGTERM and SIGINT
+    /// handlers that will gracefully shutdown all boxes before exiting. This is
+    /// the recommended way to use ACRYL microVMs for simple applications.
+    ///
+    /// For applications that need custom signal handling, use `AcrylMicrovmRuntime::new()`
+    /// instead and call `shutdown()` manually in your signal handler.
+    ///
+    /// # Panics
+    ///
+    /// Panics if runtime initialization fails. This indicates a serious
+    /// system issue (e.g., cannot create home directory, filesystem lock).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use acrylmicrovm::runtime::AcrylMicrovmRuntime;
+    ///
+    /// let runtime = AcrylMicrovmRuntime::default_runtime();
+    /// // SIGTERM/SIGINT will automatically trigger graceful shutdown
+    /// // All subsequent calls return the same runtime
+    /// let same_runtime = AcrylMicrovmRuntime::default_runtime();
+    /// ```
+    pub fn default_runtime() -> &'static Self {
+        let rt = DEFAULT_RUNTIME.get_or_init(|| {
+            Self::with_defaults()
+                .unwrap_or_else(|e| panic!("Failed to initialize AcrylMicrovmRuntime:\n\n{e}"))
+        });
+
+        // Register atexit handler (once) for normal exit cleanup.
+        // The default runtime is static (never drops), so Drop won't fire.
+        // This covers normal process exit; signal handler covers SIGTERM/SIGINT.
+        if ATEXIT_INSTALLED
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            unsafe {
+                libc::atexit(shutdown_on_exit);
+            }
+        }
+
+        // Install signal handler for graceful shutdown.
+        // Thread-based: works from any context (sync or async, with or without Tokio).
+        // When signal is received, the shutdown callback stops all boxes gracefully.
+        let backend = rt.backend.clone();
+        install_signal_handler(move || async move {
+            let _ = backend.shutdown(None).await;
+        });
+
+        rt
+    }
+
+    /// Try to get the default runtime if it's been initialized.
+    ///
+    /// Returns `None` if the default runtime hasn't been created yet.
+    /// Useful for checking if default runtime exists without creating it.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use acrylmicrovm::runtime::AcrylMicrovmRuntime;
+    ///
+    /// if let Some(runtime) = AcrylMicrovmRuntime::try_default_runtime() {
+    ///     println!("Default runtime already exists");
+    /// } else {
+    ///     println!("Default runtime not yet created");
+    /// }
+    /// ```
+    pub fn try_default_runtime() -> Option<&'static Self> {
+        DEFAULT_RUNTIME.get()
+    }
+
+    /// Initialize the default runtime with custom options.
+    ///
+    /// This must be called before the first use of `default_runtime()`.
+    /// Returns an error if the default runtime has already been initialized.
+    ///
+    /// # Errors
+    ///
+    /// Returns error if:
+    /// - Default runtime already initialized (call this early in main!)
+    /// - Runtime initialization fails (filesystem, lock, etc.)
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// use acrylmicrovm::runtime::{AcrylMicrovmRuntime, AcrylMicrovmOptions};
+    /// use std::path::PathBuf;
+    ///
+    /// fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let mut opts = AcrylMicrovmOptions::default();
+    ///     opts.home_dir = PathBuf::from("/custom/acrylmicrovm");
+    ///
+    ///     AcrylMicrovmRuntime::init_default_runtime(opts)?;
+    ///
+    ///     // All subsequent default_runtime() calls use custom config
+    ///     let runtime = AcrylMicrovmRuntime::default_runtime();
+    ///     Ok(())
+    /// }
+    /// ```
+    pub fn init_default_runtime(options: AcrylMicrovmOptions) -> AcrylMicrovmResult<()> {
+        let runtime = Self::new(options)?;
+        DEFAULT_RUNTIME
+            .set(runtime)
+            .map_err(|_| AcrylMicrovmError::Internal(
+                "Default runtime already initialized. Call init_default_runtime() before any use of default_runtime().".into()
+            ))
+    }
+
+    // ========================================================================
+    // BOX LIFECYCLE OPERATIONS (delegate to backend)
+    // ========================================================================
+
+    /// Create a box handle.
+    ///
+    /// Allocates a lock, persists the box to database with `Configured` status,
+    /// and returns a LiteBox handle. The VM is not started until `start()` or
+    /// `exec()` is called.
+    ///
+    /// The box is immediately visible in `list_info()` after creation.
+    pub async fn create(
+        &self,
+        options: BoxOptions,
+        name: Option<String>,
+    ) -> AcrylMicrovmResult<LiteBox> {
+        // Reject incompatible option combinations at the create boundary (fail
+        // here, not at start), uniformly for the local and REST backends.
+        options.sanitize_create()?;
+        self.backend.create(options, name).await
+    }
+
+    /// Get an existing box by name, or create a new one if it doesn't exist.
+    ///
+    /// Returns `(LiteBox, true)` if a new box was created, or `(LiteBox, false)`
+    /// if an existing box with the given name was found. When an existing box is
+    /// returned, each backend decides which requested options must be
+    /// compatible with the existing box.
+    pub async fn get_or_create(
+        &self,
+        options: BoxOptions,
+        name: Option<String>,
+    ) -> AcrylMicrovmResult<(LiteBox, bool)> {
+        options.sanitize_create()?;
+        self.backend.get_or_create(options, name).await
+    }
+
+    /// Get a handle to an existing box by ID or name.
+    ///
+    /// The `id_or_name` parameter can be either:
+    /// - A box ID (full or prefix)
+    /// - A user-defined box name
+    pub async fn get(&self, id_or_name: &str) -> AcrylMicrovmResult<Option<LiteBox>> {
+        self.backend.get(id_or_name).await
+    }
+
+    /// Get information about a specific box by ID or name (without creating a handle).
+    pub async fn get_info(&self, id_or_name: &str) -> AcrylMicrovmResult<Option<BoxInfo>> {
+        self.backend.get_info(id_or_name).await
+    }
+
+    /// List all boxes, sorted by creation time (newest first).
+    pub async fn list_info(&self) -> AcrylMicrovmResult<Vec<BoxInfo>> {
+        self.backend.list_info().await
+    }
+
+    /// Check if a box with the given ID or name exists.
+    pub async fn exists(&self, id_or_name: &str) -> AcrylMicrovmResult<bool> {
+        self.backend.exists(id_or_name).await
+    }
+
+    /// Get runtime-wide metrics.
+    pub async fn metrics(&self) -> AcrylMicrovmResult<RuntimeMetrics> {
+        self.backend.metrics().await
+    }
+
+    /// Remove a box completely by ID or name.
+    pub async fn remove(&self, id_or_name: &str, force: bool) -> AcrylMicrovmResult<()> {
+        self.backend.remove(id_or_name, force).await
+    }
+
+    /// Import a box from a `.acrylmicrovm` archive.
+    ///
+    /// Creates a new box with a new ID from archived disk images and configuration.
+    /// Pass `name=None` to keep the imported box unnamed.
+    /// Support depends on backend capabilities (local backends implement import).
+    pub async fn import_box(
+        &self,
+        archive: BoxArchive,
+        name: Option<String>,
+    ) -> AcrylMicrovmResult<LiteBox> {
+        self.backend.import_box(archive, name).await
+    }
+
+    /// REST-managed disk checkpoints. Operations return Unsupported on local runtimes.
+    pub fn checkpoints(&self) -> CheckpointHandle {
+        CheckpointHandle::new(self.checkpoint_backend.as_ref().map(Arc::clone))
+    }
+
+    // ========================================================================
+    // SHUTDOWN OPERATIONS
+    // ========================================================================
+
+    /// Gracefully shutdown all boxes in this runtime.
+    ///
+    /// This method stops all running boxes, waiting up to `timeout` seconds
+    /// for each box to stop gracefully before force-killing it.
+    ///
+    /// After calling this method, the runtime is permanently shut down and
+    /// will return errors for any new operations (like `create()`).
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - Seconds to wait before force-killing each box:
+    ///   - `None` - Use default timeout (10 seconds)
+    ///   - `Some(n)` where n > 0 - Wait n seconds
+    ///   - `Some(-1)` - Wait indefinitely (no timeout)
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use acrylmicrovm::runtime::AcrylMicrovmRuntime;
+    ///
+    /// #[tokio::main]
+    /// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    ///     let runtime = AcrylMicrovmRuntime::new(Default::default())?;
+    ///
+    ///     // ... create and use boxes ...
+    ///
+    ///     // On signal or shutdown request:
+    ///     runtime.shutdown(None).await?; // Default 10s timeout
+    ///     // or
+    ///     runtime.shutdown(Some(30)).await?; // 30s timeout
+    ///     // or
+    ///     runtime.shutdown(Some(-1)).await?; // Wait forever
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    pub async fn shutdown(&self, timeout: Option<i32>) -> AcrylMicrovmResult<()> {
+        self.backend.shutdown(timeout).await
+    }
+
+    // ========================================================================
+    // IMAGE OPERATIONS (via ImageHandle)
+    // ========================================================================
+
+    /// Get a handle for the images this runtime can boot from.
+    ///
+    /// On an embedded runtime that is the local cache; on a REST runtime, the
+    /// server's catalog. This abstraction separates image management from
+    /// runtime management, following the same pattern as `LiteBox` for box
+    /// operations.
+    ///
+    /// # Errors
+    ///
+    /// None: both backends hold images. The `Result` is kept so callers
+    /// written when a REST runtime refused here still compile.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use acrylmicrovm::runtime::AcrylMicrovmRuntime;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let runtime = AcrylMicrovmRuntime::with_defaults()?;
+    /// let images = runtime.images()?;
+    ///
+    /// // Pull an image
+    /// let image = images.pull("alpine:latest").await?;
+    /// println!("Pulled: {}", image.reference());
+    ///
+    /// // List all images
+    /// let all_images = images.list().await?;
+    /// println!("Total images: {}", all_images.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn images(&self) -> AcrylMicrovmResult<crate::runtime::ImageHandle> {
+        Ok(crate::runtime::ImageHandle::new(
+            Arc::clone(&self.image_backend),
+            self.registry_backend.as_ref().map(Arc::clone),
+        ))
+    }
+
+    // ========================================================================
+    // NAMED VOLUME OPERATIONS (via VolumeHandle)
+    // ========================================================================
+
+    /// Get a handle for named-volume operations (create, list, get, remove).
+    ///
+    /// Returns a [`VolumeHandle`](crate::runtime::VolumeHandle) over this
+    /// runtime's `<home>/volumes` tree, following the same accessor pattern as
+    /// `images()`.
+    ///
+    /// # Errors
+    ///
+    /// The handle's operations currently return `AcrylMicrovmError::Unsupported`
+    /// until a concrete volume backend is wired up.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use acrylmicrovm::runtime::AcrylMicrovmRuntime;
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let runtime = AcrylMicrovmRuntime::with_defaults()?;
+    /// let volumes = runtime.volumes()?;
+    /// let info = volumes.create(Some("my-data")).await?;
+    /// println!("created volume {}", info.id);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn volumes(&self) -> AcrylMicrovmResult<crate::runtime::VolumeHandle> {
+        match &self.volume_backend {
+            Some(backend) => Ok(crate::runtime::VolumeHandle::new(Arc::clone(backend))),
+            None => Err(AcrylMicrovmError::Unsupported(
+                "Named volume operations are not available on this runtime".to_string(),
+            )),
+        }
+    }
+
+    /// Get a handle for identity operations (`whoami`).
+    ///
+    /// Returns an [`AuthHandle`](crate::AuthHandle) that resolves the calling
+    /// credential's identity via `GET /v1/me`. Identity is deliberately kept
+    /// off the generic runtime API and off the `RuntimeBackend` trait — this
+    /// accessor mirrors `images()` / `ImageHandle`. The handle is an `Arc`
+    /// view of the same REST backend as box operations (no second client).
+    ///
+    /// # Errors
+    ///
+    /// Returns `AcrylMicrovmError::Unsupported` for non-REST runtimes (local
+    /// runtimes have no remote identity).
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use acrylmicrovm::{AcrylMicrovmRuntime, AcrylMicrovmRestOptions};
+    ///
+    /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+    /// let runtime = AcrylMicrovmRuntime::rest(
+    ///     AcrylMicrovmRestOptions::new("https://api.example.com")
+    ///         .with_api_key("blk_live_opaque"),
+    /// )?;
+    /// let me = runtime.auth()?.whoami().await?;
+    /// println!("{}", me.sub);
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn auth(&self) -> AcrylMicrovmResult<crate::runtime::auth::AuthHandle> {
+        match &self.auth_backend {
+            Some(backend) => Ok(crate::runtime::auth::AuthHandle::new(Arc::clone(backend))),
+            None => Err(AcrylMicrovmError::Unsupported(
+                "identity (auth) is only available on REST runtimes".to_string(),
+            )),
+        }
+    }
+
+    /// Get a handle for the organization's domains.
+    ///
+    /// Returns a [`DomainHandle`](crate::DomainHandle) that lists the domains
+    /// the organization holds, binds one to a box port and unbinds it, all by
+    /// name. Mirrors `auth()`: an `Arc` view of the same REST backend, and
+    /// `Unsupported` on a local runtime, which publishes nothing.
+    pub fn domains(&self) -> AcrylMicrovmResult<crate::runtime::DomainHandle> {
+        match &self.domain_backend {
+            Some(backend) => Ok(crate::runtime::DomainHandle::new(Arc::clone(backend))),
+            None => Err(AcrylMicrovmError::Unsupported(
+                "domains are only available on REST runtimes".to_string(),
+            )),
+        }
+    }
+}
+
+// ============================================================================
+// DEBUG
+// ============================================================================
+
+impl std::fmt::Debug for AcrylMicrovmRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcrylMicrovmRuntime").finish_non_exhaustive()
+    }
+}
+
+// ============================================================================
+// THREAD SAFETY ASSERTIONS
+// ============================================================================
+
+// Compile-time assertions to ensure AcrylMicrovmRuntime is Send + Sync
+// This is critical for multithreaded usage (e.g., Python GIL release)
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    let _ = assert_send_sync::<AcrylMicrovmRuntime>;
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn local_runtime() -> (AcrylMicrovmRuntime, TempDir) {
+        let temp_dir = TempDir::new_in("/tmp").expect("temp dir");
+        let runtime = AcrylMicrovmRuntime::new_for_test(AcrylMicrovmOptions {
+            home_dir: temp_dir.path().to_path_buf(),
+            image_registries: vec![],
+            ..Default::default()
+        })
+        .expect("local runtime");
+        (runtime, temp_dir)
+    }
+
+    #[tokio::test]
+    async fn local_checkpoint_operations_are_unsupported_without_creating_storage() {
+        let (runtime, home) = local_runtime();
+        let checkpoints = runtime.checkpoints();
+        let errors = [
+            checkpoints
+                .create("source", Some("base".into()))
+                .await
+                .expect_err("local checkpoint creation must fail"),
+            checkpoints.list().await.unwrap_err(),
+            checkpoints.get("base").await.unwrap_err(),
+            checkpoints.remove("base", false).await.unwrap_err(),
+            checkpoints.remove("base", true).await.unwrap_err(),
+            runtime
+                .create(
+                    BoxOptions {
+                        rootfs: crate::RootfsSpec::Checkpoint("base".into()),
+                        ..Default::default()
+                    },
+                    Some("worker".into()),
+                )
+                .await
+                .err()
+                .expect("local create from a checkpoint must fail"),
+            runtime
+                .get_or_create(
+                    BoxOptions {
+                        rootfs: crate::RootfsSpec::Checkpoint("base".into()),
+                        ..Default::default()
+                    },
+                    Some("worker".into()),
+                )
+                .await
+                .err()
+                .expect("local get_or_create from a checkpoint must fail"),
+        ];
+        for error in errors {
+            assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error}");
+            assert!(error.to_string().contains("REST runtimes"), "{error}");
+        }
+        assert!(!home.path().join("checkpoints").exists());
+        assert!(runtime.list_info().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_rejects_detached_remove_on_stop() {
+        // Remove-on-stop (auto_delete>0) with detach=true is contradictory. The
+        // create boundary must reject it up front rather than deferring to start().
+        let (runtime, _dir) = local_runtime();
+        let opts = BoxOptions {
+            auto_delete: Some(1),
+            detach: true,
+            ..Default::default()
+        };
+        let err = runtime
+            .create(opts, None)
+            .await
+            .err()
+            .expect("detached remove-on-stop must be rejected at create");
+        // POL-356: caller-input validation errors map to InvalidArgument
+        // (→ HTTP 400 over acrylmicrovm serve), not Config (→ 500) — this is the
+        // caller's mistake, not a server/environment fault.
+        assert!(
+            matches!(err, AcrylMicrovmError::InvalidArgument(_)),
+            "expected an InvalidArgument error, got: {err:?}"
+        );
+        assert!(
+            err.to_string().contains("remove-on-stop is incompatible"),
+            "unexpected message: {err}"
+        );
+    }
+
+    /// A local runtime pulls with the logins in its options; it has no
+    /// server to keep any, so the handle is refused rather than handed out.
+    #[test]
+    fn registries_are_unsupported_on_a_local_runtime() {
+        let (runtime, _dir) = local_runtime();
+
+        let err = runtime
+            .images()
+            .unwrap()
+            .registries()
+            .err()
+            .expect("a local runtime has no registry logins");
+
+        assert!(matches!(err, AcrylMicrovmError::Unsupported(_)), "{err:?}");
+        assert!(err.to_string().contains("image_registries"), "{err}");
+    }
+}

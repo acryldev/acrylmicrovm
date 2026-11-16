@@ -1,0 +1,11 @@
+# Code ownership for acryldev/acrylmicrovm.
+# Order matters: the LAST matching pattern for a path wins.
+# Referenced teams must have explicit repo access or the rule is ignored by GitHub.
+
+# All code is owned by the reviewers team.
+*                          @acryldev/reviewers
+
+# Legal and contributor policy changes require project owner review.
+/CONTRIBUTING.md           @DorianZheng
+/docs/legal/               @DorianZheng
+/.github/CODEOWNERS        @DorianZheng

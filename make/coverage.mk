@@ -1,0 +1,152 @@
+# Modified by ACRYL, 2026
+PHONY_TARGETS += coverage\:cli coverage codecov coverage\:go\:checkpoint
+
+# Match Codecov's exclusions locally: production guest and SDK code must not
+# disappear from the denominator just because their tests run separately.
+COVERAGE_REPORT_ARGS = --ignore-filename-regex '(^|/)(src/deps/[^/]+/vendor|src/test-utils|tests)/'
+
+# Instrument core/shared/REST, non-VM integration, CLI, native VMM, and Linux
+# guest tests. --no-report accumulates profiles across the passes; the clean
+# first drops profiles left by earlier runs, which would otherwise be merged
+# in and inflate the numbers. As in test:unit:rust, every pass runs even when
+# an earlier one fails, and the recipe exits non-zero if any pass failed.
+define run_unit_coverage
+	@cargo llvm-cov clean --workspace
+	@rc=0; \
+	cargo llvm-cov nextest --no-report --no-tests=warn $(NEXTEST_PROFILE_FLAG) $(RUST_UNIT_CORE_ARGS) $(NEXTEST_FILTER) || rc=$$?; \
+	cargo llvm-cov nextest --no-report --no-tests=warn $(NEXTEST_PROFILE_FLAG) $(RUST_UNIT_SHARED_ARGS) $(NEXTEST_FILTER) || rc=$$?; \
+	cargo llvm-cov nextest --no-report --no-tests=warn $(NEXTEST_PROFILE_FLAG) $(RUST_UNIT_VMM_ARGS) $(NEXTEST_FILTER) || rc=$$?; \
+	cargo llvm-cov test --no-report $(RUST_UNIT_REST_ARGS) -- --test-threads=1 $(REST_CARGOTEST_FILTER) || rc=$$?; \
+	$(MAKE) coverage:runtime || rc=$$?; \
+	$(MAKE) coverage:cli || rc=$$?; \
+	$(MAKE) coverage:bindings || rc=$$?; \
+	if [ "$$(uname)" = Linux ]; then \
+		cargo llvm-cov nextest $(GUEST_RUNNER_CONFIG) --no-report --no-tests=fail $(NEXTEST_PROFILE_FLAG) -p acrylmicrovm-guest $(NEXTEST_FILTER) || rc=$$?; \
+	fi; \
+	exit $$rc
+endef
+
+# Generate HTML coverage report (unit tests only).
+coverage:
+	@echo "📊 Generating code coverage report..."
+	$(run_unit_coverage)
+	@cargo llvm-cov report $(COVERAGE_REPORT_ARGS) --html --output-dir target/coverage
+	@echo "✅ Coverage report: target/coverage/html/index.html"
+
+# Generate LCOV output for CI upload.
+coverage\:lcov:
+	@echo "📊 Generating LCOV coverage..."
+	$(run_unit_coverage)
+	@mkdir -p target/coverage
+	@cargo llvm-cov report $(COVERAGE_REPORT_ARGS) --lcov --output-path target/coverage/lcov.info
+	@echo "✅ LCOV output: target/coverage/lcov.info"
+
+coverage\:cli:
+	@bash "$(SCRIPT_DIR)/test/with-cli-binary.sh" --coverage \
+		cargo llvm-cov nextest --no-report --no-tests=fail $(NEXTEST_PROFILE_FLAG) -p acrylmicrovm-cli --bins --test auth --test ssh_cloud --test custom_kernel_rc --test checkpoint $(NEXTEST_FILTER) -- --skip ::vm_install::
+
+coverage\:runtime:
+	@cargo llvm-cov nextest --no-report --no-tests=fail $(NEXTEST_PROFILE_FLAG) \
+		-p acrylmicrovm --no-default-features --features test-support \
+		--test runtime --test shutdown --test network $(NEXTEST_FILTER)
+
+coverage\:bindings:
+	@rc=0; \
+	cargo llvm-cov nextest --no-report --no-tests=fail $(NEXTEST_PROFILE_FLAG) \
+		-p acrylmicrovm-c -p acrylmicrovm-node --lib $(NEXTEST_FILTER) || rc=$$?; \
+	cargo llvm-cov nextest --no-report --no-tests=fail $(NEXTEST_PROFILE_FLAG) \
+		-p acrylmicrovm-python --no-default-features --lib $(NEXTEST_FILTER) || rc=$$?; \
+	exit $$rc
+
+# Language tests exercise the exported bindings that Rust lib tests cannot see.
+# Keep their profiles separate from the core collector and upload both reports.
+coverage\:bindings\:external: test\:unit\:scripts
+	@bash $(SCRIPT_DIR)/test/coverage-bindings.sh
+
+# Render collected profiles, including partial results from a failed test run.
+coverage\:report:
+	@mkdir -p target/coverage
+	@cargo llvm-cov report $(COVERAGE_REPORT_ARGS) --lcov --output-path target/coverage/lcov.info
+	@cargo llvm-cov report $(COVERAGE_REPORT_ARGS) --html --output-dir target/coverage
+
+# Codecov enforces patch coverage against the PR base; total coverage is reported.
+codecov: coverage\:lcov
+
+# Add real KVM execution to the unit profiles before the CI upload. The CI
+# profile bounds each test; disabling retries preserves the first failure. Every
+# passing test is listed by name, so the CI log shows which hardware tests ran.
+coverage\:vmm\:kvm: _ensure-kvm
+	@cargo llvm-cov nextest --no-report --no-tests=fail --profile ci --retries 0 --status-level pass \
+		-p acrylmicrovm-hypervisor -p acrylmicrovm-vmm --lib --run-ignored only --test-threads=1 \
+		-E 'test(vm::tests::) | test(tests::kvm::)'
+	@cargo llvm-cov report $(COVERAGE_REPORT_ARGS) --lcov --output-path target/coverage/lcov.info
+
+# Add the real-kernel boots of VMM_KERNEL to the same profiles, listed the same way.
+# CI runs it only when the vmm path filter matches.
+coverage\:vmm\:boot: export VMM_GUEST_MOUNT_INIT := $(PROJECT_ROOT)/target/vmm/guest-mount/x86_64-unknown-linux-musl/release/acrylmicrovm-guest
+coverage\:vmm\:boot: _ensure-kvm _ensure-vmm-kernel $(VMM_BALLOON_INIT) vmm\:guest-mount-init
+	@cargo llvm-cov nextest --no-report --no-tests=fail --profile ci --retries 0 --status-level pass \
+		-p acrylmicrovm-vmm --lib --run-ignored only --test-threads=1 -E 'test(boot::tests::)'
+	@cargo llvm-cov report $(COVERAGE_REPORT_ARGS) --lcov --output-path target/coverage/lcov.info
+
+# Go's reports include every package, including packages with no tests.
+coverage\:go: dev\:go
+	@mkdir -p target/coverage
+	@rc=0; \
+	(cd sdks/go && go test -tags acrylmicrovm_dev -covermode=atomic -coverpkg=./... \
+		-coverprofile="$(PROJECT_ROOT)/target/coverage/go-sdk.out" $(GOTEST_FILTER) ./...) || rc=$$?; \
+	(cd src/deps/libgvproxy-sys/gvproxy-bridge && go test -covermode=atomic -coverpkg=./... \
+		-coverprofile="$(PROJECT_ROOT)/target/coverage/gvproxy.out" $(GOTEST_FILTER) ./...) || rc=$$?; \
+	(cd apps/secret-server && GOWORK=off go test -race -covermode=atomic -coverpkg=./... \
+		-coverprofile="$(PROJECT_ROOT)/target/coverage/secret-server.out" $(GOTEST_FILTER) ./...) || rc=$$?; \
+	exit $$rc
+
+# Native archive import/export does not boot a VM, but the production constructor still
+# requires a supported host. The Linux native-binding job enables KVM first.
+coverage\:go\:checkpoint: $(if $(CARGO_LLVM_COV),dev\:c,dev\:go)
+	@mkdir -p target/coverage
+	@native_tags=acrylmicrovm_dev,acrylmicrovm_integration; \
+	if [ -n "$$CARGO_LLVM_COV" ]; then \
+		native_tags=$$native_tags,acrylmicrovm_coverage; \
+		native_profile_runtime=("$$(rustc --print target-libdir)"/libprofiler_builtins-*.rlib); \
+		(cd sdks/go && CGO_LDFLAGS="\"$${native_profile_runtime[0]}\"" go test -count=1 -tags=$$native_tags ./integration/archive/internal/nativeprofile) || exit $$?; \
+	fi; \
+	cd sdks/go && go test -count=1 -tags=$$native_tags \
+		-o "$(PROJECT_ROOT)/target/coverage/checkpoint-native.test" \
+		-covermode=atomic -coverpkg=github.com/acryldev/acrylmicrovm/sdks/go \
+		-coverprofile="$(PROJECT_ROOT)/target/coverage/go-checkpoint-native.out" \
+		-run '^TestCheckpointNative' ./integration/archive
+
+coverage\:python: _ensure-python-deps
+	@mkdir -p target/coverage/python
+	@. .venv/bin/activate && cd sdks/python && \
+		python -m pytest tests/ -m "not integration" $(PYTEST_FILTER) \
+		--cov=acrylmicrovm --cov-report=term-missing \
+		--cov-report=xml:../../target/coverage/python/coverage.xml
+
+coverage\:node: _ensure-node-deps
+	@cd sdks/node && npm test -- --coverage $(VITEST_FILTER)
+
+coverage\:python\:integration: dev\:python _local-registry
+	@mkdir -p target/coverage/python
+	@. .venv/bin/activate && cd sdks/python && \
+		$(WITH_LOCAL_REGISTRY) python -m pytest tests/ -m "not e2e" $(PYTEST_FILTER) \
+		--cov=acrylmicrovm --cov-report=term-missing \
+		--cov-report=xml:../../target/coverage/python/coverage.xml
+
+coverage\:node\:integration: dev\:node _local-registry
+	@cd sdks/node && $(WITH_LOCAL_REGISTRY) npm run test:all -- --coverage $(VITEST_FILTER)
+
+# Add VM integration coverage to the unit profiles instead of erasing them.
+# Run coverage:lcov first for a combined report; ACRYLMICROVM_DEPS_STUB must be unset.
+coverage\:integration: $(if $(SETUP_DONE),,runtime\:debug)
+	@echo "📊 Generating integration test coverage..."
+	@rc=0; \
+	cargo llvm-cov nextest \
+		-p acrylmicrovm --features krun,gvproxy,native --test '*' \
+		--profile vm --no-report $(NEXTEST_FILTER) || rc=$$?; \
+	cargo llvm-cov nextest -p acrylmicrovm-cli --test '*' \
+		--profile vm --no-report $(NEXTEST_CLI_FILTER) || rc=$$?; \
+	$(MAKE) coverage:report || rc=$$?; \
+	exit $$rc
+	@echo "✅ Combined coverage report: target/coverage/html/index.html"

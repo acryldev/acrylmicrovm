@@ -1,0 +1,827 @@
+# Modified by ACRYL, 2026
+PHONY_TARGETS += test test\:unit\:cli test\:unit\:vmm test\:unit\:guest test\:guest-perms test\:guest-artifacts test\:perf\:import-export test\:skill\:acrylmicrovm-diagrams
+PHONY_TARGETS += test\:integration\:vmm\:kvm test\:integration\:vmm\:elf test\:integration\:vmm\:linux _ensure-kvm _ensure-vmm-kernel test\:vmm\:boot
+PHONY_TARGETS += test\:integration\:vmm\:hvf _ensure-hvf
+PHONY_TARGETS += test\:unit\:openapi\:server
+PHONY_TARGETS += test\:e2e\:drivers
+PHONY_TARGETS += _local-registry
+PHONY_TARGETS += _guest-boot-probe
+PHONY_TARGETS += test\:integration\:lifecycle-race
+
+# Mirrors GitHub Actions strategy.fail-fast. Default false: aggregator
+# targets run every sub-suite even if an earlier one fails, then exit
+# non-zero with a summary of which suites failed. Set FAIL_FAST=true to
+# abort at the first failing suite (original behavior).
+FAIL_FAST ?= false
+export FAIL_FAST
+
+# Scope a run by test name: make <target> FILTER=<pattern>. Empty = full
+# suite. Works for every test target. FILTER is mapped to each runner's
+# native name selector, so match semantics are per-runner (nextest/ctest/
+# go: regex, pytest -k / vitest -t: expression/substring).
+export FILTER
+PHONY_TARGETS += test\:fractional-cpus\:acceptance
+
+# Advanced nextest-only filter expression. Use this for CI-specific exclusions
+# that cannot be expressed as a simple positive FILTER pattern.
+export NEXTEST_FILTER_EXPR
+
+# Shared by unit-test and coverage targets; CI uses nextest's bounded CI profile.
+# Scoped to the guest invocation; Cargo passes listing and test argv to this runner.
+GUEST_RUNNER_CONFIG = --config "target.'cfg(target_os = \"linux\")'.runner = [\"$(PROJECT_ROOT)/src/guest/src/service/ssh/tests/runner.sh\"]"
+NEXTEST_PROFILE_FLAG = $(if $(NEXTEST_PROFILE),--profile $(NEXTEST_PROFILE),)
+NEXTEST_FILTER   = $(if $(NEXTEST_FILTER_EXPR),-E '$(NEXTEST_FILTER_EXPR)',$(if $(FILTER),-E 'test(~$(FILTER))',))
+NEXTEST_CLI_FILTER = $(if $(NEXTEST_FILTER_EXPR),-E '$(NEXTEST_FILTER_EXPR)',$(if $(FILTER),-E 'test(~$(FILTER))',-E 'not binary(stress_disk)'))
+CARGOTEST_FILTER = $(if $(FILTER),$(FILTER),)
+# The `--features rest` pass (RUST_UNIT_REST_ARGS) is the only one that compiles
+# the `rest` module at all — `rest` is not a default feature and nothing else
+# in the test build enables it — so every rest-gated test lives or dies by this
+# filter. It covers the whole module: scoped to one test module it silently
+# skipped the other six.
+REST_CARGOTEST_FILTER = $(if $(FILTER),$(FILTER),rest::)
+PYTEST_FILTER    = $(if $(FILTER),-k '$(FILTER)',)
+VITEST_FILTER    = $(if $(FILTER),-t '$(FILTER)',)
+CTEST_FILTER     = $(if $(FILTER),-R '$(FILTER)',)
+GOTEST_FILTER    = $(if $(FILTER),-run '$(FILTER)',)
+
+# The Rust unit-test crate set, shared by test:unit:rust and the coverage
+# targets so coverage measures exactly what the unit suite runs. Test builds
+# still get acrylmicrovm's default features back through the acrylmicrovm-test-utils
+# dev-dependency, so they need the vendored submodules or ACRYLMICROVM_DEPS_STUB=1.
+RUST_UNIT_CORE_ARGS   = -p acrylmicrovm --no-default-features --features native --lib
+RUST_UNIT_SHARED_ARGS = -p acrylmicrovm-shared --lib
+RUST_UNIT_REST_ARGS   = -p acrylmicrovm --no-default-features --features rest --lib
+RUST_UNIT_VMM_ARGS    = -p acrylmicrovm-hypervisor -p acrylmicrovm-vmm --lib
+
+CLI_INTEGRATION_TESTS = $(basename $(notdir $(filter-out src/cli/tests/stress_disk.rs,$(wildcard src/cli/tests/*.rs))))
+
+# $(call run_suites,<space-separated make targets>)
+# Runs each target via a recursive $(MAKE). With FAIL_FAST=false the loop
+# continues past failures and exits non-zero at the end listing the
+# failed targets; with FAIL_FAST=true it breaks on the first failure.
+define run_suites
+	@rc=0; failed=""; \
+	for t in $(1); do \
+		echo ""; \
+		if ! $(MAKE) $$t; then \
+			rc=1; failed="$$failed $$t"; \
+			if [ "$(FAIL_FAST)" = "true" ]; then break; fi; \
+		fi; \
+	done; \
+	echo ""; \
+	if [ $$rc -ne 0 ]; then \
+		echo "❌ Failed suites:$$failed"; \
+		exit 1; \
+	fi
+endef
+
+# Heavy shared setup (runtime build + Rust image cache) is built ONCE by the
+# integration aggregators before they fan out; SETUP_DONE=1 tells the per-suite
+# recursive sub-makes (and the dev:* prereqs) to skip rebuilding it. Running a
+# leaf directly (SETUP_DONE unset) still builds its own prerequisites.
+export SETUP_DONE
+
+# $(call run_integration_suites,<space-separated make targets>)
+# Like run_suites, but builds the shared runtime once up front (unless a parent
+# already did, signalled by SETUP_DONE) and runs every suite with SETUP_DONE=1
+# so no sub-make re-derives the phony runtime:debug / warm-cache prereqs.
+define run_integration_suites
+	@if [ -z "$(SETUP_DONE)" ]; then \
+		echo "🔧 Preparing shared test runtime (once)..."; \
+		$(MAKE) runtime:debug || exit 1; \
+		if echo "$(1)" | grep -qE 'test:integration:(rust|core)'; then \
+			$(MAKE) test:warm-cache:rust SETUP_DONE=1 || exit 1; \
+		fi; \
+	fi
+	@rc=0; failed=""; \
+	for t in $(1); do \
+		echo ""; \
+		if ! $(MAKE) $$t SETUP_DONE=1; then \
+			rc=1; failed="$$failed $$t"; \
+			if [ "$(FAIL_FAST)" = "true" ]; then break; fi; \
+		fi; \
+	done; \
+	echo ""; \
+	if [ $$rc -ne 0 ]; then \
+		echo "❌ Failed suites:$$failed"; \
+		exit 1; \
+	fi
+endef
+
+# Default test target runs only changed components.
+test:
+	@$(MAKE) test:changed
+
+test\:setup\:submodules:
+	@bash $(SCRIPT_DIR)/test/test-setup-submodules.sh
+
+# Pinned ACRYL microVMs diagram skill validator. This suite is deterministic: it uses
+# local stand-ins for gh and Mermaid CLI while exercising the real parser,
+# source, diff, and cross-view validation code from agent-tooling.
+test\:skill\:acrylmicrovm-diagrams:
+	@echo "🧪 Running AcrylMicrovm diagrams skill validator tests..."
+	@./.agent-tooling/install.sh >/dev/null
+	@hooks_path="$$(git config --get core.hooksPath)"; \
+	tooling_root="$$(cd "$$hooks_path/.." && pwd)"; \
+	python3 -m unittest discover -s "$$tooling_root/.agents/skills/acrylmicrovm-diagrams/tests" -v
+
+# Smart test: only test components with changes, fall back to full matrix.
+test\:changed:
+ifeq ($(CHANGED_COMPONENTS),)
+	@echo "📋 No changed components detected — skipping tests."
+	@echo "   (Use 'make test:all' to run the full test matrix)"
+else
+	@echo "📋 Changed components: $(CHANGED_COMPONENTS)"
+	$(call run_suites,$(addprefix test:changed:,$(sort $(CHANGED_COMPONENTS))))
+	@echo ""
+	@echo "✅ All changed-component tests passed"
+endif
+
+# Per-component test dispatch targets (map component tag → existing test targets).
+#
+# rust runs the reference-server suite first: its error table is keyed on the
+# Display text of `AcrylMicrovmError` (src/shared/src/errors.rs, this component), so
+# a new variant leaves the reference server answering the caller's mistake as a
+# server fault. It costs milliseconds and fails before the long suites start.
+test\:changed\:rust:
+	@$(MAKE) test:unit:openapi
+	@$(MAKE) test:unit:rust
+	@$(MAKE) test:integration:rust
+
+test\:changed\:cli:
+	@$(MAKE) test:integration:cli
+
+test\:changed\:ffi:
+	@$(MAKE) test:unit:ffi
+
+test\:changed\:python:
+	@$(MAKE) test:all:python
+
+test\:changed\:node:
+	@$(MAKE) test:all:node
+
+test\:changed\:c:
+	@$(MAKE) test:unit:c
+	@$(MAKE) test:integration:c
+
+test\:changed\:go:
+	@$(MAKE) test:unit:go
+
+test\:changed\:apps:
+	@$(MAKE) test:apps:secret-server
+
+# The Box API contract and the reference server that implements it.
+test\:changed\:openapi:
+	@$(MAKE) test:unit:openapi
+
+# Integration-only for changed components (used by E2E CI on PRs).
+test\:integration\:changed:
+ifeq ($(CHANGED_COMPONENTS),)
+	@echo "📋 No changed components detected — skipping integration tests."
+else
+	@echo "📋 Running integration tests for changed components: $(CHANGED_COMPONENTS)"
+	$(call run_integration_suites,$(strip \
+		$(if $(filter rust,$(CHANGED_COMPONENTS)),test:integration:rust) \
+		$(if $(filter cli,$(CHANGED_COMPONENTS)),test:integration:cli) \
+		$(if $(filter python,$(CHANGED_COMPONENTS)),test:integration:python) \
+		$(if $(filter node,$(CHANGED_COMPONENTS)),test:integration:node) \
+		$(if $(filter c,$(CHANGED_COMPONENTS)),test:integration:c)))
+	@echo ""
+	@echo "✅ Changed-component integration tests passed"
+endif
+
+# Full matrix: all unit suites + all integration suites.
+test\:all:
+	@echo "📋 Running full test matrix (unit → integration)"
+	$(call run_suites,test:unit test:integration test:apps:secret-server)
+	@echo ""
+	@echo "✅ All tests passed (full matrix)"
+
+# Unit matrix.
+test\:unit:
+	@echo "── Unit tests (core, sdk) ──"
+	$(call run_suites,test:unit:core test:unit:sdk)
+	@echo ""
+	@echo "✅ Unit test matrix passed"
+
+# Integration matrix.
+test\:integration:
+	@echo "── Integration tests (core, sdk) ──"
+	$(call run_integration_suites,test:integration:core test:integration:sdk)
+	@echo ""
+	@echo "✅ Integration test matrix passed"
+
+# Stress suites: intentionally excluded from the default integration matrix.
+test\:stress:
+	@echo "── Stress tests ──"
+	$(call run_integration_suites,test:stress:disk)
+	@echo ""
+	@echo "✅ Stress test matrix passed"
+
+# Core unit suites: Rust unit + FFI unit + gvproxy bridge unit.
+test\:unit\:core:
+	@echo "── Core unit suites (rust, openapi, ffi, gvproxy) ──"
+	$(call run_suites,test:unit:rust test:unit:openapi test:unit:ffi test:unit:gvproxy)
+
+# Core integration suites: Rust integration + CLI integration.
+test\:integration\:core:
+	@echo "── Core integration suites (rust, cli) ──"
+	$(call run_integration_suites,test:integration:rust test:integration:cli)
+
+# SDK unit suites: Python unit + Node unit + C unit + Go unit.
+test\:unit\:sdk:
+	@echo "── SDK unit suites (python, node, c, go) ──"
+	$(call run_suites,test:unit:python test:unit:node test:unit:c test:unit:go)
+
+# SDK integration suites run on the VM-capable E2E runner, including Go archives.
+test\:integration\:sdk:
+	@echo "── SDK integration suites (python, node, c, go) ──"
+	$(call run_integration_suites,test:integration:python test:integration:node test:integration:c test:integration:go)
+
+# Rust unit tests (parallel via nextest, fallback to serial cargo test).
+#
+# Status accumulation: every crate set always runs (so a `-p acrylmicrovm-shared`
+# regression isn't masked by a `-p acrylmicrovm` failure aborting first), but
+# the recipe exits non-zero if ANY of them failed. POSIX shell otherwise
+# evaluates `cmd_a; cmd_b` as the rc of cmd_b, silently swallowing cmd_a.
+test\:unit\:rust:
+	@echo "🧪 Running Rust unit tests..."
+	@rc=0; \
+	if command -v cargo-nextest >/dev/null 2>&1; then \
+		cargo nextest run --no-tests=warn $(NEXTEST_PROFILE_FLAG) $(RUST_UNIT_CORE_ARGS) $(NEXTEST_FILTER) || rc=$$?; \
+		cargo nextest run --no-tests=warn $(NEXTEST_PROFILE_FLAG) $(RUST_UNIT_SHARED_ARGS) $(NEXTEST_FILTER) || rc=$$?; \
+		cargo nextest run --no-tests=warn $(NEXTEST_PROFILE_FLAG) $(RUST_UNIT_VMM_ARGS) $(NEXTEST_FILTER) || rc=$$?; \
+	else \
+		cargo test $(RUST_UNIT_CORE_ARGS) -- --test-threads=1 $(CARGOTEST_FILTER) || rc=$$?; \
+		cargo test $(RUST_UNIT_SHARED_ARGS) -- --test-threads=1 $(CARGOTEST_FILTER) || rc=$$?; \
+		cargo test $(RUST_UNIT_VMM_ARGS) -- --test-threads=1 $(CARGOTEST_FILTER) || rc=$$?; \
+	fi; \
+	cargo test $(RUST_UNIT_REST_ARGS) -- --test-threads=1 $(REST_CARGOTEST_FILTER) || rc=$$?; \
+	exit $$rc
+
+# Inline tests also execute installed proxies through the actual CLI binary.
+test\:unit\:cli:
+	@if command -v cargo-nextest >/dev/null 2>&1; then \
+		bash "$(SCRIPT_DIR)/test/with-cli-binary.sh" cargo nextest run -p acrylmicrovm-cli $(NEXTEST_PROFILE_FLAG) -E 'test(::tests::)'; \
+	else \
+		bash "$(SCRIPT_DIR)/test/with-cli-binary.sh" cargo test -p acrylmicrovm-cli --bins -- --test-threads=1 '::tests::'; \
+	fi
+
+# Hypervisor and VMM crate unit tests alone; they need no VM and no vendored
+# submodules.
+test\:unit\:vmm:
+	@cargo test $(RUST_UNIT_VMM_ARGS) -- $(CARGOTEST_FILTER)
+
+# Stubbed-tool contract tests for the kernel build scripts; they never compile Linux or start a box.
+test\:vmm\:boot:
+	@python3 "$(PROJECT_ROOT)/src/vmm/boot/tests/test_build.py"
+	@python3 "$(PROJECT_ROOT)/src/vmm/boot/tests/test_box_build.py"
+
+# CPU bandwidth acceptance requires a delegated CPU controller (or root).
+test\:fractional-cpus\:acceptance: _ensure-kvm $(if $(SETUP_DONE),,runtime\:debug)
+	@cargo test -p acrylmicrovm --test fractional_cpus $(CARGOTEST_FILTER) -- --ignored --test-threads=1 --nocapture
+
+# Missing /dev/kvm must fail hardware qualification, not report skipped tests as a pass.
+_ensure-kvm:
+	@test "$$(uname -s -m)" = "Linux x86_64" || { echo "Linux x86_64 is required" >&2; exit 1; }
+	@test -r /dev/kvm -a -w /dev/kvm || { echo "Read/write access to /dev/kvm is required" >&2; exit 1; }
+
+# Run the ignored hardware tests explicitly and bound a stalled guest with a timeout.
+# Both crates run even when one fails, so one report shows every result.
+test\:integration\:vmm\:kvm: _ensure-kvm
+	@cargo test -p acrylmicrovm-hypervisor -p acrylmicrovm-vmm --lib --no-run
+	@status=0; \
+	timeout 60s cargo test -p acrylmicrovm-hypervisor --lib kvm::vm::tests:: -- --ignored --test-threads=1 || status=1; \
+	timeout 60s cargo test -p acrylmicrovm-vmm --lib -- --ignored --test-threads=1 vm::tests:: tests::kvm:: || status=1; \
+	exit $$status
+
+# make vmm:boot produces this kernel by default.
+VMM_KERNEL ?= $(CURDIR)/target/vmm/boot/x86_64/vmlinux
+export VMM_KERNEL
+
+# Freestanding allocator scenario used by both boot qualification and coverage.
+VMM_BALLOON_INIT ?= $(CURDIR)/target/vmm/boot/balloon-init
+export VMM_BALLOON_INIT
+
+$(VMM_BALLOON_INIT): $(PROJECT_ROOT)/src/vmm/tests/boot/balloon_init.c
+	@mkdir -p "$(@D)"
+	$(CC) -O2 -nostdlib -static -fno-pie -no-pie -fno-stack-protector -fno-builtin -Wl,--build-id=none "$<" -o "$@"
+
+_ensure-vmm-kernel:
+	@test -r "$(VMM_KERNEL)" || { echo "VMM_KERNEL=$(VMM_KERNEL) is not readable; run make vmm:boot or set VMM_KERNEL" >&2; exit 1; }
+
+# Load the real ELF kernel and read it through a KVM vCPU; this does not boot Linux.
+test\:integration\:vmm\:elf: _ensure-kvm _ensure-vmm-kernel
+	@cargo test -p acrylmicrovm-vmm --lib --no-run
+	@timeout 60s cargo test -p acrylmicrovm-vmm --lib boot::elf::tests:: -- --ignored --test-threads=1
+
+# Every ignored boot test bounds itself with its own watchdog, so the wrapper
+# must not be shorter than their sum: at most 9 x BOOT_TIMEOUT (30 s) plus
+# 3 x balloon (35 s) = 375 s, before guest boot and teardown on a loaded host.
+# A shorter wrapper kills the whole suite instead of the one test that hangs.
+VMM_BOOT_TESTS_TIMEOUT ?= 900s
+
+# Boot the real kernel on KVM and the legacy devices, on one and four vCPUs: up to its root-mount
+# panic, up to the panic when a generated init exits, and on a ttyS0 console until a generated
+# init restarts, once through the public Vm::new as the M1 smoke test.
+test\:integration\:vmm\:linux: _ensure-kvm _ensure-vmm-kernel $(VMM_BALLOON_INIT)
+	@cargo test -p acrylmicrovm-vmm --lib --no-run
+	@timeout $(VMM_BOOT_TESTS_TIMEOUT) cargo test -p acrylmicrovm-vmm --lib boot::tests:: -- --ignored --test-threads=1 --nocapture --skip boot::tests::guest_mounts::
+
+# Exercise the production guest mount adapter inside a real initramfs guest.
+PHONY_TARGETS += test\:integration\:vmm\:mounts
+test\:integration\:vmm\:mounts: export VMM_GUEST_MOUNT_INIT := $(PROJECT_ROOT)/target/vmm/guest-mount/x86_64-unknown-linux-musl/release/acrylmicrovm-guest
+test\:integration\:vmm\:mounts: _ensure-kvm _ensure-vmm-kernel vmm\:guest-mount-init
+	@cargo test -p acrylmicrovm-vmm --lib --no-run
+	@timeout 60s cargo test -p acrylmicrovm-vmm --lib boot::tests::guest_mounts:: -- --ignored --test-threads=1
+
+# Boot the real kernel through the native engine inside acrylmicrovm-shim: the M1 initramfs to its marker,
+# a typed Unsupported failure into the exit file, and an alpine box through the runtime up to
+# PID 1 on the ext4 root, readiness, shebang exec, stop and removal.
+VMM_GUEST ?= $(if $(CARGO_TARGET_DIR),$(abspath $(CARGO_TARGET_DIR)),$(PROJECT_ROOT)/target)/x86_64-unknown-linux-musl/debug/acrylmicrovm-guest
+VMM_GUEST_PROBE ?= $(if $(CARGO_TARGET_DIR),$(abspath $(CARGO_TARGET_DIR)),$(PROJECT_ROOT)/target)/x86_64-unknown-linux-musl/debug/examples/guest-boot-probe
+export VMM_GUEST VMM_GUEST_PROBE
+
+_guest-boot-probe: $(if $(SETUP_DONE),,runtime\:debug)
+	@bash "$(SCRIPT_DIR)/test/build-guest-boot-probe.sh"
+
+test\:integration\:vmm\:native: _ensure-kvm _ensure-vmm-kernel $(if $(SETUP_DONE),,runtime\:debug) _guest-boot-probe
+	@cargo test -p acrylmicrovm --features native --lib --no-run
+	@timeout 300s cargo test -p acrylmicrovm --features native --lib vmm::native::tests:: -- --ignored --test-threads=1
+	@timeout 600s cargo test -p acrylmicrovm --features krun,gvproxy,native --test native_vmm -- --ignored --test-threads=1
+
+# A host without Hypervisor.framework must fail HVF qualification, not report skipped tests as a pass.
+_ensure-hvf:
+	@test "$$(uname -s -m)" = "Darwin arm64" || { echo "macOS arm64 is required" >&2; exit 1; }
+	@test "$$(sysctl -n kern.hv_support 2>/dev/null)" = 1 || { echo "Hypervisor.framework is unavailable on this host" >&2; exit 1; }
+
+# Run the ignored HVF hardware tests one at a time, since a process holds one HVF VM; the
+# runner signs each test binary with the hypervisor entitlement and bounds a stalled guest.
+test\:integration\:vmm\:hvf: export CARGO_TARGET_AARCH64_APPLE_DARWIN_RUNNER := $(SCRIPT_DIR)/test/hvf-runner.sh
+test\:integration\:vmm\:hvf: _ensure-hvf
+	@cargo test -p acrylmicrovm-hypervisor --lib hvf::tests:: -- --ignored --test-threads=1
+
+# Guest crate unit tests. Linux-only (the crate does not build elsewhere) and
+# excluded from test:unit:rust because the zygote suite forks real processes.
+# nextest's process-per-test isolation is what makes the whole crate runnable:
+# several suites assert on process-global state (raw fd numbers, waitpid), so
+# they can interfere under a shared process. The cargo fallback has no such
+# isolation, so it stays on the modules that are pure logic.
+test\:unit\:guest:
+	@if [ "$$(uname)" != "Linux" ]; then \
+		echo "⏭️  Guest unit tests require Linux"; \
+		exit 0; \
+	fi; \
+	echo "🧪 Running guest unit tests..."; \
+	if command -v cargo-nextest >/dev/null 2>&1; then \
+		cargo nextest run $(GUEST_RUNNER_CONFIG) --no-tests=fail $(NEXTEST_PROFILE_FLAG) -p acrylmicrovm-guest $(NEXTEST_FILTER); \
+	else \
+		cargo test -p acrylmicrovm-guest --bins -- --test-threads=1 $(if $(FILTER),$(FILTER),capabilit spec::tests sysctl::tests); \
+	fi
+
+# Keep ordinary guest mount tests unprivileged. Only explicitly ignored tests
+# whose names contain `privileged_` run as root, inside a private mount
+# namespace so bind mounts cannot escape into the host namespace.
+test\:guest-perms:
+	@if [ "$$(uname)" != "Linux" ]; then \
+		echo "⏭️  Guest mount tests require Linux"; \
+		exit 0; \
+	fi; \
+	echo "🧪 Running guest mount tests..."; \
+	cargo test -p acrylmicrovm-guest --bin acrylmicrovm-guest 'storage::attach::tests' -- \
+		--test-threads=1 --skip privileged_ || exit $$?; \
+	if ! command -v jq >/dev/null 2>&1; then \
+		echo "❌ jq is required to locate the prebuilt guest test executable"; \
+		exit 1; \
+	fi; \
+	if ! test_metadata=$$(mktemp "$${TMPDIR:-/tmp}/acrylmicrovm-guest-perms.XXXXXX"); then \
+		echo "❌ Could not create temporary Cargo metadata file"; \
+		exit 1; \
+	fi; \
+	trap 'rm -f -- "$$test_metadata"' EXIT; \
+	if ! cargo test -p acrylmicrovm-guest --bin acrylmicrovm-guest --no-run \
+		--message-format=json >"$$test_metadata"; then \
+		echo "❌ Failed to build the acrylmicrovm-guest test executable"; \
+		exit 1; \
+	fi; \
+	if ! test_binary=$$(jq --slurp --raw-output --exit-status \
+		'[.[] | select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "acrylmicrovm-guest" and .executable != null) | .executable] | last' \
+		"$$test_metadata"); then \
+		echo "❌ Could not parse the prebuilt acrylmicrovm-guest test executable"; \
+		exit 1; \
+	fi; \
+	if [ -z "$$test_binary" ] || [ ! -x "$$test_binary" ]; then \
+		echo "❌ Could not locate the prebuilt acrylmicrovm-guest test executable"; \
+		exit 1; \
+	fi; \
+	echo "🔐 Running privileged guest mount tests..."; \
+	if [ "$$(id -u)" -eq 0 ]; then \
+		unshare --mount --propagation private -- \
+			"$$test_binary" 'storage::attach::tests::privileged_' \
+			--ignored --test-threads=1; \
+	elif command -v sudo >/dev/null 2>&1 && sudo -n true >/dev/null 2>&1; then \
+		sudo -n unshare --mount --propagation private -- \
+			"$$test_binary" 'storage::attach::tests::privileged_' \
+			--ignored --test-threads=1; \
+	else \
+		echo "❌ Privileged guest mount tests require root or passwordless sudo"; \
+		exit 1; \
+	fi
+
+# Build and qualify the standalone guest artifacts. Native x86_64 release also
+# exercises verifier rejection paths; matching native Linux runs tool smoke tests.
+test\:guest-artifacts: export _ACRYLMICROVM_GUEST_TARGET_ARG := $(value GUEST_TARGET)
+test\:guest-artifacts: export _ACRYLMICROVM_PROFILE_ARG := $(value PROFILE)
+test\:guest-artifacts:
+	@target="$${_ACRYLMICROVM_GUEST_TARGET_ARG:-$$(bash "$$PWD/scripts/util.sh" --target)}"; \
+	profile="$${_ACRYLMICROVM_PROFILE_ARG:-release}"; \
+	bash "$$PWD/scripts/test/test-guest-artifacts.sh" --target "$$target" --profile "$$profile"
+
+# Pre-warm Rust integration test image cache (internal helper, still callable).
+test\:warm-cache\:rust: $(if $(SETUP_DONE),,runtime\:debug)
+	@echo "🔥 Warming Rust integration test image cache..."
+	@mkdir -p /tmp/acrylmicrovm-test
+	@./target/debug/acrylmicrovm --home /tmp/acrylmicrovm-test \
+		--registry docker.m.daocloud.io \
+		--registry docker.xuanyuan.me \
+		--registry docker.1ms.run \
+		--registry docker.io \
+		pull alpine:latest 2>/dev/null || \
+		echo "  ⚠️ Pre-warm skipped (pull failed, tests will pull on-demand)"
+	@echo "✅ Rust integration image cache ready"
+
+# Rust integration tests (requires VM environment).
+# FILTER works here and on every test target, e.g. make test:integration:rust FILTER=copy
+test\:integration\:rust: $(if $(SETUP_DONE),,runtime\:debug test\:warm-cache\:rust)
+	@echo "🧪 Running Rust integration tests (requires VM)..."
+	@if command -v cargo-nextest >/dev/null 2>&1; then \
+		cargo nextest run -p acrylmicrovm --features krun,gvproxy,native --test '*' --no-fail-fast --profile vm \
+			$(NEXTEST_FILTER); \
+	else \
+		cargo test -p acrylmicrovm --features krun,gvproxy,native --test '*' --no-fail-fast -- --test-threads=1 --nocapture \
+			$(CARGOTEST_FILTER); \
+	fi
+
+# Explicit opt-in: these ignored tests must execute, not merely match FILTER.
+test\:integration\:lifecycle-race: $(if $(SETUP_DONE),,runtime\:debug)
+	@test -n "$$ACRYLMICROVM_REPRO_ROOTFS" -a -d "$$ACRYLMICROVM_REPRO_ROOTFS" || { \
+		echo "Set ACRYLMICROVM_REPRO_ROOTFS to a local OCI image directory" >&2; exit 1; }
+	@test -z "$$ACRYLMICROVM_DEPS_STUB" || { echo "Real VM tests cannot use dependency stubs" >&2; exit 1; }
+	@if command -v cargo-nextest >/dev/null 2>&1; then \
+		cargo nextest run -p acrylmicrovm --features krun,gvproxy,native --lib --test start_stop_race \
+			-E 'binary(start_stop_race) | test(implicit_job_rechecks_after_admission)' \
+			--run-ignored only --no-tests=fail --no-fail-fast --profile vm; \
+	else \
+		cargo test -p acrylmicrovm --features krun,gvproxy,native --test start_stop_race \
+			-- --ignored --test-threads=1 --nocapture && \
+		cargo test -p acrylmicrovm --features krun,gvproxy,native --lib \
+			-- --ignored --test-threads=1 --nocapture implicit_job_rechecks_after_admission; \
+	fi
+
+# OpenCode agent adapter and `acrylmicrovm agent` CLI tests (requires VM). Ignored by the suites above:
+# each Box needs the OpenCode 2.2.2 release binary named by ACRYLMICROVM_TEST_OPENCODE_BINARY.
+test\:integration\:agents: $(if $(SETUP_DONE),,runtime\:debug)
+	@test -n "$$ACRYLMICROVM_TEST_OPENCODE_BINARY" || { \
+		echo "❌ Set ACRYLMICROVM_TEST_OPENCODE_BINARY to the OpenCode 2.2.2 glibc Linux binary"; exit 1; }
+	@echo "🧪 Running OpenCode agent tests (requires VM)..."
+	@if command -v cargo-nextest >/dev/null 2>&1; then \
+		cargo nextest run -p acrylmicrovm --features krun,gvproxy,test-support,native --test agents_opencode --run-ignored only \
+			--no-fail-fast --profile vm $(NEXTEST_FILTER); \
+	else \
+		cargo test -p acrylmicrovm --features krun,gvproxy,test-support,native --test agents_opencode --no-fail-fast -- \
+			--ignored --test-threads=1 --nocapture $(CARGOTEST_FILTER); \
+	fi && \
+	if command -v cargo-nextest >/dev/null 2>&1; then \
+		cargo nextest run -p acrylmicrovm-cli --test agents --run-ignored only \
+			--no-fail-fast --profile vm $(NEXTEST_FILTER); \
+	else \
+		cargo test -p acrylmicrovm-cli --test agents --no-fail-fast -- \
+			--ignored --test-threads=1 --nocapture $(CARGOTEST_FILTER); \
+	fi
+
+# Manual release-mode benchmark. Kept out of every aggregate and CI suite.
+test\:perf\:import-export: runtime
+	@echo "📊 Running manual 1 GiB import/export benchmark (release, serial)..."
+	@echo "   Commit: $$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+	@echo "   Ensure at least 8 GiB of free disk space and no competing I/O workload."
+	@cargo test --release -p acrylmicrovm --features krun,gvproxy \
+		--test import_export_benchmark -- --ignored --test-threads=1 --nocapture
+
+# ACRYL microVMs C SDK unit tests.
+test\:unit\:ffi:
+	@echo "🧪 Running AcrylMicrovm C SDK unit tests..."
+	@if command -v cargo-nextest >/dev/null 2>&1; then \
+		cargo nextest run -p acrylmicrovm-c $(NEXTEST_FILTER); \
+	else \
+		cargo test -p acrylmicrovm-c $(CARGOTEST_FILTER); \
+	fi
+
+# Go bridge unit tests for the embedded gvproxy library.
+test\:unit\:gvproxy:
+	@echo "🧪 Running gvproxy bridge unit tests..."
+	@cd src/deps/libgvproxy-sys/gvproxy-bridge && go test ./... $(GOTEST_FILTER)
+
+# OpenAPI reference-server unit tests: the error class the server answers with
+# must be one openapi/box.openapi.yaml declares, and must match the triple
+# `AcrylMicrovmError::http()` (src/shared/src/errors.rs) gives the same failure —
+# the reference server is what src/acrylmicrovm/tests/rest_integration.rs points the
+# Rust client at, so a class it gets wrong is a class every conformance run
+# gets wrong.
+#
+# Run the dependency-backed server contract suite as well as the stdlib-only
+# error mapping checks. The server target supplies its own Python dependencies.
+test\:unit\:openapi:
+	@$(MAKE) test:unit:openapi:server
+	@echo "🧪 Running OpenAPI reference-server unit tests..."
+	@python3 -m unittest discover -s openapi/reference-server/tests -p 'test_error*.py' -v
+
+test\:unit\:openapi\:server: _ensure-python-deps
+	@. .venv/bin/activate && uv run --with fastapi --with uvicorn --with sse-starlette --with PyJWT --with python-multipart --with python-dotenv --with pyyaml --python .venv/bin/python python -m unittest discover -s openapi/reference-server/tests -p 'test_handle_cache.py' -v
+
+test\:unit\:scripts:
+	@python3 -m unittest discover -s tests/scripts -p 'test_*.py' -v
+
+# CLI integration tests.
+test\:integration\:cli: $(if $(SETUP_DONE),,runtime\:debug)
+	@echo "🧪 Running CLI integration tests..."
+	@if command -v cargo-nextest >/dev/null 2>&1; then \
+		cargo nextest run -p acrylmicrovm-cli --tests --profile vm --no-fail-fast \
+		$(NEXTEST_CLI_FILTER); \
+	else \
+		rc=0; \
+		for test_name in $(CLI_INTEGRATION_TESTS); do \
+			cargo test -p acrylmicrovm-cli --test $$test_name --no-fail-fast -- --test-threads=4 \
+			$(CARGOTEST_FILTER) || rc=$$?; \
+		done; \
+		case 'commands::ssh::setup::vm_install::ssh_local_install_config' in \
+			*"$(FILTER)"*) cargo test -p acrylmicrovm-cli --bin acrylmicrovm --no-fail-fast -- \
+				--test-threads=1 '::vm_install::' || rc=$$? ;; \
+		esac; \
+		exit $$rc; \
+	fi
+
+test\:stress\:disk: $(if $(SETUP_DONE),,runtime\:debug)
+	@echo "🧪 Running disk pressure stress tests..."
+	@if command -v cargo-nextest >/dev/null 2>&1; then \
+		cargo nextest run -p acrylmicrovm-cli --test stress_disk --profile vm --no-fail-fast \
+		$(NEXTEST_FILTER); \
+	else \
+		cargo test -p acrylmicrovm-cli --test stress_disk --no-fail-fast -- --test-threads=1 \
+		$(CARGOTEST_FILTER); \
+	fi
+
+# Python SDK unit tests.
+test\:unit\:python: _ensure-python-deps
+	@echo "🧪 Running Python SDK unit tests..."
+	@. .venv/bin/activate && cd sdks/python && python -m pytest tests/ -v -m "not integration" $(PYTEST_FILTER)
+	@echo "🧪 Running Python binding (Rust) unit tests..."
+	@# --no-default-features drops pyo3's extension-module so the test binary can
+	@# link libpython; see sdks/python/Cargo.toml.
+	@cargo test -p acrylmicrovm-python --no-default-features --lib $(CARGOTEST_FILTER)
+
+# Runs an SDK suite with the local test registry up and its address in
+# ACRYLMICROVM_TEST_REGISTRY, so its boxes resolve images without the internet
+# (src/acrylmicrovm/tests/README.md). ACRYLMICROVM_TEST_REGISTRIES=upstream runs it
+# bare, so its harness pulls from the public mirrors as before.
+ifeq ($(ACRYLMICROVM_TEST_REGISTRIES),upstream)
+WITH_LOCAL_REGISTRY =
+else
+WITH_LOCAL_REGISTRY = $(if $(CARGO_TARGET_DIR),$(abspath $(CARGO_TARGET_DIR)),$(PROJECT_ROOT)/target)/debug/with-local-registry
+endif
+
+_local-registry:
+	@cargo build -q -p acrylmicrovm-test-utils --bin with-local-registry
+
+# Python SDK integration tests.
+test\:integration\:python: _local-registry
+	@$(MAKE) dev:python
+	@echo "🧪 Running Python SDK integration tests..."
+	@ACRYLMICROVM_HOME=$$(mktemp -d /tmp/acrylmicrovm-test-python-XXXXXX) && \
+	 trap "rm -rf $$ACRYLMICROVM_HOME" EXIT && \
+	 . .venv/bin/activate && cd sdks/python && ACRYLMICROVM_HOME=$$ACRYLMICROVM_HOME $(WITH_LOCAL_REGISTRY) python -m pytest tests/ -v -m "integration" $(PYTEST_FILTER)
+
+# Python SDK full suite.
+test\:all\:python:
+	$(call run_suites,test:unit:python test:integration:python)
+
+# Node.js SDK unit tests.
+test\:unit\:node: _ensure-node-deps
+	@echo "🧪 Running Node.js SDK unit tests..."
+	@cd sdks/node && npm test -- $(VITEST_FILTER)
+	@echo "🧪 Running Node.js binding (Rust) unit tests..."
+	@cargo test -p acrylmicrovm-node --lib $(CARGOTEST_FILTER)
+
+# Node.js SDK integration tests (requires VM environment).
+test\:integration\:node: _local-registry
+	@$(MAKE) dev:node
+	@echo "🧪 Running Node.js SDK integration tests (requires VM)..."
+	@cd sdks/node && $(WITH_LOCAL_REGISTRY) npm run test:integration -- $(VITEST_FILTER)
+
+# Node.js SDK full suite.
+test\:all\:node:
+	$(call run_suites,test:unit:node test:integration:node)
+
+# C SDK unit tests (no VM required).
+test\:unit\:c:
+	@echo "🧪 Running C SDK unit tests..."
+	@$(MAKE) dev:c
+	@mkdir -p sdks/c/tests/build
+	@cd sdks/c/tests/build && cmake .. -DACRYLMICROVM_LIB_DIR="$(if $(CARGO_TARGET_DIR),$(abspath $(CARGO_TARGET_DIR)),$(PROJECT_ROOT)/target)/debug"
+	@cd sdks/c/tests/build && cmake --build . -j
+	@cd sdks/c/tests/build && ctest --verbose --output-on-failure -L unit $(CTEST_FILTER)
+
+# C SDK integration tests (requires VM environment).
+test\:integration\:c:
+	@echo "🧪 Running C SDK integration tests (requires VM)..."
+	@$(MAKE) dev:c
+	@mkdir -p sdks/c/tests/build
+	@cd sdks/c/tests/build && cmake .. -DACRYLMICROVM_LIB_DIR="$(if $(CARGO_TARGET_DIR),$(abspath $(CARGO_TARGET_DIR)),$(PROJECT_ROOT)/target)/debug"
+	@cd sdks/c/tests/build && cmake --build . -j
+	@cd sdks/c/tests/build && ctest --verbose --output-on-failure -L integration $(CTEST_FILTER)
+
+# C SDK full suite.
+test\:all\:c:
+	$(call run_suites,test:unit:c test:integration:c)
+
+# Go SDK unit tests.
+test\:unit\:go:
+	@echo "🧪 Running Go SDK unit tests..."
+	@$(MAKE) dev:go
+	@cd sdks/go && go test -tags acrylmicrovm_dev -v $(GOTEST_FILTER) ./...
+
+# Native Go archive import/export tests require a supported host.
+# Keep them in the VM-capable integration workflow, outside hosted unit coverage.
+test\:integration\:go: dev\:go
+	@echo "🧪 Running Go SDK archive integration test (requires VM)..."
+	@cd sdks/go && go test -count=1 -tags=acrylmicrovm_dev,acrylmicrovm_integration -v $(GOTEST_FILTER) ./integration/archive
+
+# Go SDK full suite.
+test\:all\:go:
+	@$(MAKE) test:unit:go
+
+PHONY_TARGETS += test\:apps\:secret-server
+test\:apps\:secret-server:
+	@cd apps/secret-server && GOWORK=off go test -race ./... $(GOTEST_FILTER)
+
+test\:rest\:cli:
+	@bash scripts/test/rest/run_cli_matrix.sh "$${AUTH:-oidc}" "$${SCOPE:-smoke}"
+
+test\:rest\:e2e:
+	@cd apps/e2e && ACRYLMICROVM_E2E_AUTH=$${AUTH:-api-key} python3 -m pytest cases/ -v $(PYTEST_FILTER)
+
+test\:rest\:report:
+	@python3 scripts/test/rest/report.py
+
+# Validate acceptance-client invocation without a running cloud or VM.
+test\:e2e\:drivers:
+	@cargo test --locked -p acrylmicrovm-e2e-rust $(CARGOTEST_FILTER)
+
+# Installer-script smoke test: structural assertions on the rendered
+# install.sh (atomic replace, integrity envelope, pinned-install trust
+# tiers). Runs in a couple of seconds, no toolchain required beyond sh.
+test\:install-script:
+	@echo "🧪 Running installer script smoke test..."
+	@bash scripts/release/test_install.sh
+
+# ─── E2E: SDK → API → Runner → VM ───────────────────────────────────────────
+export FILTER E2E_ARGS
+E2E_STATE_DIR ?= $(PROJECT_ROOT)/target/e2e
+E2E_PYTHON ?= $(PROJECT_ROOT)/.venv-e2e/bin/python
+export E2E_PYTHON
+# A command-line E2E_STATE_DIR must win over an inherited ACRYLMICROVM_E2E_STATE_DIR,
+# or down would tear down the stale state dir while builds fill the new one.
+ifeq ($(origin E2E_STATE_DIR),command line)
+ACRYLMICROVM_E2E_STATE_DIR = $(E2E_STATE_DIR)
+else
+ACRYLMICROVM_E2E_STATE_DIR ?= $(E2E_STATE_DIR)
+endif
+export ACRYLMICROVM_E2E_STATE_DIR
+
+test\:e2e\:setup:
+	@python3 apps/e2e/local.py setup
+
+test\:e2e\:up:
+	@python3 apps/e2e/local.py up
+
+test\:e2e\:down:
+	@python3 apps/e2e/local.py down
+
+test\:e2e\:doctor:
+	@python3 apps/e2e/local.py doctor
+
+test\:e2e\:status:
+	@python3 apps/e2e/local.py status
+
+test\:e2e:
+	@python3 apps/e2e/local.py run
+
+test\:e2e\:deps:
+	@python3 apps/e2e/python_env.py "$(E2E_PYTHON)"
+
+test\:e2e\:deps\:apps:
+	@cd apps && corepack yarn install --immutable
+
+test\:e2e\:deps\:node:
+	@cd sdks/node && node scripts/check-lockfile.mjs && npm ci --no-audit --no-fund
+
+test\:e2e\:build\:python:
+	@"$(E2E_PYTHON)" -m uv pip install --python "$(E2E_PYTHON)" --no-deps --no-build-isolation --config-settings 'build-args=--locked --profile dev' --editable sdks/python
+
+test\:e2e\:build\:minio:
+	@python3 apps/e2e/minio.py --state-dir "$(E2E_STATE_DIR)"
+
+# Go's build cache does not track external CGO archives.
+test\:e2e\:build\:runner:
+	@python3 apps/e2e/build_runner.py "$(abspath $(E2E_STATE_DIR))"
+
+test\:e2e\:build\:node:
+	@cd sdks/node && npm run build:native -- -- --locked && npm run build
+
+test\:e2e\:two-sided:
+	@PR_REF=$${PR_REF:?must set PR_REF=<branch>} bash apps/e2e/two_sided.sh
+
+# ─── Stress: deployed REST API ─────────────────────────────────────────────
+test\:stress\:api-read:
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 is required. Install with: brew install k6"; exit 2; }
+	@k6 run scripts/test/stress/api-read.k6.js
+
+test\:stress\:api-read-local:
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 is required. Install with: brew install k6"; exit 2; }
+	@ACRYLMICROVM_STRESS_START_RATE=$${ACRYLMICROVM_STRESS_START_RATE:-1} \
+	ACRYLMICROVM_STRESS_RATE_1=$${ACRYLMICROVM_STRESS_RATE_1:-1} \
+	ACRYLMICROVM_STRESS_RATE_2=$${ACRYLMICROVM_STRESS_RATE_2:-3} \
+	ACRYLMICROVM_STRESS_RATE_3=$${ACRYLMICROVM_STRESS_RATE_3:-5} \
+	ACRYLMICROVM_STRESS_STAGE_1=$${ACRYLMICROVM_STRESS_STAGE_1:-20s} \
+	ACRYLMICROVM_STRESS_STAGE_2=$${ACRYLMICROVM_STRESS_STAGE_2:-20s} \
+	ACRYLMICROVM_STRESS_STAGE_3=$${ACRYLMICROVM_STRESS_STAGE_3:-20s} \
+	ACRYLMICROVM_STRESS_RAMP_DOWN=$${ACRYLMICROVM_STRESS_RAMP_DOWN:-5s} \
+	ACRYLMICROVM_STRESS_PREALLOCATED_VUS=$${ACRYLMICROVM_STRESS_PREALLOCATED_VUS:-10} \
+	ACRYLMICROVM_STRESS_MAX_VUS=$${ACRYLMICROVM_STRESS_MAX_VUS:-30} \
+	ACRYLMICROVM_STRESS_P95_MS=$${ACRYLMICROVM_STRESS_P95_MS:-2500} \
+	ACRYLMICROVM_STRESS_P99_MS=$${ACRYLMICROVM_STRESS_P99_MS:-4000} \
+	k6 run --summary-trend-stats 'avg,min,med,p(90),p(95),p(99),max' scripts/test/stress/api-read.k6.js
+
+test\:stress\:api-create-box:
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 is required. Install with: brew install k6"; exit 2; }
+	@k6 run --summary-trend-stats 'avg,min,med,p(90),p(95),p(99),max' scripts/test/stress/api-create-box.k6.js
+
+test\:stress\:api-create-box-local:
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 is required. Install with: brew install k6"; exit 2; }
+	@ACRYLMICROVM_STRESS_START_RATE=$${ACRYLMICROVM_STRESS_START_RATE:-0.02} \
+	ACRYLMICROVM_STRESS_RATE_1=$${ACRYLMICROVM_STRESS_RATE_1:-0.05} \
+	ACRYLMICROVM_STRESS_RATE_2=$${ACRYLMICROVM_STRESS_RATE_2:-0.1} \
+	ACRYLMICROVM_STRESS_RATE_3=$${ACRYLMICROVM_STRESS_RATE_3:-0.1} \
+	ACRYLMICROVM_STRESS_STAGE_1=$${ACRYLMICROVM_STRESS_STAGE_1:-30s} \
+	ACRYLMICROVM_STRESS_STAGE_2=$${ACRYLMICROVM_STRESS_STAGE_2:-1m} \
+	ACRYLMICROVM_STRESS_STAGE_3=$${ACRYLMICROVM_STRESS_STAGE_3:-1m} \
+	ACRYLMICROVM_STRESS_RAMP_DOWN=$${ACRYLMICROVM_STRESS_RAMP_DOWN:-20s} \
+	ACRYLMICROVM_STRESS_PREALLOCATED_VUS=$${ACRYLMICROVM_STRESS_PREALLOCATED_VUS:-2} \
+	ACRYLMICROVM_STRESS_MAX_VUS=$${ACRYLMICROVM_STRESS_MAX_VUS:-5} \
+	ACRYLMICROVM_STRESS_P95_MS=$${ACRYLMICROVM_STRESS_P95_MS:-45000} \
+	ACRYLMICROVM_STRESS_P99_MS=$${ACRYLMICROVM_STRESS_P99_MS:-60000} \
+	k6 run --summary-trend-stats 'avg,min,med,p(90),p(95),p(99),max' scripts/test/stress/api-create-box.k6.js
+
+test\:stress\:api-vm-lifecycle:
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 is required. Install with: brew install k6"; exit 2; }
+	@k6 run --summary-trend-stats 'avg,min,med,p(90),p(95),p(99),max' scripts/test/stress/api-vm-lifecycle.k6.js
+
+test\:stress\:api-vm-lifecycle-local:
+	@command -v k6 >/dev/null 2>&1 || { echo "k6 is required. Install with: brew install k6"; exit 2; }
+	@ACRYLMICROVM_STRESS_RUNNER_CPUS=$${ACRYLMICROVM_STRESS_RUNNER_CPUS:-8} \
+	ACRYLMICROVM_STRESS_VM_LIMIT=$${ACRYLMICROVM_STRESS_VM_LIMIT:-2} \
+	ACRYLMICROVM_STRESS_VUS=$${ACRYLMICROVM_STRESS_VUS:-2} \
+	ACRYLMICROVM_STRESS_DURATION=$${ACRYLMICROVM_STRESS_DURATION:-1m} \
+	ACRYLMICROVM_STRESS_HOLD_SECONDS=$${ACRYLMICROVM_STRESS_HOLD_SECONDS:-20} \
+	ACRYLMICROVM_STRESS_GRACEFUL_STOP=$${ACRYLMICROVM_STRESS_GRACEFUL_STOP:-2m} \
+	ACRYLMICROVM_STRESS_P95_MS=$${ACRYLMICROVM_STRESS_P95_MS:-60000} \
+	ACRYLMICROVM_STRESS_P99_MS=$${ACRYLMICROVM_STRESS_P99_MS:-90000} \
+	k6 run --summary-trend-stats 'avg,min,med,p(90),p(95),p(99),max' scripts/test/stress/api-vm-lifecycle.k6.js
+
+PHONY_TARGETS += plugin-acrylmicrovm-force
+PLUGIN_PYTHON ?= python3
+plugin-acrylmicrovm-force:
+
+test\:unit\:plugins: plugin-acrylmicrovm-force
+	@PYTHONDONTWRITEBYTECODE=1 $(PLUGIN_PYTHON) -m unittest discover -s tests/plugins -p 'test_*.py'
+
+# Explicit-engine milestone matrices. The facade configures every new Box, including
+# literal BoxOptions and recovery subprocesses; normal test runs remain krun.
+PHONY_TARGETS += test\:integration\:vmm\:m2 test\:integration\:vmm\:m2\:run test\:integration\:vmm\:m2\:list
+PHONY_TARGETS += test\:integration\:vmm\:m3 test\:integration\:vmm\:m3\:run test\:integration\:vmm\:m3\:list
+M2_TEST_SUITES := lifecycle shutdown detach recovery exec_options exec_user run_main_command resize_tty zygote_integration copy snapshot clone_export_import network gvproxy_backend network_spec copy_ownership execution_shutdown
+M3_TEST_SUITES := copy_ownership mount_security secret_substitution security_enforcement network_spec volume_matrix container_cgroup_limits
+ENGINE ?= native
+test\:integration\:vmm\:m2: MATRIX = m2
+test\:integration\:vmm\:m3: MATRIX = m3
+test\:integration\:vmm\:m2 test\:integration\:vmm\:m2\:run test\:integration\:vmm\:m2\:list: MATRIX_TEST_SUITES = $(M2_TEST_SUITES)
+test\:integration\:vmm\:m3 test\:integration\:vmm\:m3\:run test\:integration\:vmm\:m3\:list: MATRIX_TEST_SUITES = $(M3_TEST_SUITES)
+MATRIX_TEST_ARGS = -p acrylmicrovm --features krun,gvproxy,native $(foreach suite,$(MATRIX_TEST_SUITES),--test $(suite)) --run-ignored all --profile vm $(NEXTEST_FILTER)
+
+test\:integration\:vmm\:m2 test\:integration\:vmm\:m3: _ensure-kvm _ensure-vmm-kernel $(if $(SETUP_DONE),,runtime\:debug)
+	@ENGINE='$(ENGINE)' MATRIX_MAKE='$(MAKE)' bash "$(SCRIPT_DIR)/test/vmm-matrix.sh" '$(MATRIX)' $(MATRIX_TEST_SUITES)
+
+test\:integration\:vmm\:m2\:list test\:integration\:vmm\:m3\:list:
+	@cargo nextest list $(MATRIX_TEST_ARGS) --message-format json
+
+test\:integration\:vmm\:m2\:run test\:integration\:vmm\:m3\:run:
+	@cargo nextest run $(MATRIX_TEST_ARGS) --no-fail-fast --retries 0 --success-output final

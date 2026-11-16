@@ -1,0 +1,212 @@
+# Modified by ACRYL, 2026
+# Build C SDK for all supported platforms.
+#
+# Self-contained workflow that builds libacrylmicrovm (static and shared libraries),
+# packages them with C headers, and uploads platform-specific archives to
+# GitHub Releases.
+#
+# Archive contents (per platform):
+# - lib/libacrylmicrovm.a (static library with Go symbols fixed)
+# - lib/libacrylmicrovm.dylib or lib/libacrylmicrovm.so (shared library)
+# - include/acrylmicrovm.h (C header)
+#
+# These archives are also used by the Go SDK (build-go.yml) which downloads
+# them via the auto-download tool.
+#
+# Triggers:
+# - release: When a GitHub release is published
+# - workflow_dispatch: Manual trigger for testing
+# - workflow_call: A deploy building a selected commit (deploy-infra.yml)
+name: Build C SDK
+
+on:
+  release:
+    types: [ published ]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Full commit SHA to build. Defaults to the event commit.'
+        required: false
+        default: ''
+        type: string
+      linux_x64_only:
+        description: 'Build only the C archive the Linux AMD64 Runner consumes.'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+
+# Least privilege by default; upload-to-release raises its own job to contents: write, which is
+# the only job here that writes anything back to the repository.
+permissions:
+  contents: read
+
+jobs:
+  config:
+    uses: ./.github/workflows/config.yml
+
+  resolve-ref:
+    name: Resolve build commit
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.ref.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate build commit
+        id: ref
+        shell: bash
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          candidate="${INPUT_REF:-$GITHUB_SHA}"
+          [[ "$candidate" =~ ^[0-9a-f]{40}$ ]] || { echo "ref must be a full commit SHA" >&2; exit 1; }
+          # fetch-depth: 0 above only brings THIS repo's own branches. A commit proposed by an
+          # open pull request — same-repo or fork — isn't on any of them, so it isn't here yet;
+          # fetch it directly by SHA. (Unlike a ref name, a bare SHA is only a "want" GitHub can
+          # refuse, so this is a fallback, not the first attempt.)
+          git cat-file -e "$candidate^{commit}" 2>/dev/null || git fetch origin "$candidate"
+          git cat-file -e "$candidate^{commit}"
+          echo "sha=$candidate" >> "$GITHUB_OUTPUT"
+
+  # ============================================================================
+  # BUILD
+  # ============================================================================
+  # Builds libacrylmicrovm for each platform (static + shared) and packages with
+  # C headers.
+  #
+  # Platform-specific considerations:
+  # - Linux: Uses manylinux_2_28 container for glibc compatibility
+  #   - Guest binary built on host first (Ubuntu has musl-tools, manylinux doesn't)
+  #   - Runtime/libkrun built in container (needs glibc 2.28)
+  # - macOS: Builds directly on runner (ARM64 only)
+  #
+  # After building, fix-go-symbols.sh localizes Go runtime symbols from
+  # embedded libgvproxy in the static library, preventing conflicts when
+  # linked into a Go binary.
+  # ============================================================================
+  build:
+    name: Build (${{ matrix.target }})
+    needs: [ config, resolve-ref ]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(inputs.linux_x64_only && '[{"os":"ubuntu-latest","target":"linux-x64-gnu","rust_target":"x86_64-unknown-linux-gnu"}]' || needs.config.outputs.platforms) }}
+
+    steps:
+      # This job builds a caller-selected commit, and a `uses: ./...` action is resolved from the
+      # checked-out tree rather than from this workflow's own ref. So the steps below need
+      # .github/actions/ to exist in the SELECTED commit, not just in the one defining this file.
+      # A commit predating those directories fails with "Can't find 'action.yml'" — the fix is to
+      # select a newer commit, the same versioning split deploy-infra.yml describes at its
+      # "Require deployment capabilities in the selected commit" step.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve-ref.outputs.sha }}
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ needs.config.outputs.rust-toolchain }}
+          cache: ${{ runner.os != 'Linux' }}
+
+      - uses: ./.github/actions/sccache
+
+      - uses: ./.github/actions/build-guest
+        if: runner.os == 'Linux'
+
+      - name: Build C SDK (Linux)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/run-in-manylinux
+        with:
+          target: ${{ matrix.target }}
+          script: |
+            # Build the C FFI library (static + shared)
+            cargo build --release -p acrylmicrovm-c
+
+            # Fix Go runtime symbol conflicts in the static library
+            bash scripts/build/fix-go-symbols.sh target/release/libacrylmicrovm.a
+
+      - name: Build C SDK (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          make setup:build runtime
+
+          # Build the C FFI library (static + shared)
+          cargo build --release -p acrylmicrovm-c
+
+          # Fix Go runtime symbol conflicts in the static library
+          bash scripts/build/fix-go-symbols.sh target/release/libacrylmicrovm.a
+
+          command -v sccache &>/dev/null && sccache --show-stats || true
+
+      - name: Package C SDK archive
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          ARCHIVE_DIR="acrylmicrovm-c-v${VERSION}-${{ matrix.target }}"
+
+          mkdir -p "${ARCHIVE_DIR}/lib" "${ARCHIVE_DIR}/include"
+          cp target/release/libacrylmicrovm.a "${ARCHIVE_DIR}/lib/"
+          cp sdks/c/include/acrylmicrovm.h "${ARCHIVE_DIR}/include/"
+
+          # Copy shared library (platform-specific extension)
+          if [ -f target/release/libacrylmicrovm.dylib ]; then
+            cp target/release/libacrylmicrovm.dylib "${ARCHIVE_DIR}/lib/"
+          elif [ -f target/release/libacrylmicrovm.so ]; then
+            cp target/release/libacrylmicrovm.so "${ARCHIVE_DIR}/lib/"
+          fi
+
+          tar czf "${ARCHIVE_DIR}.tar.gz" "${ARCHIVE_DIR}/"
+          rm -rf "${ARCHIVE_DIR}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: c-sdk-${{ matrix.target }}
+          path: acrylmicrovm-c-v*-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          retention-days: ${{ needs.config.outputs.artifact-retention-days }}
+
+  # ============================================================================
+  # UPLOAD TO GITHUB RELEASE
+  # ============================================================================
+  # Uploads platform-specific C SDK archives to the GitHub Release.
+  #
+  # Users download the archive for their platform, which contains:
+  # - lib/libacrylmicrovm.a (static library)
+  # - lib/libacrylmicrovm.dylib or lib/libacrylmicrovm.so (shared library)
+  # - include/acrylmicrovm.h (C header)
+  # ============================================================================
+  upload-to-release:
+    name: Upload to GitHub Release
+    needs: [ config, build ]
+    if: github.event_name == 'release' && github.event.action == 'published'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # Required to upload assets to GitHub Release
+
+    steps:
+      # Before the download, not after: ./.github/actions/upload-to-release below is resolved from
+      # the checked-out tree, and checkout cleans the workspace, which would take the artifacts
+      # with it if it ran second.
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false # Only the action.yml is needed; nothing here runs git.
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: c-sdk-*
+          merge-multiple: true
+
+      - uses: ./.github/actions/upload-to-release
+        with:
+          files: dist/acrylmicrovm-c-v*.tar.gz

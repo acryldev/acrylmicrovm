@@ -1,0 +1,24 @@
+# Modified by ACRYL, 2026
+[package]
+name = "libkrun-sys"
+version.workspace = true
+edition = "2021"
+authors.workspace = true
+license.workspace = true
+description = "FFI bindings to libkrun and libkrunfw"
+repository = "https://github.com/acryldev/acrylmicrovm"
+
+links = "krun"
+exclude = ["vendor"]
+
+[build-dependencies]
+pkg-config = "0.3"
+num_cpus = "1.16"
+
+[dependencies]
+libc = "0.2"
+
+[features]
+default = []
+krun = []      # Build init binary + libkrun.a + emit link directives (was: link-static + build-libkrun)
+krunfw = []    # Download/build libkrunfw.dylib/.so (was: build-libkrunfw)

@@ -1,0 +1,39 @@
+# Modified by ACRYL, 2026
+"""Curated base image for the e2e suite."""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+REGISTRY = "ghcr.io/acryldev"
+IMAGE_ENV_VAR = "ACRYLMICROVM_E2E_IMAGE"
+VERSION_FILE = Path(__file__).resolve().parents[3] / "apps/box-images/VERSION"
+
+
+def base_image_ref() -> str:
+    """Build the base ref from apps/box-images/VERSION."""
+    try:
+        raw_version = VERSION_FILE.read_text().strip()
+    except OSError as exc:
+        raise RuntimeError(f"cannot read box image version from {VERSION_FILE}: {exc}") from exc
+    if not raw_version:
+        raise RuntimeError(f"{VERSION_FILE} is empty")
+    version = raw_version if raw_version.startswith("v") else f"v{raw_version}"
+    return f"{REGISTRY}/acrylmicrovm-agent-base:{version}"
+
+
+def default_image() -> str:
+    """Use $ACRYLMICROVM_E2E_IMAGE when set, else the VERSION-backed base ref."""
+    return os.environ.get(IMAGE_ENV_VAR) or base_image_ref()
+
+
+def repository_name(ref: str) -> str:
+    """Remove the digest and tag while preserving an optional registry port."""
+    ref = ref.split("@", 1)[0]
+    head, separator, tail = ref.rpartition(":")
+    return head if separator and "/" not in tail else ref
+
+
+if __name__ == "__main__":
+    print(default_image())

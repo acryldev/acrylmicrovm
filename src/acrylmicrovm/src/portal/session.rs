@@ -1,0 +1,67 @@
+// Modified by ACRYL, 2026
+//! High-level guest session.
+//!
+//! Thin facade over service interfaces.
+
+use crate::portal::connection::Connection;
+use crate::portal::interfaces::FilesInterface;
+use crate::portal::interfaces::SshInterface;
+use crate::portal::interfaces::{ContainerInterface, ExecutionInterface, GuestInterface};
+use acrylmicrovm_shared::{BoxTransport, AcrylMicrovmResult};
+
+/// High-level guest session.
+///
+/// Provides access to service interfaces.
+#[derive(Clone)]
+pub struct GuestSession {
+    connection: Connection,
+}
+
+impl GuestSession {
+    /// Create a session (connects lazily on first use).
+    pub fn new(transport: BoxTransport) -> Self {
+        Self {
+            connection: Connection::new(transport),
+        }
+    }
+
+    /// Get execution interface.
+    pub async fn execution(&self) -> AcrylMicrovmResult<ExecutionInterface> {
+        let channel = self.connection.channel().await?;
+        Ok(ExecutionInterface::new(channel))
+    }
+
+    /// Get container interface.
+    pub async fn container(&self) -> AcrylMicrovmResult<ContainerInterface> {
+        let channel = self.connection.channel().await?;
+        Ok(ContainerInterface::new(channel))
+    }
+
+    /// Get guest interface.
+    pub async fn guest(&self) -> AcrylMicrovmResult<GuestInterface> {
+        let channel = self.connection.channel().await?;
+        Ok(GuestInterface::new(channel))
+    }
+
+    /// Get files interface.
+    pub async fn files(&self) -> AcrylMicrovmResult<FilesInterface> {
+        let channel = self.connection.channel().await?;
+        Ok(FilesInterface::new(channel))
+    }
+
+    /// Get SSH interface.
+    pub(crate) async fn ssh(&self) -> AcrylMicrovmResult<SshInterface> {
+        let channel = self.connection.channel().await?;
+        Ok(SshInterface::new(channel))
+    }
+}
+
+// ============================================================================
+// THREAD SAFETY ASSERTIONS
+// ============================================================================
+
+// Compile-time assertions to ensure GuestSession is Send + Sync
+const _: () = {
+    const fn assert_send_sync<T: Send + Sync>() {}
+    let _ = assert_send_sync::<GuestSession>;
+};

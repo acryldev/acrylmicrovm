@@ -1,0 +1,1186 @@
+# Node.js SDK API reference
+
+Complete API reference for the ACRYL microVMs Node.js/TypeScript SDK.
+
+**Node.js:** 18+
+**Platforms:** macOS (Apple Silicon), Linux (x86_64, ARM64)
+
+## Table of contents
+
+- [Runtime Management](#runtime-management)
+- [Box Handle](#box-handle)
+- [Network Tunnels](#network-tunnels)
+- [Guest SSH Control](#guest-ssh-control)
+- [Command Execution](#command-execution)
+- [Box Types](#box-types)
+- [Error Types](#error-types)
+- [Metrics](#metrics)
+- [Type Definitions](#type-definitions)
+- [Constants](#constants)
+
+---
+
+## Runtime management
+
+### `JsAcrylMicrovm` / `AcrylMicrovm`
+
+The main runtime for creating and managing boxes.
+
+```typescript
+import { JsAcrylMicrovm } from 'acrylmicrovm';
+// or use the wrapper classes
+import { SimpleBox } from 'acrylmicrovm';
+```
+
+#### Constructor
+
+```typescript
+new JsAcrylMicrovm(options: JsOptions)
+```
+
+#### Static methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `withDefaultConfig()` | `() => JsAcrylMicrovm` | Get runtime with default config (`~/.acryl/microvm`) |
+| `initDefault()` | `(options: JsOptions) => void` | Initialize default runtime with custom options |
+
+#### Instance methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `create()` | `(options: JsBoxOptions, name?: string) => Promise<JsBox>` | Create a new box |
+| `listInfo()` | `() => Promise<JsBoxInfo[]>` | List all boxes |
+| `getInfo()` | `(idOrName: string) => Promise<JsBoxInfo \| null>` | Get box info |
+| `get()` | `(idOrName: string) => Promise<JsBox \| null>` | Get box handle |
+| `metrics()` | `() => Promise<JsRuntimeMetrics>` | Get runtime metrics |
+| `remove()` | `(idOrName: string, force?: boolean) => Promise<void>` | Remove a box |
+| `close()` | `() => void` | Close runtime (no-op) |
+| `images` | getter `=> ImageHandle` | The images this runtime can boot from; see [`ImageHandle`](#imagehandle) |
+| `registries` | getter `=> RegistryHandle` | The server's registry logins; throws `unsupported` on a local runtime. See [`RegistryHandle`](#registryhandle) |
+
+#### Example
+
+```typescript
+// Default runtime
+const runtime = JsAcrylMicrovm.withDefaultConfig();
+
+// Custom runtime
+const runtime = new JsAcrylMicrovm({ homeDir: '/custom/path' });
+
+// Create a box
+const box = await runtime.create({
+  image: 'alpine:latest',
+  cpus: 2,
+  memoryMib: 512
+}, 'my-box');
+
+// List all boxes
+const boxes = await runtime.listInfo();
+boxes.forEach(info => console.log(`${info.id}: ${info.state.status}`));
+```
+
+---
+
+### `ImageHandle`
+
+The images a runtime can boot from: the local cache on an embedded runtime,
+the server catalog on a REST runtime. Registry credentials are accessed through
+`runtime.images.registries`.
+
+| Operation | Embedded runtime | REST runtime |
+|-----------|------------------|--------------|
+| `pull` | Pulls into the cache | Unsupported; creating a box pulls |
+| `list` | One row per cached reference | Catalog alias and digest references |
+| `get` | Cached versions under the name | Catalog versions, aliases and history |
+| `remove` | Forgets the name; layers stay | Removes the entry; refused while a box can boot from it |
+| `usage` | Unsupported | Image count, allowance and known bytes |
+| `createAlias()` | Unsupported | Creates a new alias for a ready digest; existing names conflict |
+| `deleteAlias()` | Unsupported | Removes only the named alias; absent names return NotFound |
+
+`get` and `remove` take an image name, without a tag or digest, such as
+`quay.io/acme/app`. Alias names use OCI tag syntax; creation takes the
+`sha256:` digest of a ready version recorded for that image.
+
+A registry tag belongs to the upstream registry. A ACRYL microVMs alias belongs to
+the runtime catalog and selects a recorded digest independently. A successful
+pull seeds an alias from the registry tag; it never overwrites an existing
+binding. Creating an alias never pushes a registry tag or pulls image bytes.
+
+Alias creation refuses every existing name, even for the same digest, with
+`AlreadyExists`. Delete the alias explicitly before creating it again. Deletion
+removes only the binding: versions and existing boxes keep their digests.
+Creation history remains available; deletion is recorded by the server audit log.
+
+Image details and versions expose `aliases`. Their `history` contains
+`ImageAliasEvent` records with `alias`, optional `from_digest`, `to_digest`,
+optional `actor` and `recorded_at`. A local cache mirrors its cached registry
+tags in `aliases`, leaves history empty and refuses alias writes.
+
+```typescript
+const detail = await runtime.images.get('quay.io/acme/app');
+await runtime.images.createAlias(detail.name, 'verified', detail.versions[0].digest);
+await runtime.images.deleteAlias(detail.name, 'verified');
+const logins = await runtime.images.registries.list();
+```
+
+The JavaScript event fields use `fromDigest`, `toDigest` and `recordedAt`.
+
+### `RegistryHandle`
+
+The logins a REST server presents when it pulls a private image for a box.
+Read it from the `runtime.images.registries` getter, which throws `unsupported` on a
+local runtime: that one pulls with the logins in `imageRegistries` instead.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `list()` | `() => Promise<RegistryCredential[]>` | Every login the organization holds, oldest first |
+| `create()` | `(credential: NewRegistryCredential) => Promise<RegistryCredential>` | Add a login; `already_exists` while one is held for the same registry and prefix |
+| `remove()` | `(id: string) => Promise<void>` | Remove a login; `invalid_state`, naming the boxes, while a box still pulls through it; `not_found` for an unknown id |
+
+| Type | Fields |
+|------|--------|
+| `NewRegistryCredential` | `registryHost`, `repositoryPrefix` (optional; whole path segments ending in `/`, omitted for the whole registry), `username`, `password` |
+| `RegistryCredential` | `id`, `registryHost`, `repositoryPrefix`, `username`, `createdBy` (absent when unknown), `createdAt` (RFC 3339) |
+
+The password goes up once and is never returned: `RegistryCredential` has no
+password field. `remove()` rejects an id that is not a UUID with
+`invalid_argument`, before any request.
+
+```typescript
+const runtime = JsAcrylMicrovm.rest(new AcrylMicrovmRestOptions({ url: 'http://localhost:8100' }));
+const login = await runtime.images.registries.create({
+  registryHost: 'ghcr.io',
+  repositoryPrefix: 'acme/',
+  username: 'acme-bot',
+  password: process.env.GHCR_TOKEN!,
+});
+const box = await runtime.create({ image: 'ghcr.io/acme/private-app:1' });
+for (const entry of await runtime.images.registries.list()) {
+  console.log(entry.registryHost, entry.repositoryPrefix, entry.username);
+}
+```
+
+---
+
+### `JsOptions`
+
+Runtime configuration options.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `homeDir` | `string` | `~/.acryl/microvm` | Base directory for runtime data |
+| `imageRegistries` | `JsImageRegistry[]` | `[]` | Registry transport, TLS, search, and auth configuration |
+
+---
+
+### `JsBoxOptions`
+
+Configuration options for creating a box.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `image` | `string` | - | OCI image URI |
+| `rootfsPath` | `string` | - | Pre-prepared rootfs directory (alternative to image) |
+| `cpus` | `number` | `1` | CPU allocation (0.125–16, step 0.001); fractional values require a Linux execution host; see [resource limits](../../guides/resource-limits.md#fractional-cpus-linux) |
+| `memoryMib` | `number` | `512` | Memory limit in MiB |
+| `diskSizeGb` | `number` | - | Container disk size in GB, never smaller than the image |
+| `workingDir` | `string` | `"/root"` | Working directory inside container |
+| `env` | `JsEnvVar[]` | `[]` | Environment variables |
+| `volumes` | `JsVolumeSpec[]` | `[]` | Volume mounts |
+| `network` | `NetworkSpec` | `{ mode: "enabled" }` | Structured network configuration |
+| `ports` | `JsPortSpec[]` | `[]` | Local TCP port mappings; omit `hostPort` for automatic allocation |
+| `secrets` | `Secret[]` | `[]` | Secrets rendered into configured headers of outbound HTTPS requests |
+| `advanced` | `AdvancedBoxOptions` | `{}` | Expert-only options, including `capabilities.add` and `capabilities.drop` |
+| `autoDelete` | `number` | - | `0` keeps the box after stop; above `0`, a remote runtime deletes it that many seconds after stop and a local runtime at stop. Unset keeps the runtime's default: `autoRemove` locally, the server's policy on a remote runtime |
+| `autoRemove` | `boolean` | `false` | Deprecated: use `autoDelete`. Auto cleanup when stopped |
+| `detach` | `boolean` | `false` | Survive parent process exit |
+
+Capability policy is intentionally nested with the other expert-only options:
+
+```typescript
+const options = {
+  image: "alpine:latest",
+  advanced: {
+    capabilities: {
+      add: ["NET_BIND_SERVICE"],
+      drop: ["NET_RAW"],
+    },
+  },
+};
+```
+
+#### `NetworkSpec`
+
+```typescript
+interface NetworkSpec {
+  mode: "enabled" | "disabled";
+  allowNet?: string[];
+}
+```
+
+Use `allowNet` only when `mode: "enabled"`. Empty or omitted `allowNet` means full outbound access. A host matched by a configured secret is additionally reachable on port 443 without a rule of its own, so `allowNet` is not the only egress gate. The connection is dialed by name, and under a non-empty allowlist an answer in a private, loopback or CGNAT range is refused unless an IP or CIDR rule covers it. `mode: "disabled"` removes the guest network interface entirely.
+
+#### `JsEnvVar`
+
+```typescript
+interface JsEnvVar {
+  key: string;
+  value: string;
+}
+```
+
+#### `JsVolumeSpec`
+
+A mount has exactly one origin — a managed volume or a host bind path:
+
+```typescript
+type JsVolumeSpec =
+  | {
+      // The volume's server-assigned id or its name - the server resolves either.
+      managedVolume: string;
+      guestPath: string;
+      // Read-only managed mounts are not implemented yet; `true` is rejected.
+      readOnly?: false;
+    }
+  | {
+      hostPath: string;    // Path on host
+      guestPath: string;   // Path in container
+      readOnly?: boolean;  // Default: false
+    };
+```
+
+```typescript
+volumes: [
+  { managedVolume: "my-data", guestPath: "/data" },
+  { managedVolume: "vol_01K2EXAMPLE", guestPath: "/cache" },
+];
+```
+
+Setting both origins, or neither, is rejected. Host bind mounts are
+local-runtime only; a REST runtime refuses them.
+
+#### `JsPortSpec`
+
+```typescript
+interface JsPortSpec {
+  hostPort?: number;   // None = auto-assign
+  guestPort: number;   // Port inside container
+  protocol?: string;   // "tcp" (UDP is rejected)
+  hostIp?: string;     // Default: "0.0.0.0"
+}
+```
+
+Port publication is available only with a local runtime. For code that should
+work with both local and remote runtimes, use `box.network.tunnel(new SocketAddress({ port }))`; each
+tunnel is one-shot; call `forward()` to consume it into a listener.
+OCI `EXPOSE` declarations do not publish host ports.
+
+#### `Secret`
+
+```typescript
+interface Secret {
+  name: string;
+  value: string;
+  hosts?: string[]; // Required at create: at least one host
+  placeholder?: string; // Dummy guest value. Default: `<ACRYLMICROVM_SECRET:${name}>`
+  headers: Record<string, string>;
+}
+```
+
+`headers` is required; omission, null and empty objects are rejected. Each template contains exactly one `{value}`, for example
+`{ "X-Key": "{value}" }`. Only headers already present in the original request
+are replaced. See the [validation rules](../configuration.md#secrets).
+
+---
+
+## Box handle
+
+### `JsBox`
+
+Handle to a running or stopped box.
+
+#### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `id` | `string` | Unique box identifier (ULID) |
+| `name` | `string \| null` | User-defined name |
+| `network` | `JsNetworkHandle` | Box-scoped tunnel operations |
+| `ssh` | `JsSshHandle` | Configure, enable, query, or disable guest SSH |
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `info()` | `() => Promise<JsBoxInfo>` | Get box metadata |
+| `exec()` | `(cmd, args?, env?, tty?) => Promise<JsExecution>` | Execute command |
+| `executions()` | `() => JsExecutionsHandle` | Live session inventory and recovery; never starts a box |
+| `stop()` | `() => Promise<void>` | Stop the box |
+| `metrics()` | `() => Promise<JsBoxMetrics>` | Get resource metrics |
+
+---
+
+### `JsBoxInfo`
+
+Metadata about a box.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `string` | Unique box identifier (ULID) |
+| `name` | `string \| undefined` | User-defined name |
+| `state` | `JsBoxStateInfo` | Runtime state with `status`, `running`, and optional `pid` and `exitCode` fields. `exitCode` is how the main command ended — its own code, or `128 + n` when a signal ended it; stopping a box signals that command, so a stop is recorded here too; `0` is a real value, so test for `undefined` rather than falsiness |
+| `createdAt` | `string` | Creation timestamp (ISO 8601) |
+| `startedAt` | `string \| undefined` | Time when the box most recently entered `Running` (RFC 3339); absent if not recorded or unavailable over REST |
+| `lastActivityAt` | `string \| undefined` | Time the box was last active (RFC 3339), the clock AutoStop measures idleness against; absent for a local box, which records no activity |
+| `image` | `string` | OCI image reference or rootfs path |
+| `cpus` | `number` | Allocated CPU count |
+| `memoryMib` | `number` | Allocated memory in MiB |
+| `network` | `JsNetworkInfo \| null` | Current network configuration and resolved local publications |
+
+```typescript
+interface JsOutboundNetworkInfo {
+// (JsInboundNetworkInfo has the same shape)
+  mode: string;
+  allowNet: string[];
+}
+
+interface JsNetworkInfo {
+  outbound: JsOutboundNetworkInfo;
+  inbound: JsInboundNetworkInfo;
+  publishedPorts: JsPublishedPort[] | null;
+  /** @deprecated Mirrors outbound.mode. */
+  mode: string;
+  /** @deprecated Mirrors outbound.allowNet. */
+  allowNet: string[];
+}
+
+interface JsPublishedPort {
+  guestPort: number;
+  hostIp: string;
+  hostPort: number;
+  protocol: string;
+}
+```
+
+`network === null` means network information is unavailable. Within
+`JsNetworkInfo`, `publishedPorts === null` means the current handle does not know
+the lifecycle's publications, `[]` means there are no active publications, and
+a populated array contains concrete active local bindings. `JsPortSpec` remains
+the request type; resolved output uses `JsPublishedPort` so every reported host
+port is concrete.
+
+`box.info()` always returns a promise. Local metadata reads report
+bindings captured when this handle started or reattached the box; REST metadata
+reads fetch the current server record. A newly loaded local running box has no
+live binding data yet, so box, get, or list info may report
+`publishedPorts === null` until an operation requiring live state reattaches it.
+
+---
+
+## Network tunnels
+
+Create targets with `new SocketAddress({ address: "127.0.0.1", port: 3000 })`
+from `node:net`; IPv6 also sets `family: "ipv6"`. Flowlabel must be zero.
+The old `{ type: "tcp", ... }` target is rejected; that shape remains a listener
+argument to `forward()`.
+
+`JsBox` and `SimpleBox` expose the same `box.network` workflow.
+
+| Operation | Signature | Description |
+|-----------|-----------|-------------|
+| Tunnel | `await box.network.tunnel(target, options?)` | Prepare a `JsBoxTunnel` or `BoxTunnel`; `target` is `SocketAddress` imported from `node:net` (loopback or the guest IP), `options` is `{ isPublic?: boolean }`, public by default. Bare port and boolean arguments are rejected; invalid types throw synchronously on the native `JsBox.network` handle |
+| Token | `tunnel.token(): string \| null` | Full on creation, masked on later preparations; `isPublic()` reports the mode |
+| Revoke | `await box.network.revokeTunnel(port)` | Withdraw the port's tunnel; open connections stay open |
+| Domains | `runtime.domains` | `await list()` returns full `hostname` values, no short `name`, and quota fields (`limit`, `used`, `remaining`, `minLength`). `target` is null while unbound. `await bind(domain, { type: "box", box, port })` requires an owned full hostname; request new names in Dashboard > Domains first; `await unbind(hostname)` requires the full hostname and retains ownership. `{ type: "app", app }` is reserved; App binding is rejected. Hosted runtimes only; see [Domains](../../concepts/networking.md#domains). |
+| Forward | `await tunnel.forward(listen)` | Return a listener-backed `TunnelForwarder` |
+| Inspect | `tunnel.uri(): string \| null` | Read the prepared public URL; `null` for a local box |
+| Connect | `await tunnel.connect()` | Consume the prepared tunnel into its connection |
+| Read/write | `await connection.read(maxBytes)`, `await connection.write(data)` | Exchange bytes with the service |
+| Close | `await connection.close()` | Close the connection |
+
+`listen` is `{ type: "tcp", host?: string, port: number }` or
+`{ type: "unix", path: string }`. The forwarder exposes `localAddr()`, `wait()`,
+and repeatable `close()`.
+
+Each tunnel is one-shot. Choose `connect()` or `forward()`; a forwarder opens
+fresh connections against the prepared declaration without preparing again.
+It cannot undo revocation. This differs from `ports`, which
+creates a persistent, local-only host listener that accepts repeated
+connections from ordinary host applications.
+
+---
+
+## Guest SSH control
+
+`JsBox` and `SimpleBox` expose `box.ssh`.
+
+| Operation | Signature | Description |
+|-----------|-----------|-------------|
+| Configure | `await box.ssh.configure(config)` | Apply `SshConfig` and return `SshStatus` |
+| Enable | `await box.ssh.enable()` | Enable saved configuration on a running box and return `SshStatus`; preserve healthy connections |
+| Observe | `await box.ssh.status()` | Return `SshStatus` |
+| Disable | `await box.ssh.disable()` | Disable SSH and return `SshStatus` |
+
+`enable()` and `disable()` require a running box. On a valid handle to a configured
+or stopped box, both reject with an `Error` describing the invalid state (HTTP 409
+over REST), without changing saved SSH intent. Disable is safe to repeat while
+running; call it while running to persist the disabled switch.
+
+```typescript
+interface SshConfig {
+  listenAddress: string;      // e.g. "0.0.0.0:2222"
+  hostPrivateKey: string;     // unencrypted OpenSSH host private key
+  accounts: SshAccount[];     // non-empty; each has a key or a CA
+}
+
+interface SshAccount {
+  login: string;              // 1-128 chars: [A-Za-z0-9._-]
+  authorizedKeys?: string[];  // OpenSSH public keys
+  ca?: SshCaConfig;           // certificate authority alternative
+}
+
+interface SshCaConfig {
+  publicKey: string;
+  principal: string;          // required certificate principal
+}
+
+interface SshStatus {
+  enabled: boolean;
+  generation: bigint;         // full u64 precision
+  listenAddress: string;
+  hostPublicKey: string;      // comment-free public host key
+  hostKeyFingerprint: string; // SHA-256 fingerprint
+}
+```
+
+On a `SimpleBox`, a first `configure` call lazily creates or fetches the box
+before validating the configuration: a wrong-typed configuration can leave the
+created box behind, but no SSH operation is sent for it. `status`, `enable` and
+`disable` never start the VM. Enable works locally and over REST and requires
+saved configuration.
+
+Invalid configuration field types report `InvalidArg` with the message
+`invalid SSH configuration`, without echoing rejected values. Other errors
+use the SDK's existing [error types](#error-types).
+
+---
+
+## Command execution
+
+### `JsExecution`
+
+Handle for a running command.
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `id()` | `() => Promise<string>` | Get execution ID |
+| `stdin()` | `() => Promise<JsExecStdin>` | Get stdin writer |
+| `stdout()` | `() => Promise<JsExecStdout>` | Get stdout reader |
+| `stderr()` | `() => Promise<JsExecStderr>` | Get stderr reader |
+| `wait()` | `() => Promise<JsExecResult>` | Wait for completion |
+| `kill()` | `() => Promise<void>` | Send SIGKILL |
+
+#### Example
+
+```typescript
+const execution = await box.exec('ls', ['-la', '/']);
+
+// Read stdout
+const stdout = await execution.stdout();
+while (true) {
+  const line = await stdout.next();
+  if (line === null) break;
+  console.log(line);
+}
+
+// Wait for completion
+const result = await execution.wait();
+console.log(`Exit code: ${result.exitCode}`);
+```
+
+---
+
+### `JsExecutionsHandle`
+
+Live execution namespace of one box, returned by `box.executions()`. Creating it
+never starts the box.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `list()` | `() => Promise<ExecutionInfo[]>` | List live sessions, including the main command; never starts a box |
+| `get(id)` | `(executionId: string) => Promise<JsExecution>` | Recover control without taking the output reader |
+| `attach(id, stdin?)` | `(executionId: string, stdin?: boolean) => Promise<JsExecution>` | Recover streams for a listed live session |
+
+```typescript
+for (const execution of await box.executions().list()) {
+  console.log(execution.executionId, execution.isMainSession);
+}
+```
+
+---
+
+### `JsExecStdin`
+
+Writer for sending input to a running process.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `write()` | `(data: Buffer) => Promise<void>` | Write bytes |
+| `writeString()` | `(text: string) => Promise<void>` | Write UTF-8 string |
+
+```typescript
+const stdin = await execution.stdin();
+await stdin.writeString('Hello, World!\n');
+await stdin.write(Buffer.from([10])); // newline
+```
+
+---
+
+### `JsExecStdout` / `JsExecStderr`
+
+Readers for streaming output.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `next()` | `() => Promise<string \| null>` | Read next line (null = EOF) |
+
+**Stream Consumption:** Each stream can only be consumed once. After iterating to EOF, subsequent calls return `null`.
+
+```typescript
+const stdout = await execution.stdout();
+while (true) {
+  const line = await stdout.next();
+  if (line === null) break;
+  console.log(line);
+}
+```
+
+---
+
+### `JsExecResult`
+
+Result of a completed execution.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `exitCode` | `number` | Process exit code (0 = success) |
+
+---
+
+## Box types
+
+### `SimpleBox`
+
+Context manager for basic command execution with automatic cleanup.
+
+```typescript
+import { SimpleBox } from 'acrylmicrovm';
+```
+
+#### Constructor options
+
+```typescript
+interface SimpleBoxOptions {
+  image?: string;         // Default: "python:slim"
+  memoryMib?: number;     // Memory in MiB
+  cpus?: number;          // CPU cores
+  runtime?: JsAcrylMicrovm;    // Runtime instance
+  name?: string;          // Box name
+  autoRemove?: boolean;   // Default: true
+  detach?: boolean;       // Default: false
+  workingDir?: string;    // Working directory
+  env?: Record<string, string>;  // Environment variables
+  volumes?: JsVolumeSpec[]; // Volume mounts (managedVolume or hostPath)
+  network?: NetworkSpec;
+  ports?: PortSpec[];     // Port mappings
+  secrets?: Secret[];
+  advanced?: {
+    capabilities?: {
+      add?: string[];     // Add Linux capabilities
+      drop?: string[];    // Remove Linux capabilities
+    };
+  };
+}
+```
+
+#### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `id` | `string` | Box ID (throws if not started) |
+| `name` | `string \| undefined` | Box name |
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `getId()` | `() => Promise<string>` | Get box ID (async) |
+| `getInfo()` | `() => Promise<JsBoxInfo>` | Get box info (async) |
+| `exec()` | `(cmd, ...args) => Promise<ExecResult>` | Execute and wait (variadic) |
+| `exec()` | `(cmd, args[], env?, options?) => Promise<ExecResult>` | Execute with options (array form) |
+| `executions()` | `() => Executions` | Live session namespace; an uncreated box lists nothing |
+| `stop()` | `() => Promise<void>` | Stop the box |
+| `[Symbol.asyncDispose]()` | `() => Promise<void>` | Async disposal |
+
+#### Example
+
+```typescript
+// With async disposal (TypeScript 5.2+)
+await using box = new SimpleBox({ image: 'alpine:latest' });
+const result = await box.exec('echo', 'Hello!');
+console.log(result.stdout);
+
+// Manual cleanup
+const box = new SimpleBox({ image: 'alpine:latest' });
+try {
+  const result = await box.exec('ls', '-la');
+  console.log(result.stdout);
+
+  // Per-command options (array form)
+  const pwd = await box.exec('pwd', [], undefined, { cwd: '/tmp' });
+  const who = await box.exec('whoami', [], undefined, { user: 'nobody' });
+  const timed = await box.exec('sleep', ['60'], undefined, { timeoutSecs: 5 });
+} finally {
+  await box.stop();
+}
+```
+
+The `options` parameter accepts `{ cwd?: string; user?: string; timeoutSecs?: number }`.
+
+---
+
+### `CodeBox`
+
+Python code execution sandbox.
+
+```typescript
+import { CodeBox } from 'acrylmicrovm';
+```
+
+#### Constructor options
+
+```typescript
+interface CodeBoxOptions extends SimpleBoxOptions {
+  image?: string;  // Default: "python:slim"
+}
+```
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `run()` | `(code: string) => Promise<string>` | Execute Python code |
+| `runScript()` | `(scriptPath: string) => Promise<string>` | Run script file |
+| `installPackage()` | `(pkg: string) => Promise<string>` | pip install |
+| `installPackages()` | `(...pkgs: string[]) => Promise<string>` | Install multiple |
+
+#### Example
+
+```typescript
+const codebox = new CodeBox({ memoryMib: 1024 });
+try {
+  await codebox.installPackage('requests');
+  const result = await codebox.run(`
+import requests
+print(requests.get('https://api.github.com/zen').text)
+  `);
+  console.log(result);
+} finally {
+  await codebox.stop();
+}
+```
+
+---
+
+### `BrowserBox`
+
+Browser automation with Chrome DevTools Protocol.
+
+```typescript
+import { BrowserBox, BrowserType } from 'acrylmicrovm';
+```
+
+#### Constructor options
+
+```typescript
+interface BrowserBoxOptions {
+  browser?: BrowserType;  // "chromium" | "firefox" | "webkit"
+  memoryMib?: number;     // Default: 2048
+  cpus?: number;          // Default: 2
+}
+```
+
+#### Browser CDP ports
+
+| Browser | Port | Image |
+|---------|------|-------|
+| `chromium` | 9222 | `mcr.microsoft.com/playwright:v1.47.2-jammy` |
+| `firefox` | 9223 | `browserless/firefox:latest` |
+| `webkit` | 9224 | `browserless/webkit:latest` |
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `start()` | `(timeout?: number) => Promise<void>` | Start browser |
+| `endpoint()` | `() => string` | Get CDP endpoint URL |
+
+#### Example
+
+```typescript
+import puppeteer from 'puppeteer-core';
+
+const browser = new BrowserBox({ browser: 'chromium' });
+try {
+  await browser.start();
+  const endpoint = browser.endpoint();  // "http://localhost:9222"
+
+  const instance = await puppeteer.connect({ browserURL: endpoint });
+  const page = await instance.newPage();
+  await page.goto('https://example.com');
+  console.log(await page.title());
+} finally {
+  await browser.stop();
+}
+```
+
+---
+
+### `ComputerBox`
+
+Desktop automation with full GUI environment.
+
+```typescript
+import { ComputerBox } from 'acrylmicrovm';
+```
+
+#### Constructor options
+
+```typescript
+interface ComputerBoxOptions {
+  cpus?: number;          // Default: 2
+  memoryMib?: number;     // Default: 2048
+  guiHttpPort?: number;   // Default: 3000
+  guiHttpsPort?: number;  // Default: 3001
+}
+```
+
+#### Mouse methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `mouseMove()` | `(x: number, y: number) => Promise<void>` | Move cursor |
+| `leftClick()` | `() => Promise<void>` | Left click |
+| `rightClick()` | `() => Promise<void>` | Right click |
+| `middleClick()` | `() => Promise<void>` | Middle click |
+| `doubleClick()` | `() => Promise<void>` | Double click |
+| `tripleClick()` | `() => Promise<void>` | Triple click |
+| `leftClickDrag()` | `(startX, startY, endX, endY) => Promise<void>` | Drag |
+| `cursorPosition()` | `() => Promise<[number, number]>` | Get cursor pos |
+
+#### Keyboard methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `type()` | `(text: string) => Promise<void>` | Type text |
+| `key()` | `(keySequence: string) => Promise<void>` | Press key(s) |
+
+##### Key syntax reference (xdotool format)
+
+| Key | Syntax |
+|-----|--------|
+| Enter | `Return` |
+| Tab | `Tab` |
+| Escape | `Escape` |
+| Backspace | `BackSpace` |
+| Delete | `Delete` |
+| Space | `space` |
+| Arrow keys | `Up`, `Down`, `Left`, `Right` |
+| Function keys | `F1`, `F2`, ... `F12` |
+| Page keys | `Page_Up`, `Page_Down`, `Home`, `End` |
+| Modifiers | `ctrl`, `alt`, `shift`, `super` |
+| Combinations | `ctrl+c`, `ctrl+shift+s`, `alt+Tab` |
+
+**Examples:**
+```typescript
+await desktop.key('Return');        // Press Enter
+await desktop.key('ctrl+c');        // Copy
+await desktop.key('ctrl+shift+s');  // Save As
+await desktop.key('alt+Tab');       // Switch window
+await desktop.key('ctrl+a Delete'); // Select all and delete
+```
+
+#### Display methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `waitUntilReady()` | `(timeout?: number) => Promise<void>` | Wait for desktop |
+| `screenshot()` | `() => Promise<Screenshot>` | Capture screen |
+| `scroll()` | `(x, y, direction, amount?) => Promise<void>` | Scroll |
+| `getScreenSize()` | `() => Promise<[number, number]>` | Get dimensions |
+
+##### Screenshot return type
+
+```typescript
+interface Screenshot {
+  data: string;    // Base64-encoded PNG
+  width: number;   // 1024 (default)
+  height: number;  // 768 (default)
+  format: 'png';
+}
+```
+
+##### Scroll directions
+
+| Direction | Description |
+|-----------|-------------|
+| `"up"` | Scroll up |
+| `"down"` | Scroll down |
+| `"left"` | Scroll left |
+| `"right"` | Scroll right |
+
+#### Example
+
+```typescript
+const desktop = new ComputerBox({ cpus: 4, memoryMib: 4096 });
+try {
+  await desktop.waitUntilReady(60);
+
+  // Take screenshot
+  const screenshot = await desktop.screenshot();
+  console.log(`${screenshot.width}x${screenshot.height}`);
+
+  // GUI interaction
+  await desktop.mouseMove(100, 200);
+  await desktop.leftClick();
+  await desktop.type('Hello, World!');
+  await desktop.key('Return');
+
+  // Access via browser: http://localhost:3000
+} finally {
+  await desktop.stop();
+}
+```
+
+---
+
+### `InteractiveBox`
+
+Interactive terminal sessions with PTY support.
+
+```typescript
+import { InteractiveBox } from 'acrylmicrovm';
+```
+
+#### Constructor options
+
+```typescript
+interface InteractiveBoxOptions extends SimpleBoxOptions {
+  shell?: string;        // Default: "/bin/sh"
+  tty?: boolean;         // undefined = auto-detect
+}
+```
+
+##### TTY mode
+
+| Value | Behavior |
+|-------|----------|
+| `undefined` | Auto-detect from stdin |
+| `true` | Force TTY with I/O forwarding |
+| `false` | No I/O forwarding |
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `start()` | `() => Promise<void>` | Start PTY session |
+| `wait()` | `() => Promise<void>` | Wait for shell exit |
+
+#### Example
+
+```typescript
+const box = new InteractiveBox({
+  image: 'alpine:latest',
+  shell: '/bin/sh',
+  tty: true
+});
+try {
+  await box.start();
+  await box.wait();  // Blocks until shell exits
+} finally {
+  await box.stop();
+}
+```
+
+---
+
+## Error types
+
+```typescript
+import { AcrylMicrovmError, ExecError, TimeoutError, ParseError } from 'acrylmicrovm';
+```
+
+### Exception hierarchy
+
+```text
+AcrylMicrovmError (base)
+├── ExecError       # Command failed
+├── TimeoutError    # Operation timeout
+└── ParseError      # Output parsing failed
+```
+
+### `AcrylMicrovmError`
+
+Base error class for all ACRYL microVMs errors.
+
+```typescript
+try {
+  await box.exec('invalid-command');
+} catch (err) {
+  if (err instanceof AcrylMicrovmError) {
+    console.error('AcrylMicrovm error:', err.message);
+  }
+}
+```
+
+### `ExecError`
+
+Command execution failed (non-zero exit code).
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `command` | `string` | Failed command |
+| `exitCode` | `number` | Non-zero exit code |
+| `stderr` | `string` | Standard error output |
+
+```typescript
+try {
+  await box.exec('false');
+} catch (err) {
+  if (err instanceof ExecError) {
+    console.error(`Command: ${err.command}`);
+    console.error(`Exit code: ${err.exitCode}`);
+    console.error(`Stderr: ${err.stderr}`);
+  }
+}
+```
+
+### `TimeoutError`
+
+Operation exceeded time limit.
+
+```typescript
+try {
+  await desktop.waitUntilReady(5);
+} catch (err) {
+  if (err instanceof TimeoutError) {
+    console.error('Desktop did not become ready');
+  }
+}
+```
+
+### `ParseError`
+
+Failed to parse command output.
+
+```typescript
+try {
+  const pos = await desktop.cursorPosition();
+} catch (err) {
+  if (err instanceof ParseError) {
+    console.error('Failed to parse cursor position');
+  }
+}
+```
+
+### `errorCode(err)`
+
+A failure the native runtime reports is a plain `Error` whose message starts
+with the kind of failure. `errorCode` returns that kind's code, or `undefined`
+for any other error. The codes are the ones `AcrylMicrovmError::http()` gives
+(`src/shared/src/errors.rs`) and a REST server answers with, and the same as
+the `code` of Python's [runtime failure classes](../python/README.md#runtime-failures).
+
+```typescript
+import { errorCode } from 'acrylmicrovm';
+
+try {
+  await runtime.remove('no-such-box');
+} catch (err) {
+  if (errorCode(err) === 'not_found') {
+    // nothing to remove
+  }
+}
+```
+
+---
+
+## Metrics
+
+### `JsRuntimeMetrics`
+
+Runtime-wide metrics.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `boxesCreatedTotal` | `number` | Total boxes created |
+| `boxesFailedTotal` | `number` | Boxes that failed during creation |
+| `numRunningBoxes` | `number` | Currently running boxes |
+| `totalCommandsExecuted` | `number` | Total commands executed |
+| `totalExecErrors` | `number` | Total execution errors |
+
+```typescript
+const metrics = await runtime.metrics();
+console.log(`Boxes created: ${metrics.boxesCreatedTotal}`);
+console.log(`Running: ${metrics.numRunningBoxes}`);
+```
+
+---
+
+### `JsBoxMetrics`
+
+Per-box resource metrics.
+
+#### Counter fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `commandsExecutedTotal` | `number` | Commands executed on this box |
+| `execErrorsTotal` | `number` | Execution errors on this box |
+| `bytesSentTotal` | `number` | Bytes sent via stdin |
+| `bytesReceivedTotal` | `number` | Bytes received via stdout/stderr |
+
+#### Resource fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cpuPercent` | `number \| undefined` | CPU usage (0.0-100.0) |
+| `memoryBytes` | `number \| undefined` | Memory usage in bytes |
+| `networkBytesSent` | `number \| undefined` | Network bytes sent |
+| `networkBytesReceived` | `number \| undefined` | Network bytes received |
+| `networkTcpConnections` | `number \| undefined` | Current TCP connections |
+| `networkTcpErrors` | `number \| undefined` | Total TCP errors |
+
+#### Timing fields (milliseconds)
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `totalCreateDurationMs` | `number \| undefined` | Total create time |
+| `guestBootDurationMs` | `number \| undefined` | Guest agent ready time |
+| `stageFilesystemSetupMs` | `number \| undefined` | Directory setup time |
+| `stageImagePrepareMs` | `number \| undefined` | Image pull/prepare time |
+| `stageGuestRootfsMs` | `number \| undefined` | Rootfs bootstrap time |
+| `stageBoxConfigMs` | `number \| undefined` | Configuration build time |
+| `stageBoxSpawnMs` | `number \| undefined` | Subprocess spawn time |
+| `stageContainerInitMs` | `number \| undefined` | Container init time |
+
+```typescript
+const metrics = await box.metrics();
+console.log(`CPU: ${metrics.cpuPercent}%`);
+console.log(`Memory: ${(metrics.memoryBytes || 0) / (1024 * 1024)} MB`);
+console.log(`Boot time: ${metrics.guestBootDurationMs}ms`);
+```
+
+---
+
+## Type definitions
+
+### `ExecutionInfo`
+
+Returned by `JsBox.executions().list()` and `SimpleBox.executions().list()`.
+
+```typescript
+interface ExecutionInfo {
+  executionId: string;
+  argv: string[];
+  startedAt: number; // Unix epoch milliseconds
+  tty: boolean;
+  isMainSession: boolean;
+}
+```
+
+The list excludes completed sessions. A created or stopped box returns `[]`
+without starting; a paused box returns an invalid-state error. Use
+`executions().get(executionId)` for independent control, or
+`executions().attach(executionId)` for streams; an existing output reader is a
+conflict.
+See the [recovery guide](../../guides/ai-agent-integration.md#recovering-control-after-losing-the-handle)
+for retention semantics.
+
+### `ExecResult` (wrapper)
+
+Result from `SimpleBox.exec()`.
+
+```typescript
+interface ExecResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+}
+```
+
+### `Screenshot`
+
+Screenshot capture result.
+
+```typescript
+interface Screenshot {
+  data: string;     // Base64-encoded PNG
+  width: number;
+  height: number;
+  format: 'png';
+}
+```
+
+### `BrowserType`
+
+Supported browser types.
+
+```typescript
+type BrowserType = 'chromium' | 'firefox' | 'webkit';
+```
+
+---
+
+## Constants
+
+Default values used by ACRYL microVMs.
+
+### Resource defaults
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `DEFAULT_CPUS` | `1` | Default CPU cores |
+| `DEFAULT_MEMORY_MIB` | `512` | Default memory in MiB |
+
+### ComputerBox defaults
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `COMPUTERBOX_CPUS` | `2` | Default CPUs |
+| `COMPUTERBOX_MEMORY_MIB` | `2048` | Default memory |
+| `COMPUTERBOX_DISPLAY_WIDTH` | `1024` | Screen width |
+| `COMPUTERBOX_DISPLAY_HEIGHT` | `768` | Screen height |
+| `COMPUTERBOX_GUI_HTTP_PORT` | `3000` | HTTP GUI port |
+| `COMPUTERBOX_GUI_HTTPS_PORT` | `3001` | HTTPS GUI port |
+| `DESKTOP_READY_TIMEOUT` | `60` | Ready timeout (seconds) |
+
+### BrowserBox ports
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `BROWSERBOX_PORT_CHROMIUM` | `9222` | Chromium CDP port |
+| `BROWSERBOX_PORT_FIREFOX` | `9223` | Firefox CDP port |
+| `BROWSERBOX_PORT_WEBKIT` | `9224` | WebKit CDP port |
+
+---
+
+## See also
+
+- [Node.js SDK README](../../../sdks/node/README.md) - Quick start and examples
+- [Getting Started Guide](../../getting-started/quickstart-nodejs.md) - Installation
+- [Configuration Reference](../configuration.md) - BoxOptions details
+- [Error Codes](../errors.md) - Error handling

@@ -1,0 +1,523 @@
+// Modified by ACRYL, 2026
+//go:build unix
+
+package acrylmicrovm
+
+/*
+#include "bridge.h"
+#include <stdlib.h>
+#include <unistd.h>
+*/
+import "C"
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"path/filepath"
+	"runtime"
+	"runtime/cgo"
+	"strings"
+	"sync"
+	"unsafe"
+)
+
+// Network is a box-scoped handle for network operations.
+type Network struct {
+	mu      sync.Mutex
+	handle  *C.CBoxNetworkHandle
+	runtime *Runtime
+}
+
+type socketAddress struct {
+	kind C.AcrylMicrovmSocketAddressKind
+	host string
+	port uint16
+	path string
+}
+
+func TCPListenAddress(host string, port uint16) (net.Addr, error) {
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return nil, fmt.Errorf("tunnel listener host must be a numeric IP: %q", host)
+	}
+	return &net.TCPAddr{IP: append(net.IP(nil), ip...), Port: int(port)}, nil
+}
+
+func UnixListenAddress(path string) (net.Addr, error) {
+	if err := validateUnixListenPath(path); err != nil {
+		return nil, err
+	}
+	return &net.UnixAddr{Name: path, Net: "unix"}, nil
+}
+
+func validateUnixListenPath(path string) error {
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("tunnel Unix socket path must be absolute: %q", path)
+	}
+	if strings.ContainsRune(path, '\x00') {
+		return fmt.Errorf("tunnel Unix socket path must not contain NUL")
+	}
+	return nil
+}
+
+func parseListenAddress(listen net.Addr) (socketAddress, error) {
+	switch address := listen.(type) {
+	case *net.TCPAddr:
+		if address == nil || address.Port < 0 || address.Port > 65535 {
+			return socketAddress{}, fmt.Errorf("invalid TCP tunnel listener address")
+		}
+		if address.Zone != "" {
+			return socketAddress{}, fmt.Errorf("TCP tunnel listener zones are not supported")
+		}
+		ip := address.IP
+		if len(ip) == 0 {
+			ip = net.IPv4(127, 0, 0, 1)
+		}
+		if ip.To4() == nil && ip.To16() == nil {
+			return socketAddress{}, fmt.Errorf("TCP tunnel listener must use a numeric IP")
+		}
+		return socketAddress{
+			kind: C.AcrylMicrovmSocketTcp,
+			host: ip.String(),
+			port: uint16(address.Port),
+		}, nil
+	case *net.UnixAddr:
+		if address == nil || address.Net != "unix" {
+			return socketAddress{}, fmt.Errorf("tunnel Unix listener must be an absolute filesystem stream socket")
+		}
+		if err := validateUnixListenPath(address.Name); err != nil {
+			return socketAddress{}, err
+		}
+		return socketAddress{kind: C.AcrylMicrovmSocketUnix, path: address.Name}, nil
+	default:
+		return socketAddress{}, fmt.Errorf("tunnel listener must be *net.TCPAddr or *net.UnixAddr")
+	}
+}
+
+type TunnelForwarder struct {
+	mu      sync.Mutex
+	handle  *C.CTunnelForwarderHandle
+	runtime *Runtime
+	address net.Addr
+}
+
+// BoxTunnel is a prepared one-shot tunnel to a service inside a box.
+type BoxTunnel struct {
+	mu      sync.Mutex
+	handle  *C.CBoxTunnelHandle
+	runtime *Runtime
+	// Read once at preparation so it outlives the consumed native handle.
+	descriptor TunnelDescriptor
+}
+
+// Network returns the box-scoped handle for network operations.
+func (b *Box) Network() (*Network, error) {
+	if b == nil || b.handle == nil {
+		return nil, ErrRuntimeClosed
+	}
+
+	var cNetwork *C.CBoxNetworkHandle
+	var cerr C.CAcrylMicrovmError
+	code := C.acrylmicrovm_box_network(b.handle, &cNetwork, &cerr)
+	if code != C.Ok {
+		return nil, freeError(&cerr)
+	}
+
+	return &Network{handle: cNetwork, runtime: b.runtime}, nil
+}
+
+func (f *TunnelForwarder) Addr() net.Addr {
+	if f == nil {
+		return nil
+	}
+	defer runtime.KeepAlive(f)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.handle == nil {
+		return nil
+	}
+	return cloneAddr(f.address)
+}
+
+func (f *TunnelForwarder) Wait(ctx context.Context) error {
+	if f == nil {
+		return ErrRuntimeClosed
+	}
+	defer runtime.KeepAlive(f)
+	f.mu.Lock()
+	if f.handle == nil || f.runtime == nil {
+		f.mu.Unlock()
+		return ErrRuntimeClosed
+	}
+	runtimeHandle := f.runtime
+	select {
+	case <-runtimeHandle.closing:
+		f.mu.Unlock()
+		return ErrRuntimeClosed
+	default:
+	}
+	runtimeHandle.ensureDrainRunning()
+	ch := make(chan error, 1)
+	h := registerHandleForDispatch(cgo.NewHandle(ch))
+	var cerr C.CAcrylMicrovmError
+	code := C.acrylmicrovm_tunnel_forwarder_wait(f.handle, C.cbTunnelForwarderWait(), handleToPtr(h), &cerr)
+	f.mu.Unlock()
+	if code != C.Ok {
+		deleteHandleForDispatch(h)
+		return freeError(&cerr)
+	}
+	select {
+	case err := <-ch:
+		return err
+	case <-ctx.Done():
+		abandonAsyncErr(ch, h, runtimeHandle.closing)
+		return ctx.Err()
+	case <-runtimeHandle.closing:
+		abandonAsyncErr(ch, h, runtimeHandle.closing)
+		return ErrRuntimeClosed
+	}
+}
+
+func (f *TunnelForwarder) Close() error {
+	if f == nil {
+		return nil
+	}
+	defer runtime.KeepAlive(f)
+	f.mu.Lock()
+	if f.handle == nil || f.runtime == nil {
+		f.mu.Unlock()
+		return nil
+	}
+	runtimeHandle := f.runtime
+	select {
+	case <-runtimeHandle.closing:
+		f.mu.Unlock()
+		return ErrRuntimeClosed
+	default:
+	}
+	runtimeHandle.ensureDrainRunning()
+	ch := make(chan error, 1)
+	h := registerHandleForDispatch(cgo.NewHandle(ch))
+	var cerr C.CAcrylMicrovmError
+	code := C.acrylmicrovm_tunnel_forwarder_close(f.handle, C.cbTunnelForwarderClose(), handleToPtr(h), &cerr)
+	f.mu.Unlock()
+	if code != C.Ok {
+		deleteHandleForDispatch(h)
+		return freeError(&cerr)
+	}
+	select {
+	case err := <-ch:
+		return err
+	case <-runtimeHandle.closing:
+		abandonAsyncErr(ch, h, runtimeHandle.closing)
+		return ErrRuntimeClosed
+	}
+}
+
+func (f *TunnelForwarder) free() {
+	if f == nil {
+		return
+	}
+	runtime.SetFinalizer(f, nil)
+	f.mu.Lock()
+	handle := f.handle
+	f.handle = nil
+	f.mu.Unlock()
+	if handle != nil {
+		C.acrylmicrovm_tunnel_forwarder_free(handle)
+	}
+}
+
+// Close releases the network handle.
+func (n *Network) Close() error {
+	if n == nil {
+		return nil
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.handle != nil {
+		C.acrylmicrovm_network_free(n.handle)
+		n.handle = nil
+	}
+	return nil
+}
+
+// TunnelOptions configures Network.Tunnel. The zero value requests a private
+// tunnel; use DefaultTunnelOptions for a public one.
+type TunnelOptions struct {
+	// IsPublic makes the tunnel reachable without credentials. A private
+	// tunnel requires a cloud runtime and is never downgraded to public.
+	IsPublic bool
+}
+
+// DefaultTunnelOptions returns the options for a public tunnel.
+func DefaultTunnelOptions() TunnelOptions {
+	return TunnelOptions{IsPublic: true}
+}
+
+// parseTunnelTarget reads a target: a *net.TCPAddr whose IP is localhost or
+// the guest IP. An empty IP means localhost.
+func parseTunnelTarget(address *net.TCPAddr) (string, uint16, error) {
+	if address == nil || address.Port < 0 || address.Port > 65535 {
+		return "", 0, fmt.Errorf("tunnel target must be a *net.TCPAddr")
+	}
+	if address.Zone != "" {
+		return "", 0, fmt.Errorf("tunnel target zones are not supported")
+	}
+	if len(address.IP) == 0 {
+		return "127.0.0.1", uint16(address.Port), nil
+	}
+	return address.IP.String(), uint16(address.Port), nil
+}
+
+// Tunnel prepares a one-shot tunnel to target, the service's TCP address as
+// seen from the box. For now target must be localhost or the guest IP, with a
+// non-zero port.
+func (n *Network) Tunnel(ctx context.Context, target *net.TCPAddr, opts TunnelOptions) (*BoxTunnel, error) {
+	if n == nil {
+		return nil, ErrRuntimeClosed
+	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.handle == nil {
+		return nil, ErrRuntimeClosed
+	}
+	host, port, err := parseTunnelTarget(target)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	cAddress := C.CString(net.JoinHostPort(host, fmt.Sprint(port)))
+	defer C.free(unsafe.Pointer(cAddress))
+	var cTarget C.struct_sockaddr_storage
+	options := C.AcrylMicrovmTunnelOptions{is_public: C.bool(opts.IsPublic)}
+	var cTunnel *C.CBoxTunnelHandle
+	var cerr C.CAcrylMicrovmError
+	if code := C.acrylmicrovm_socket_address_parse(cAddress, &cTarget, &cerr); code != C.Ok {
+		return nil, freeError(&cerr)
+	}
+	code := C.acrylmicrovm_network_tunnel(n.handle, &cTarget, &options, &cTunnel, &cerr)
+	if code != C.Ok {
+		return nil, freeError(&cerr)
+	}
+	descriptor, err := readTunnelDescriptor(cTunnel)
+	if err != nil {
+		C.acrylmicrovm_tunnel_free(cTunnel)
+		return nil, err
+	}
+	tunnel := &BoxTunnel{handle: cTunnel, runtime: n.runtime, descriptor: descriptor}
+	runtime.SetFinalizer(tunnel, (*BoxTunnel).Close)
+	return tunnel, nil
+}
+
+// RevokeTunnel revokes the tunnel for a service port inside the box.
+// It is safe to repeat; connections already open are not closed.
+func (n *Network) RevokeTunnel(ctx context.Context, port uint16) error {
+	if n == nil || n.handle == nil {
+		return ErrRuntimeClosed
+	}
+	if port == 0 {
+		return fmt.Errorf("invalid tunnel port %d", port)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	var cerr C.CAcrylMicrovmError
+	if code := C.acrylmicrovm_network_revoke_tunnel(n.handle, C.uint16_t(port), &cerr); code != C.Ok {
+		return freeError(&cerr)
+	}
+	return nil
+}
+
+func (t *BoxTunnel) take() (*C.CBoxTunnelHandle, error) {
+	if t == nil {
+		return nil, ErrRuntimeClosed
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.handle == nil {
+		return nil, ErrRuntimeClosed
+	}
+	runtime.SetFinalizer(t, nil)
+	handle := t.handle
+	t.handle = nil
+	return handle, nil
+}
+
+// Close releases an unconsumed tunnel.
+func (t *BoxTunnel) Close() error {
+	if t == nil {
+		return nil
+	}
+	runtime.SetFinalizer(t, nil)
+	t.mu.Lock()
+	if t.handle == nil {
+		t.mu.Unlock()
+		return nil
+	}
+	handle := t.handle
+	t.handle = nil
+	t.mu.Unlock()
+	if handle != nil {
+		C.acrylmicrovm_tunnel_free(handle)
+	}
+	return nil
+}
+
+// URI returns the prepared tunnel's public URL. An empty string means local.
+// It stays readable after Connect or Forward consumes the tunnel.
+func (t *BoxTunnel) URI() (string, error) {
+	if t == nil {
+		return "", ErrRuntimeClosed
+	}
+	return t.descriptor.URI, nil
+}
+
+type TunnelDescriptor struct {
+	URI      string  `json:"uri"`
+	IsPublic bool    `json:"isPublic"`
+	Token    *string `json:"token"`
+}
+
+// Descriptor returns the complete token only for the preparation that created it.
+// It stays readable after Connect or Forward consumes the tunnel.
+func (t *BoxTunnel) Descriptor() (TunnelDescriptor, error) {
+	if t == nil {
+		return TunnelDescriptor{}, ErrRuntimeClosed
+	}
+	return t.descriptor, nil
+}
+
+func readTunnelDescriptor(handle *C.CBoxTunnelHandle) (TunnelDescriptor, error) {
+	var descriptor TunnelDescriptor
+	var value *C.char
+	var cerr C.CAcrylMicrovmError
+	if code := C.acrylmicrovm_tunnel_descriptor(handle, &value, &cerr); code != C.Ok {
+		return descriptor, freeError(&cerr)
+	}
+	defer C.acrylmicrovm_free_string(value)
+	err := json.Unmarshal([]byte(C.GoString(value)), &descriptor)
+	return descriptor, err
+}
+
+// Connect consumes the tunnel's single raw byte stream.
+func (t *BoxTunnel) Connect(ctx context.Context) (net.Conn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	handle, err := t.take()
+	if err != nil {
+		return nil, err
+	}
+	defer C.acrylmicrovm_tunnel_free(handle)
+	var cerr C.CAcrylMicrovmError
+	var cFD C.int32_t
+	if code := C.acrylmicrovm_tunnel_connect(handle, &cFD, &cerr); code != C.Ok {
+		return nil, freeError(&cerr)
+	}
+	if cFD < 0 {
+		return nil, fmt.Errorf("acrylmicrovm tunnel returned invalid fd")
+	}
+	file := os.NewFile(uintptr(cFD), "acrylmicrovm-tunnel")
+	if file == nil {
+		_ = C.close(C.int(cFD))
+		return nil, fmt.Errorf("acrylmicrovm tunnel returned invalid fd")
+	}
+	connection, err := net.FileConn(file)
+	_ = file.Close()
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
+	return connection, nil
+}
+
+func tunnelForwarderAddress(handle *C.CTunnelForwarderHandle) (net.Addr, error) {
+	var address *C.char
+	var cerr C.CAcrylMicrovmError
+	if C.acrylmicrovm_tunnel_forwarder_address(handle, &address, &cerr) != C.Ok {
+		return nil, freeError(&cerr)
+	}
+	defer C.acrylmicrovm_free_string(address)
+	value := C.GoString(address)
+	if strings.HasPrefix(value, "unix:") {
+		return &net.UnixAddr{Name: strings.TrimPrefix(value, "unix:"), Net: "unix"}, nil
+	}
+	parsed, err := net.ResolveTCPAddr("tcp", strings.TrimPrefix(value, "tcp://"))
+	if err != nil {
+		return nil, fmt.Errorf("parse tunnel listener address %q: %w", value, err)
+	}
+	return parsed, nil
+}
+
+func cloneAddr(address net.Addr) net.Addr {
+	switch address := address.(type) {
+	case *net.TCPAddr:
+		clone := *address
+		clone.IP = append(net.IP(nil), address.IP...)
+		return &clone
+	case *net.UnixAddr:
+		clone := *address
+		return &clone
+	default:
+		return nil
+	}
+}
+
+// Forward binds a local listener and forwards each client through a fresh connection.
+func (t *BoxTunnel) Forward(ctx context.Context, listen net.Addr) (*TunnelForwarder, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	address, err := parseListenAddress(listen)
+	if err != nil {
+		return nil, err
+	}
+	handle, err := t.take()
+	if err != nil {
+		return nil, err
+	}
+	defer C.acrylmicrovm_tunnel_free(handle)
+	var host, path *C.char
+	if address.host != "" {
+		host = C.CString(address.host)
+		defer C.free(unsafe.Pointer(host))
+	}
+	if address.path != "" {
+		path = C.CString(address.path)
+		defer C.free(unsafe.Pointer(path))
+	}
+	cAddress := C.AcrylMicrovmSocketAddress{
+		kind: address.kind,
+		host: host,
+		port: C.uint16_t(address.port),
+		path: path,
+	}
+	var forwarderHandle *C.CTunnelForwarderHandle
+	var cerr C.CAcrylMicrovmError
+	if code := C.acrylmicrovm_tunnel_forward(handle, &cAddress, &forwarderHandle, &cerr); code != C.Ok {
+		return nil, freeError(&cerr)
+	}
+	canonical, err := tunnelForwarderAddress(forwarderHandle)
+	if err != nil {
+		C.acrylmicrovm_tunnel_forwarder_free(forwarderHandle)
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		C.acrylmicrovm_tunnel_forwarder_free(forwarderHandle)
+		return nil, err
+	}
+	forwarder := &TunnelForwarder{handle: forwarderHandle, runtime: t.runtime, address: canonical}
+	runtime.SetFinalizer(forwarder, (*TunnelForwarder).free)
+	return forwarder, nil
+}

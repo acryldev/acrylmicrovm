@@ -1,0 +1,24 @@
+# sst
+.sst
+
+# Node modules (installed fresh inside Docker)
+node_modules
+apps/node_modules
+
+# NX cache
+.nx
+apps/.nx
+
+# Build outputs
+target
+dist
+apps/dist
+coverage
+apps/coverage
+*.log
+
+# Credentials google-github-actions/auth leaves in the workspace
+gha-creds-*.json
+
+# Git
+.git

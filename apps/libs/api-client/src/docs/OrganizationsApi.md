@@ -1,0 +1,2126 @@
+# OrganizationsApi
+
+All URIs are relative to *http://localhost:3000*
+
+|Method | HTTP request | Description|
+|------------- | ------------- | -------------|
+|[**acceptOrganizationInvitation**](#acceptorganizationinvitation) | **POST** /organizations/invitations/{invitationId}/accept | Accept organization invitation|
+|[**cancelOrganizationInvitation**](#cancelorganizationinvitation) | **POST** /organizations/{organizationId}/invitations/{invitationId}/cancel | Cancel organization invitation|
+|[**createOrganization**](#createorganization) | **POST** /organizations | Create organization|
+|[**createOrganizationInvitation**](#createorganizationinvitation) | **POST** /organizations/{organizationId}/invitations | Create organization invitation|
+|[**createOrganizationRole**](#createorganizationrole) | **POST** /organizations/{organizationId}/roles | Create organization role|
+|[**createQuickstartHandoff**](#createquickstarthandoff) | **POST** /organizations/{organizationId}/quickstart/handoffs | Prepare an immutable prompt handoff|
+|[**createRegion**](#createregion) | **POST** /regions | Create a new region|
+|[**declineOrganizationInvitation**](#declineorganizationinvitation) | **POST** /organizations/invitations/{invitationId}/decline | Decline organization invitation|
+|[**deleteOrganization**](#deleteorganization) | **DELETE** /organizations/{organizationId} | Delete organization|
+|[**deleteOrganizationMember**](#deleteorganizationmember) | **DELETE** /organizations/{organizationId}/users/{userId} | Delete organization member|
+|[**deleteOrganizationRole**](#deleteorganizationrole) | **DELETE** /organizations/{organizationId}/roles/{roleId} | Delete organization role|
+|[**deleteRegion**](#deleteregion) | **DELETE** /regions/{id} | Delete a region|
+|[**getOrganization**](#getorganization) | **GET** /organizations/{organizationId} | Get organization by ID|
+|[**getOrganizationByBoxId**](#getorganizationbyboxid) | **GET** /organizations/by-box-id/{boxId} | Get organization by box ID|
+|[**getOrganizationInvitationsCountForAuthenticatedUser**](#getorganizationinvitationscountforauthenticateduser) | **GET** /organizations/invitations/count | Get count of organization invitations for authenticated user|
+|[**getOrganizationOnboarding**](#getorganizationonboarding) | **GET** /organizations/{organizationId}/onboarding | Read organization onboarding answers|
+|[**getOrganizationOtelConfigByBoxAuthToken**](#getorganizationotelconfigbyboxauthtoken) | **GET** /organizations/otel-config/by-box-auth-token/{authToken} | Get organization OTEL config by box auth token|
+|[**getOrganizationReferralCode**](#getorganizationreferralcode) | **GET** /organizations/{organizationId}/referral-code | Get or initialize an organization invitation code|
+|[**getQuickstartPrompt**](#getquickstartprompt) | **GET** /organizations/{organizationId}/quickstart/prompt | Read your prompt draft in this organization|
+|[**getRegionById**](#getregionbyid) | **GET** /regions/{id} | Get region by ID|
+|[**leaveOrganization**](#leaveorganization) | **POST** /organizations/{organizationId}/leave | Leave organization|
+|[**listOrganizationInvitations**](#listorganizationinvitations) | **GET** /organizations/{organizationId}/invitations | List pending organization invitations|
+|[**listOrganizationInvitationsForAuthenticatedUser**](#listorganizationinvitationsforauthenticateduser) | **GET** /organizations/invitations | List organization invitations for authenticated user|
+|[**listOrganizationMembers**](#listorganizationmembers) | **GET** /organizations/{organizationId}/users | List organization members|
+|[**listOrganizationRoles**](#listorganizationroles) | **GET** /organizations/{organizationId}/roles | List organization roles|
+|[**listOrganizations**](#listorganizations) | **GET** /organizations | List organizations|
+|[**markQuickstartHandoffCopied**](#markquickstarthandoffcopied) | **PATCH** /organizations/{organizationId}/quickstart/handoffs/{requestId}/copied | Record successful clipboard copy|
+|[**regenerateProxyApiKey**](#regenerateproxyapikey) | **POST** /regions/{id}/regenerate-proxy-api-key | Regenerate proxy API key for a region|
+|[**saveOrganizationOnboarding**](#saveorganizationonboarding) | **PUT** /organizations/{organizationId}/onboarding | Save organization onboarding answers|
+|[**saveQuickstartPrompt**](#savequickstartprompt) | **PUT** /organizations/{organizationId}/quickstart/prompt | Save your prompt draft with revision checking|
+|[**setOrganizationDefaultRegion**](#setorganizationdefaultregion) | **PATCH** /organizations/{organizationId}/default-region | Set default region for organization|
+|[**suspendOrganization**](#suspendorganization) | **POST** /organizations/{organizationId}/suspend | Suspend organization|
+|[**unsuspendOrganization**](#unsuspendorganization) | **POST** /organizations/{organizationId}/unsuspend | Unsuspend organization|
+|[**updateAccessForOrganizationMember**](#updateaccessfororganizationmember) | **POST** /organizations/{organizationId}/users/{userId}/access | Update access for organization member|
+|[**updateBoxDefaultLimitedNetworkEgress**](#updateboxdefaultlimitednetworkegress) | **POST** /organizations/{organizationId}/box-default-limited-network-egress | Update box default limited network egress|
+|[**updateExperimentalConfig**](#updateexperimentalconfig) | **PUT** /organizations/{organizationId}/experimental-config | Update experimental configuration|
+|[**updateOrganizationInvitation**](#updateorganizationinvitation) | **PUT** /organizations/{organizationId}/invitations/{invitationId} | Update organization invitation|
+|[**updateOrganizationName**](#updateorganizationname) | **PATCH** /organizations/{organizationId}/name | Update organization name|
+|[**updateOrganizationRole**](#updateorganizationrole) | **PUT** /organizations/{organizationId}/roles/{roleId} | Update organization role|
+|[**updateRegion**](#updateregion) | **PATCH** /regions/{id} | Update region configuration|
+
+# **acceptOrganizationInvitation**
+> OrganizationInvitation acceptOrganizationInvitation()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let invitationId: string; //Invitation ID
+
+const { status, data } = await apiInstance.acceptOrganizationInvitation(
+    invitationId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **invitationId** | [**string**] | Invitation ID | |
+
+
+### Return type
+
+**OrganizationInvitation**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | Organization invitation accepted successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **cancelOrganizationInvitation**
+> cancelOrganizationInvitation()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+let invitationId: string; //Invitation ID
+
+const { status, data } = await apiInstance.cancelOrganizationInvitation(
+    organizationId,
+    invitationId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] | Organization ID | |
+| **invitationId** | [**string**] | Invitation ID | |
+
+
+### Return type
+
+void (empty response body)
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: Not defined
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**204** | Organization invitation cancelled successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **createOrganization**
+> Organization createOrganization(createOrganization)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    CreateOrganization
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let createOrganization: CreateOrganization; //
+
+const { status, data } = await apiInstance.createOrganization(
+    createOrganization
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **createOrganization** | **CreateOrganization**|  | |
+
+
+### Return type
+
+**Organization**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**201** | Organization created successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **createOrganizationInvitation**
+> OrganizationInvitation createOrganizationInvitation(createOrganizationInvitation)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    CreateOrganizationInvitation
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+let createOrganizationInvitation: CreateOrganizationInvitation; //
+
+const { status, data } = await apiInstance.createOrganizationInvitation(
+    organizationId,
+    createOrganizationInvitation
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **createOrganizationInvitation** | **CreateOrganizationInvitation**|  | |
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+**OrganizationInvitation**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**201** | Organization invitation created successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **createOrganizationRole**
+> OrganizationRole createOrganizationRole(createOrganizationRole)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    CreateOrganizationRole
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+let createOrganizationRole: CreateOrganizationRole; //
+
+const { status, data } = await apiInstance.createOrganizationRole(
+    organizationId,
+    createOrganizationRole
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **createOrganizationRole** | **CreateOrganizationRole**|  | |
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+**OrganizationRole**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**201** | Organization role created successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **createQuickstartHandoff**
+> PromptHandoffDto createQuickstartHandoff(createPromptHandoffDto)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    CreatePromptHandoffDto
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //
+let createPromptHandoffDto: CreatePromptHandoffDto; //
+
+const { status, data } = await apiInstance.createQuickstartHandoff(
+    organizationId,
+    createPromptHandoffDto
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **createPromptHandoffDto** | **CreatePromptHandoffDto**|  | |
+| **organizationId** | [**string**] |  | |
+
+
+### Return type
+
+**PromptHandoffDto**
+
+### Authorization
+
+[bearer](../README.md#bearer)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **createRegion**
+> CreateRegionResponse createRegion(createRegion)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    CreateRegion
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let createRegion: CreateRegion; //
+let xAcrylMicrovmOrganizationID: string; //Use with JWT to specify the organization ID (optional) (default to undefined)
+
+const { status, data } = await apiInstance.createRegion(
+    createRegion,
+    xAcrylMicrovmOrganizationID
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **createRegion** | **CreateRegion**|  | |
+| **xAcrylMicrovmOrganizationID** | [**string**] | Use with JWT to specify the organization ID | (optional) defaults to undefined|
+
+
+### Return type
+
+**CreateRegionResponse**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**201** | The region has been successfully created. |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **declineOrganizationInvitation**
+> declineOrganizationInvitation()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let invitationId: string; //Invitation ID
+
+const { status, data } = await apiInstance.declineOrganizationInvitation(
+    invitationId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **invitationId** | [**string**] | Invitation ID | |
+
+
+### Return type
+
+void (empty response body)
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: Not defined
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | Organization invitation declined successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **deleteOrganization**
+> deleteOrganization()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+
+const { status, data } = await apiInstance.deleteOrganization(
+    organizationId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+void (empty response body)
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: Not defined
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**204** | Organization deleted successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **deleteOrganizationMember**
+> deleteOrganizationMember()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+let userId: string; //User ID
+
+const { status, data } = await apiInstance.deleteOrganizationMember(
+    organizationId,
+    userId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] | Organization ID | |
+| **userId** | [**string**] | User ID | |
+
+
+### Return type
+
+void (empty response body)
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: Not defined
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**204** | User removed from organization successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **deleteOrganizationRole**
+> deleteOrganizationRole()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+let roleId: string; //Role ID
+
+const { status, data } = await apiInstance.deleteOrganizationRole(
+    organizationId,
+    roleId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] | Organization ID | |
+| **roleId** | [**string**] | Role ID | |
+
+
+### Return type
+
+void (empty response body)
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: Not defined
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**204** | Organization role deleted successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **deleteRegion**
+> deleteRegion()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let id: string; //Region ID
+let xAcrylMicrovmOrganizationID: string; //Use with JWT to specify the organization ID (optional) (default to undefined)
+
+const { status, data } = await apiInstance.deleteRegion(
+    id,
+    xAcrylMicrovmOrganizationID
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **id** | [**string**] | Region ID | |
+| **xAcrylMicrovmOrganizationID** | [**string**] | Use with JWT to specify the organization ID | (optional) defaults to undefined|
+
+
+### Return type
+
+void (empty response body)
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: Not defined
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**204** | The region has been successfully deleted. |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **getOrganization**
+> Organization getOrganization()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+
+const { status, data } = await apiInstance.getOrganization(
+    organizationId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+**Organization**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | Organization details |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **getOrganizationByBoxId**
+> Organization getOrganizationByBoxId()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let boxId: string; //Box ID
+
+const { status, data } = await apiInstance.getOrganizationByBoxId(
+    boxId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **boxId** | [**string**] | Box ID | |
+
+
+### Return type
+
+**Organization**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | Organization |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **getOrganizationInvitationsCountForAuthenticatedUser**
+> number getOrganizationInvitationsCountForAuthenticatedUser()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+const { status, data } = await apiInstance.getOrganizationInvitationsCountForAuthenticatedUser();
+```
+
+### Parameters
+This endpoint does not have any parameters.
+
+
+### Return type
+
+**number**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | Count of organization invitations |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **getOrganizationOnboarding**
+> OnboardingDto getOrganizationOnboarding()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //
+
+const { status, data } = await apiInstance.getOrganizationOnboarding(
+    organizationId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] |  | |
+
+
+### Return type
+
+**OnboardingDto**
+
+### Authorization
+
+[bearer](../README.md#bearer)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **getOrganizationOtelConfigByBoxAuthToken**
+> OtelConfig getOrganizationOtelConfigByBoxAuthToken()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let authToken: string; //Box Auth Token
+
+const { status, data } = await apiInstance.getOrganizationOtelConfigByBoxAuthToken(
+    authToken
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **authToken** | [**string**] | Box Auth Token | |
+
+
+### Return type
+
+**OtelConfig**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | OTEL Config |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **getOrganizationReferralCode**
+> OrganizationReferralCode getOrganizationReferralCode()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+
+const { status, data } = await apiInstance.getOrganizationReferralCode(
+    organizationId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+**OrganizationReferralCode**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
+|**403** | Organization access denied or invitation unavailable |  -  |
+|**503** | Invitation code generation unavailable |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **getQuickstartPrompt**
+> PromptDraftDto getQuickstartPrompt()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //
+
+const { status, data } = await apiInstance.getQuickstartPrompt(
+    organizationId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] |  | |
+
+
+### Return type
+
+**PromptDraftDto**
+
+### Authorization
+
+[bearer](../README.md#bearer)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **getRegionById**
+> Region getRegionById()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let id: string; //Region ID
+let xAcrylMicrovmOrganizationID: string; //Use with JWT to specify the organization ID (optional) (default to undefined)
+
+const { status, data } = await apiInstance.getRegionById(
+    id,
+    xAcrylMicrovmOrganizationID
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **id** | [**string**] | Region ID | |
+| **xAcrylMicrovmOrganizationID** | [**string**] | Use with JWT to specify the organization ID | (optional) defaults to undefined|
+
+
+### Return type
+
+**Region**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **leaveOrganization**
+> leaveOrganization()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+
+const { status, data } = await apiInstance.leaveOrganization(
+    organizationId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+void (empty response body)
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: Not defined
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**204** | Organization left successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **listOrganizationInvitations**
+> Array<OrganizationInvitation> listOrganizationInvitations()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+
+const { status, data } = await apiInstance.listOrganizationInvitations(
+    organizationId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+**Array<OrganizationInvitation>**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | List of pending organization invitations |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **listOrganizationInvitationsForAuthenticatedUser**
+> Array<OrganizationInvitation> listOrganizationInvitationsForAuthenticatedUser()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+const { status, data } = await apiInstance.listOrganizationInvitationsForAuthenticatedUser();
+```
+
+### Parameters
+This endpoint does not have any parameters.
+
+
+### Return type
+
+**Array<OrganizationInvitation>**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | List of organization invitations |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **listOrganizationMembers**
+> Array<OrganizationUser> listOrganizationMembers()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+
+const { status, data } = await apiInstance.listOrganizationMembers(
+    organizationId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+**Array<OrganizationUser>**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | List of organization members |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **listOrganizationRoles**
+> Array<OrganizationRole> listOrganizationRoles()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+
+const { status, data } = await apiInstance.listOrganizationRoles(
+    organizationId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+**Array<OrganizationRole>**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | List of organization roles |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **listOrganizations**
+> Array<Organization> listOrganizations()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+const { status, data } = await apiInstance.listOrganizations();
+```
+
+### Parameters
+This endpoint does not have any parameters.
+
+
+### Return type
+
+**Array<Organization>**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | List of organizations |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **markQuickstartHandoffCopied**
+> PromptHandoffDto markQuickstartHandoffCopied()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //
+let requestId: string; //
+
+const { status, data } = await apiInstance.markQuickstartHandoffCopied(
+    organizationId,
+    requestId
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationId** | [**string**] |  | |
+| **requestId** | [**string**] |  | |
+
+
+### Return type
+
+**PromptHandoffDto**
+
+### Authorization
+
+[bearer](../README.md#bearer)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **regenerateProxyApiKey**
+> RegenerateApiKeyResponse regenerateProxyApiKey()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let id: string; //Region ID
+let xAcrylMicrovmOrganizationID: string; //Use with JWT to specify the organization ID (optional) (default to undefined)
+
+const { status, data } = await apiInstance.regenerateProxyApiKey(
+    id,
+    xAcrylMicrovmOrganizationID
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **id** | [**string**] | Region ID | |
+| **xAcrylMicrovmOrganizationID** | [**string**] | Use with JWT to specify the organization ID | (optional) defaults to undefined|
+
+
+### Return type
+
+**RegenerateApiKeyResponse**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: Not defined
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | The proxy API key has been successfully regenerated. |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **saveOrganizationOnboarding**
+> OnboardingDto saveOrganizationOnboarding(saveOnboardingDto)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    SaveOnboardingDto
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //
+let saveOnboardingDto: SaveOnboardingDto; //
+
+const { status, data } = await apiInstance.saveOrganizationOnboarding(
+    organizationId,
+    saveOnboardingDto
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **saveOnboardingDto** | **SaveOnboardingDto**|  | |
+| **organizationId** | [**string**] |  | |
+
+
+### Return type
+
+**OnboardingDto**
+
+### Authorization
+
+[bearer](../README.md#bearer)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **saveQuickstartPrompt**
+> PromptDraftDto saveQuickstartPrompt(savePromptDraftDto)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    SavePromptDraftDto
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //
+let savePromptDraftDto: SavePromptDraftDto; //
+
+const { status, data } = await apiInstance.saveQuickstartPrompt(
+    organizationId,
+    savePromptDraftDto
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **savePromptDraftDto** | **SavePromptDraftDto**|  | |
+| **organizationId** | [**string**] |  | |
+
+
+### Return type
+
+**PromptDraftDto**
+
+### Authorization
+
+[bearer](../README.md#bearer)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **setOrganizationDefaultRegion**
+> setOrganizationDefaultRegion(updateOrganizationDefaultRegion)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    UpdateOrganizationDefaultRegion
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+let updateOrganizationDefaultRegion: UpdateOrganizationDefaultRegion; //
+
+const { status, data } = await apiInstance.setOrganizationDefaultRegion(
+    organizationId,
+    updateOrganizationDefaultRegion
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **updateOrganizationDefaultRegion** | **UpdateOrganizationDefaultRegion**|  | |
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+void (empty response body)
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: Not defined
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**204** | Default region set successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **suspendOrganization**
+> suspendOrganization()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    OrganizationSuspension
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+let organizationSuspension: OrganizationSuspension; // (optional)
+
+const { status, data } = await apiInstance.suspendOrganization(
+    organizationId,
+    organizationSuspension
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationSuspension** | **OrganizationSuspension**|  | |
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+void (empty response body)
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: Not defined
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**204** | Organization suspended successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **unsuspendOrganization**
+> unsuspendOrganization()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    OrganizationUnsuspension
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+let organizationUnsuspension: OrganizationUnsuspension; // (optional)
+
+const { status, data } = await apiInstance.unsuspendOrganization(
+    organizationId,
+    organizationUnsuspension
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationUnsuspension** | **OrganizationUnsuspension**|  | |
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+void (empty response body)
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: Not defined
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**204** | Organization unsuspended successfully |  -  |
+|**409** | Organization is not suspended with the given ifReason |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **updateAccessForOrganizationMember**
+> OrganizationUser updateAccessForOrganizationMember(updateOrganizationMemberAccess)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    UpdateOrganizationMemberAccess
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+let userId: string; //User ID
+let updateOrganizationMemberAccess: UpdateOrganizationMemberAccess; //
+
+const { status, data } = await apiInstance.updateAccessForOrganizationMember(
+    organizationId,
+    userId,
+    updateOrganizationMemberAccess
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **updateOrganizationMemberAccess** | **UpdateOrganizationMemberAccess**|  | |
+| **organizationId** | [**string**] | Organization ID | |
+| **userId** | [**string**] | User ID | |
+
+
+### Return type
+
+**OrganizationUser**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | Access updated successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **updateBoxDefaultLimitedNetworkEgress**
+> updateBoxDefaultLimitedNetworkEgress(organizationBoxDefaultLimitedNetworkEgress)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    OrganizationBoxDefaultLimitedNetworkEgress
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+let organizationBoxDefaultLimitedNetworkEgress: OrganizationBoxDefaultLimitedNetworkEgress; //
+
+const { status, data } = await apiInstance.updateBoxDefaultLimitedNetworkEgress(
+    organizationId,
+    organizationBoxDefaultLimitedNetworkEgress
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **organizationBoxDefaultLimitedNetworkEgress** | **OrganizationBoxDefaultLimitedNetworkEgress**|  | |
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+void (empty response body)
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: Not defined
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**204** | Box default limited network egress updated successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **updateExperimentalConfig**
+> updateExperimentalConfig()
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+let requestBody: { [key: string]: any; }; //Experimental configuration as a JSON object. Set to null to clear the configuration. (optional)
+
+const { status, data } = await apiInstance.updateExperimentalConfig(
+    organizationId,
+    requestBody
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **requestBody** | **{ [key: string]: any; }**| Experimental configuration as a JSON object. Set to null to clear the configuration. | |
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+void (empty response body)
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: Not defined
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **updateOrganizationInvitation**
+> OrganizationInvitation updateOrganizationInvitation(updateOrganizationInvitation)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    UpdateOrganizationInvitation
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+let invitationId: string; //Invitation ID
+let updateOrganizationInvitation: UpdateOrganizationInvitation; //
+
+const { status, data } = await apiInstance.updateOrganizationInvitation(
+    organizationId,
+    invitationId,
+    updateOrganizationInvitation
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **updateOrganizationInvitation** | **UpdateOrganizationInvitation**|  | |
+| **organizationId** | [**string**] | Organization ID | |
+| **invitationId** | [**string**] | Invitation ID | |
+
+
+### Return type
+
+**OrganizationInvitation**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | Organization invitation updated successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **updateOrganizationName**
+> Organization updateOrganizationName(updateOrganizationName)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    UpdateOrganizationName
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+let updateOrganizationName: UpdateOrganizationName; //
+
+const { status, data } = await apiInstance.updateOrganizationName(
+    organizationId,
+    updateOrganizationName
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **updateOrganizationName** | **UpdateOrganizationName**|  | |
+| **organizationId** | [**string**] | Organization ID | |
+
+
+### Return type
+
+**Organization**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | Organization name updated successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **updateOrganizationRole**
+> OrganizationRole updateOrganizationRole(updateOrganizationRole)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    UpdateOrganizationRole
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let organizationId: string; //Organization ID
+let roleId: string; //Role ID
+let updateOrganizationRole: UpdateOrganizationRole; //
+
+const { status, data } = await apiInstance.updateOrganizationRole(
+    organizationId,
+    roleId,
+    updateOrganizationRole
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **updateOrganizationRole** | **UpdateOrganizationRole**|  | |
+| **organizationId** | [**string**] | Organization ID | |
+| **roleId** | [**string**] | Role ID | |
+
+
+### Return type
+
+**OrganizationRole**
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: application/json
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** | Role updated successfully |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+
+# **updateRegion**
+> updateRegion(updateRegion)
+
+
+### Example
+
+```typescript
+import {
+    OrganizationsApi,
+    Configuration,
+    UpdateRegion
+} from './api';
+
+const configuration = new Configuration();
+const apiInstance = new OrganizationsApi(configuration);
+
+let id: string; //Region ID
+let updateRegion: UpdateRegion; //
+let xAcrylMicrovmOrganizationID: string; //Use with JWT to specify the organization ID (optional) (default to undefined)
+
+const { status, data } = await apiInstance.updateRegion(
+    id,
+    updateRegion,
+    xAcrylMicrovmOrganizationID
+);
+```
+
+### Parameters
+
+|Name | Type | Description  | Notes|
+|------------- | ------------- | ------------- | -------------|
+| **updateRegion** | **UpdateRegion**|  | |
+| **id** | [**string**] | Region ID | |
+| **xAcrylMicrovmOrganizationID** | [**string**] | Use with JWT to specify the organization ID | (optional) defaults to undefined|
+
+
+### Return type
+
+void (empty response body)
+
+### Authorization
+
+[bearer](../README.md#bearer), [oauth2](../README.md#oauth2)
+
+### HTTP request headers
+
+ - **Content-Type**: application/json
+ - **Accept**: Not defined
+
+
+### HTTP response details
+| Status code | Description | Response headers |
+|-------------|-------------|------------------|
+|**200** |  |  -  |
+
+[[Back to top]](#) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to Model list]](../README.md#documentation-for-models) [[Back to README]](../README.md)
+

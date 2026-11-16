@@ -1,0 +1,897 @@
+// Modified by ACRYL, 2026
+//! Box information types and operations for the ACRYL microVMs C SDK.
+//!
+//! All info operations are async and use the runtime's post-and-drain callback
+//! queue.
+
+use std::ffi::CString;
+use std::os::raw::{c_char, c_int, c_void};
+use std::ptr;
+
+use acrylmicrovm::AcrylMicrovmError;
+use acrylmicrovm::runtime::options::{NetworkMode, PortProtocol};
+use acrylmicrovm::runtime::types::{BoxStatus, PublishedPort};
+
+use crate::box_handle::BoxHandle;
+use crate::error::{AcrylMicrovmErrorCode, FFIError, null_pointer_error, write_error};
+use crate::event_queue::{CBoxInfoCb, CBoxInfoListCb, RuntimeEvent, push_event};
+use crate::options::AcrylMicrovmPortProtocol;
+use crate::runtime::RuntimeHandle;
+use crate::{CBoxHandle, CAcrylMicrovmError, CAcrylMicrovmRuntime};
+
+/// Network mode exposed by [`CNetworkInfo`].
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AcrylMicrovmNetworkMode {
+    AcrylMicrovmNetworkModeEnabled = 0,
+    AcrylMicrovmNetworkModeDisabled = 1,
+}
+
+/// A concrete host listener published to a guest port.
+///
+/// `host_ip` is owned by the enclosing [`CBoxInfo`].
+#[repr(C)]
+pub struct CPublishedPort {
+    pub guest_port: u16,
+    pub host_ip: *mut c_char,
+    pub host_port: u16,
+    pub protocol: AcrylMicrovmPortProtocol,
+}
+
+/// Owned list of concrete published ports.
+///
+/// A non-null list with `count == 0` means publication metadata was resolved
+/// and no listeners are active. The list is owned by its enclosing
+/// [`CNetworkInfo`].
+#[repr(C)]
+pub struct CPublishedPortList {
+    pub items: *mut CPublishedPort,
+    pub count: c_int,
+}
+
+/// Outbound (guest → internet) network mode and allowlist.
+/// `allow_net` points to `allow_net_count` owned strings, owned by the
+/// enclosing [`CNetworkInfo`].
+#[repr(C)]
+pub struct COutboundNetworkInfo {
+    pub mode: AcrylMicrovmNetworkMode,
+    pub allow_net: *mut *mut c_char,
+    pub allow_net_count: c_int,
+}
+
+/// Inbound (internet → guest) network mode and allowlist.
+/// `allow_net` points to `allow_net_count` owned strings, owned by the
+/// enclosing [`CNetworkInfo`].
+#[repr(C)]
+pub struct CInboundNetworkInfo {
+    pub mode: AcrylMicrovmNetworkMode,
+    pub allow_net: *mut *mut c_char,
+    pub allow_net_count: c_int,
+}
+
+/// Typed network metadata owned by an enclosing [`CBoxInfo`].
+///
+/// `published_ports` is null when the current handle does not know the
+/// bindings, non-null and empty when there are no active publications, and
+/// otherwise contains concrete bindings.
+/// The first four fields are byte-compatible with the pre-split struct
+/// (`mode`, `allow_net`, `allow_net_count`, `published_ports`), so callers
+/// compiled against the old header keep reading valid data at the same
+/// offsets. They alias `outbound`'s allocations — never free them separately;
+/// [`free_network_info`] releases each allocation exactly once through
+/// `outbound`/`inbound`.
+#[repr(C)]
+pub struct CNetworkInfo {
+    /// Deprecated: read `outbound.mode`. Mirrors it for old callers.
+    pub mode: AcrylMicrovmNetworkMode,
+    /// Deprecated: read `outbound.allow_net`. Aliases it — do not free.
+    pub allow_net: *mut *mut c_char,
+    /// Deprecated: read `outbound.allow_net_count`.
+    pub allow_net_count: c_int,
+    pub published_ports: *mut CPublishedPortList,
+    pub outbound: COutboundNetworkInfo,
+    pub inbound: CInboundNetworkInfo,
+}
+
+#[repr(C)]
+pub struct CBoxInfo {
+    pub id: *mut c_char,
+    pub name: *mut c_char,
+    pub image: *mut c_char,
+    pub status: *mut c_char,
+    pub running: c_int,
+    pub pid: c_int,
+    pub cpus: f64,
+    pub memory_mib: c_int,
+    pub auto_stop: u32,
+    pub auto_delete: u32,
+    pub auto_resume: c_int,
+    pub created_at: i64,
+    /// Owned typed network metadata; null when network metadata is unavailable.
+    pub network: *mut CNetworkInfo,
+    /// Unix milliseconds when the box most recently entered `Running`; `0`
+    /// when no start time was recorded. Preserved after stop or reboot; when
+    /// [`Self::pid`] is nonzero, the timestamp describes that live PID.
+    /// Milliseconds — not `created_at`'s seconds — preserve sub-second ordering
+    /// against a job's timeline.
+    pub started_at: i64,
+    /// Unix milliseconds of the box's last recorded activity — the clock
+    /// AutoStop measures idleness against; `0` when nothing was recorded, which
+    /// is always the case for local runtimes.
+    pub last_activity_at: i64,
+    /// Owned record of how the box's main command ended; null when the runtime
+    /// recorded none. Stopping a box signals that command, so this carries what
+    /// the stop produced as well as a self-chosen exit.
+    ///
+    /// Absence cannot be a sentinel the way it is for [`Self::pid`] and
+    /// [`Self::started_at`]: `0` is the exit code of every command that
+    /// succeeded, so a reader that took `0` for "nothing recorded" would
+    /// report every clean exit as an absent one. A pointer makes that reading
+    /// impossible rather than merely wrong — there is no value to mistake —
+    /// and follows [`Self::network`], the struct's other owned optional.
+    ///
+    /// [`free_box_info`] releases it.
+    pub exit_code: *mut c_int,
+    /// Manifest digest `image` resolved to when this box's disk was built —
+    /// the build the box runs. Null when unknown: a box booted from a local
+    /// rootfs path, one imported from an archive, one whose disk predates the
+    /// record, or a backend that does not know it. Owned and freed with the
+    /// rest of this struct.
+    pub resolved_image_digest: *mut c_char,
+    /// Declared on-registry size, in bytes, of that image; `0` when
+    /// [`Self::resolved_image_digest`] is null.
+    pub resolved_image_size: i64,
+}
+
+#[repr(C)]
+pub struct CBoxInfoList {
+    pub items: *mut CBoxInfo,
+    pub count: c_int,
+}
+
+fn to_c_str(s: &str) -> *mut c_char {
+    CString::new(s)
+        .map(|c| c.into_raw())
+        .unwrap_or(ptr::null_mut())
+}
+
+pub(crate) fn into_raw_slice<T>(items: Vec<T>) -> (*mut T, c_int) {
+    let count = c_int::try_from(items.len()).expect("C metadata list exceeds c_int::MAX");
+    if items.is_empty() {
+        return (ptr::null_mut(), 0);
+    }
+
+    let mut items = items.into_boxed_slice();
+    let items_ptr = items.as_mut_ptr();
+    std::mem::forget(items);
+    (items_ptr, count)
+}
+
+pub(crate) unsafe fn free_raw_slice<T>(items: *mut T, count: c_int) {
+    if items.is_null() || count < 0 {
+        return;
+    }
+    unsafe {
+        drop(Box::from_raw(ptr::slice_from_raw_parts_mut(
+            items,
+            count as usize,
+        )));
+    }
+}
+
+impl CPublishedPort {
+    fn from_published_port(port: &PublishedPort) -> Self {
+        Self {
+            guest_port: port.guest_port,
+            host_ip: to_c_str(&port.host_ip),
+            host_port: port.host_port,
+            protocol: match port.protocol {
+                PortProtocol::Tcp => AcrylMicrovmPortProtocol::AcrylMicrovmPortProtocolTcp,
+                PortProtocol::Udp => AcrylMicrovmPortProtocol::AcrylMicrovmPortProtocolUdp,
+            },
+        }
+    }
+}
+
+impl CPublishedPortList {
+    fn from_published_ports(ports: &[PublishedPort]) -> Self {
+        let (items, count) = into_raw_slice(
+            ports
+                .iter()
+                .map(CPublishedPort::from_published_port)
+                .collect(),
+        );
+        Self { items, count }
+    }
+}
+
+impl COutboundNetworkInfo {
+    /// Converts [`OutboundNetworkInfo`] to the C FFI representation.
+    fn from_outbound(direction: &acrylmicrovm::OutboundNetworkInfo) -> Self {
+        let (allow_net, allow_net_count) =
+            into_raw_slice(direction.allow_net.iter().map(|h| to_c_str(h)).collect());
+        Self {
+            mode: match direction.mode {
+                NetworkMode::Enabled => AcrylMicrovmNetworkMode::AcrylMicrovmNetworkModeEnabled,
+                NetworkMode::Disabled => AcrylMicrovmNetworkMode::AcrylMicrovmNetworkModeDisabled,
+            },
+            allow_net,
+            allow_net_count,
+        }
+    }
+}
+
+impl CInboundNetworkInfo {
+    /// Converts [`InboundNetworkInfo`] to the C FFI representation.
+    fn from_inbound(direction: &acrylmicrovm::InboundNetworkInfo) -> Self {
+        let (allow_net, allow_net_count) =
+            into_raw_slice(direction.allow_net.iter().map(|h| to_c_str(h)).collect());
+        Self {
+            mode: match direction.mode {
+                NetworkMode::Enabled => AcrylMicrovmNetworkMode::AcrylMicrovmNetworkModeEnabled,
+                NetworkMode::Disabled => AcrylMicrovmNetworkMode::AcrylMicrovmNetworkModeDisabled,
+            },
+            allow_net,
+            allow_net_count,
+        }
+    }
+}
+
+impl CNetworkInfo {
+    fn from_network_info(network: &acrylmicrovm::NetworkInfo) -> Self {
+        let published_ports = network
+            .published_ports
+            .as_deref()
+            .map(CPublishedPortList::from_published_ports)
+            .map(Box::new)
+            .map(Box::into_raw)
+            .unwrap_or(ptr::null_mut());
+
+        let outbound = COutboundNetworkInfo::from_outbound(&network.outbound);
+        Self {
+            // Aliases of `outbound`, kept for pre-split callers. Ownership
+            // stays with `outbound`.
+            mode: outbound.mode,
+            allow_net: outbound.allow_net,
+            allow_net_count: outbound.allow_net_count,
+            published_ports,
+            outbound,
+            inbound: CInboundNetworkInfo::from_inbound(&network.inbound),
+        }
+    }
+}
+
+pub(crate) fn network_to_c_ptr(network: &Option<acrylmicrovm::NetworkInfo>) -> *mut CNetworkInfo {
+    network
+        .as_ref()
+        .map(CNetworkInfo::from_network_info)
+        .map(Box::new)
+        .map(Box::into_raw)
+        .unwrap_or(ptr::null_mut())
+}
+
+unsafe fn free_published_port_list(list: *mut CPublishedPortList) {
+    if list.is_null() {
+        return;
+    }
+    unsafe {
+        let list = Box::from_raw(list);
+        if !list.items.is_null() && list.count >= 0 {
+            for index in 0..list.count as usize {
+                free_str((*list.items.add(index)).host_ip);
+            }
+        }
+        free_raw_slice(list.items, list.count);
+    }
+}
+
+unsafe fn free_allow_net(allow_net: *mut *mut c_char, allow_net_count: c_int) {
+    unsafe {
+        if !allow_net.is_null() && allow_net_count >= 0 {
+            for index in 0..allow_net_count as usize {
+                free_str(*allow_net.add(index));
+            }
+        }
+        free_raw_slice(allow_net, allow_net_count);
+    }
+}
+
+pub(crate) unsafe fn free_network_info(network: *mut CNetworkInfo) {
+    if network.is_null() {
+        return;
+    }
+    unsafe {
+        let network = Box::from_raw(network);
+        free_allow_net(network.outbound.allow_net, network.outbound.allow_net_count);
+        free_allow_net(network.inbound.allow_net, network.inbound.allow_net_count);
+        free_published_port_list(network.published_ports);
+    }
+}
+
+fn status_to_str(status: BoxStatus) -> &'static str {
+    match status {
+        BoxStatus::Unknown => "unknown",
+        BoxStatus::Configured => "configured",
+        BoxStatus::Running => "running",
+        BoxStatus::Stopping => "stopping",
+        BoxStatus::Stopped => "stopped",
+        BoxStatus::Paused => "paused",
+        BoxStatus::Failed => "failed",
+    }
+}
+
+/// Move an optional exit code onto the heap for [`CBoxInfo::exit_code`],
+/// returning null for `None`. Mirrors [`network_to_c_ptr`].
+pub(crate) fn exit_code_to_c_ptr(exit_code: Option<i32>) -> *mut c_int {
+    exit_code
+        .map(|code| Box::into_raw(Box::new(code as c_int)))
+        .unwrap_or(ptr::null_mut())
+}
+
+/// Release an exit code allocated by [`exit_code_to_c_ptr`]. Null-tolerant, so
+/// a box that recorded none frees like any other.
+pub(crate) unsafe fn free_exit_code(exit_code: *mut c_int) {
+    if exit_code.is_null() {
+        return;
+    }
+    unsafe { drop(Box::from_raw(exit_code)) };
+}
+
+impl CBoxInfo {
+    pub fn from_box_info(info: &acrylmicrovm::runtime::types::BoxInfo) -> Self {
+        CBoxInfo {
+            id: to_c_str(info.id.as_ref()),
+            name: info
+                .name
+                .as_deref()
+                .map(to_c_str)
+                .unwrap_or(ptr::null_mut()),
+            image: to_c_str(&info.image),
+            status: to_c_str(status_to_str(info.status)),
+            running: if info.status.is_running() { 1 } else { 0 },
+            pid: info.pid.map(|p| p as c_int).unwrap_or(0),
+            cpus: info.cpus,
+            memory_mib: info.memory_mib as c_int,
+            auto_stop: info.auto_stop,
+            auto_delete: info.auto_delete,
+            auto_resume: if info.auto_resume { 1 } else { 0 },
+            created_at: info.created_at.timestamp(),
+            network: network_to_c_ptr(&info.network),
+            started_at: info.started_at.map(|at| at.timestamp_millis()).unwrap_or(0),
+            last_activity_at: info
+                .last_activity_at
+                .map(|at| at.timestamp_millis())
+                .unwrap_or(0),
+            exit_code: exit_code_to_c_ptr(info.exit_code),
+            resolved_image_digest: info
+                .resolved_image
+                .as_ref()
+                .map(|resolved| to_c_str(&resolved.manifest_digest))
+                .unwrap_or(ptr::null_mut()),
+            resolved_image_size: info
+                .resolved_image
+                .as_ref()
+                .map_or(0, |resolved| resolved.total_layer_size),
+        }
+    }
+}
+
+pub unsafe fn free_box_info(info: *mut CBoxInfo) {
+    unsafe {
+        if info.is_null() {
+            return;
+        }
+        let info_ref = &mut *info;
+        free_str(info_ref.id);
+        free_str(info_ref.name);
+        free_str(info_ref.image);
+        free_str(info_ref.status);
+        free_str(info_ref.resolved_image_digest);
+        free_network_info(info_ref.network);
+        free_exit_code(info_ref.exit_code);
+    }
+}
+
+pub unsafe fn free_box_info_ptr(info: *mut CBoxInfo) {
+    unsafe {
+        if info.is_null() {
+            return;
+        }
+        free_box_info(info);
+        drop(Box::from_raw(info));
+    }
+}
+
+pub unsafe fn free_box_info_list(list: *mut CBoxInfoList) {
+    unsafe {
+        if list.is_null() {
+            return;
+        }
+        let list_ref = &mut *list;
+        for idx in 0..list_ref.count {
+            free_box_info(list_ref.items.add(idx as usize));
+        }
+        if !list_ref.items.is_null() {
+            drop(Box::from_raw(ptr::slice_from_raw_parts_mut(
+                list_ref.items,
+                list_ref.count as usize,
+            )));
+        }
+        drop(Box::from_raw(list));
+    }
+}
+
+unsafe fn free_str(s: *mut c_char) {
+    if !s.is_null() {
+        #[cfg(test)]
+        crate::FREE_STR_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        unsafe {
+            drop(CString::from_raw(s));
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn acrylmicrovm_box_info(
+    handle: *mut CBoxHandle,
+    cb: CBoxInfoCb,
+    user_data: *mut c_void,
+    out_error: *mut CAcrylMicrovmError,
+) -> AcrylMicrovmErrorCode {
+    box_info(handle, cb, user_data, out_error)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn acrylmicrovm_get_info(
+    runtime: *mut CAcrylMicrovmRuntime,
+    id_or_name: *const c_char,
+    cb: CBoxInfoCb,
+    user_data: *mut c_void,
+    out_error: *mut CAcrylMicrovmError,
+) -> AcrylMicrovmErrorCode {
+    box_info_by_id(runtime, id_or_name, cb, user_data, out_error)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn acrylmicrovm_list_info(
+    runtime: *mut CAcrylMicrovmRuntime,
+    cb: CBoxInfoListCb,
+    user_data: *mut c_void,
+    out_error: *mut CAcrylMicrovmError,
+) -> AcrylMicrovmErrorCode {
+    box_list(runtime, cb, user_data, out_error)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn acrylmicrovm_free_box_info(info: *mut CBoxInfo) {
+    free_box_info_ptr(info)
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn acrylmicrovm_free_box_info_list(list: *mut CBoxInfoList) {
+    free_box_info_list(list)
+}
+
+unsafe fn box_info(
+    handle: *mut BoxHandle,
+    cb: CBoxInfoCb,
+    user_data: *mut c_void,
+    out_error: *mut FFIError,
+) -> AcrylMicrovmErrorCode {
+    unsafe {
+        if handle.is_null() {
+            write_error(out_error, null_pointer_error("handle"));
+            return AcrylMicrovmErrorCode::InvalidArgument;
+        }
+        let cb = crate::unwrap_cb_or_return!(cb, out_error);
+
+        let handle_ref = &*handle;
+        let lite = handle_ref.handle.clone();
+        let queue = handle_ref.queue.clone();
+        let user_data_addr = user_data as usize;
+
+        handle_ref.tokio_rt.spawn(async move {
+            let result = lite.info().await.map(|info| {
+                crate::event_queue::OwnedFfiPtr::new_with(
+                    Box::new(CBoxInfo::from_box_info(&info)),
+                    free_box_info_ptr,
+                )
+            });
+            push_event(
+                &queue,
+                RuntimeEvent::Info {
+                    cb,
+                    user_data: user_data_addr,
+                    result,
+                },
+            )
+            .await;
+        });
+
+        AcrylMicrovmErrorCode::Ok
+    }
+}
+
+unsafe fn box_info_by_id(
+    runtime: *mut RuntimeHandle,
+    id_or_name: *const c_char,
+    cb: CBoxInfoCb,
+    user_data: *mut c_void,
+    out_error: *mut FFIError,
+) -> AcrylMicrovmErrorCode {
+    unsafe {
+        if runtime.is_null() {
+            write_error(out_error, null_pointer_error("runtime"));
+            return AcrylMicrovmErrorCode::InvalidArgument;
+        }
+
+        let id_or_name = match crate::util::c_str_to_string(id_or_name) {
+            Ok(value) => value,
+            Err(e) => {
+                write_error(out_error, e);
+                return AcrylMicrovmErrorCode::InvalidArgument;
+            }
+        };
+        let cb = crate::unwrap_cb_or_return!(cb, out_error);
+
+        let runtime_ref = &*runtime;
+        let runtime_clone = runtime_ref.runtime.clone();
+        let queue = runtime_ref.queue.clone();
+        let user_data_addr = user_data as usize;
+
+        runtime_ref.tokio_rt.spawn(async move {
+            let result = match runtime_clone.get_info(&id_or_name).await {
+                Ok(Some(info)) => Ok(crate::event_queue::OwnedFfiPtr::new_with(
+                    Box::new(CBoxInfo::from_box_info(&info)),
+                    free_box_info_ptr,
+                )),
+                Ok(None) => Err(AcrylMicrovmError::NotFound(format!(
+                    "Box not found: {id_or_name}"
+                ))),
+                Err(e) => Err(e),
+            };
+            push_event(
+                &queue,
+                RuntimeEvent::Info {
+                    cb,
+                    user_data: user_data_addr,
+                    result,
+                },
+            )
+            .await;
+        });
+
+        AcrylMicrovmErrorCode::Ok
+    }
+}
+
+unsafe fn box_list(
+    runtime: *mut RuntimeHandle,
+    cb: CBoxInfoListCb,
+    user_data: *mut c_void,
+    out_error: *mut FFIError,
+) -> AcrylMicrovmErrorCode {
+    unsafe {
+        if runtime.is_null() {
+            write_error(out_error, null_pointer_error("runtime"));
+            return AcrylMicrovmErrorCode::InvalidArgument;
+        }
+        let cb = crate::unwrap_cb_or_return!(cb, out_error);
+
+        let runtime_ref = &*runtime;
+        let runtime_clone = runtime_ref.runtime.clone();
+        let queue = runtime_ref.queue.clone();
+        let user_data_addr = user_data as usize;
+
+        runtime_ref.tokio_rt.spawn(async move {
+            let result = runtime_clone.list_info().await.map(|boxes| {
+                let mut items = boxes
+                    .iter()
+                    .map(CBoxInfo::from_box_info)
+                    .collect::<Vec<_>>()
+                    .into_boxed_slice();
+                let count = items.len() as c_int;
+                let ptr = if items.is_empty() {
+                    ptr::null_mut()
+                } else {
+                    let ptr = items.as_mut_ptr();
+                    Box::leak(items);
+                    ptr
+                };
+                crate::event_queue::OwnedFfiPtr::new_with(
+                    Box::new(CBoxInfoList { items: ptr, count }),
+                    free_box_info_list,
+                )
+            });
+            push_event(
+                &queue,
+                RuntimeEvent::InfoList {
+                    cb,
+                    user_data: user_data_addr,
+                    result,
+                },
+            )
+            .await;
+        });
+
+        AcrylMicrovmErrorCode::Ok
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::CStr;
+    use std::ptr::NonNull;
+
+    use acrylmicrovm::runtime::options::PortProtocol;
+    use acrylmicrovm::runtime::types::{InboundNetworkInfo, OutboundNetworkInfo};
+    use acrylmicrovm::{NetworkInfo, NetworkMode, PublishedPort};
+
+    use crate::options::AcrylMicrovmPortProtocol;
+    use crate::{FREE_STR_CALLS, FREE_STR_LOCK};
+
+    use super::{
+        AcrylMicrovmNetworkMode, CBoxInfo, CNetworkInfo, free_box_info, free_network_info,
+        network_to_c_ptr,
+    };
+    use std::ffi::c_char;
+
+    /// The digest reaches a C caller as a string it owns and frees with the
+    /// rest of the struct, and an unknown one is null rather than an empty
+    /// string a caller would report as a digest.
+    #[test]
+    fn box_info_carries_the_resolved_image() {
+        let _guard = FREE_STR_LOCK.lock().unwrap();
+        let digest = "sha256:0a7ed0d449b9318548e66674610d757de19b7645759f74b587b610b59d6b43fd";
+
+        let mut resolved = box_info_with_exit_code(None);
+        resolved.resolved_image = Some(acrylmicrovm::ResolvedImage {
+            manifest_digest: digest.to_string(),
+            total_layer_size: 3_974_501,
+        });
+        let mut known = CBoxInfo::from_box_info(&resolved);
+        assert_eq!(
+            unsafe { CStr::from_ptr(known.resolved_image_digest) }
+                .to_str()
+                .unwrap(),
+            digest
+        );
+        assert_eq!(known.resolved_image_size, 3_974_501);
+
+        let mut unknown = CBoxInfo::from_box_info(&box_info_with_exit_code(None));
+        assert!(unknown.resolved_image_digest.is_null());
+        assert_eq!(unknown.resolved_image_size, 0);
+
+        let before = FREE_STR_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        unsafe { free_box_info(&mut known) };
+        let freed_known = FREE_STR_CALLS.load(std::sync::atomic::Ordering::SeqCst) - before;
+        let before = FREE_STR_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        unsafe { free_box_info(&mut unknown) };
+        let freed_unknown = FREE_STR_CALLS.load(std::sync::atomic::Ordering::SeqCst) - before;
+        assert_eq!(
+            freed_known,
+            freed_unknown + 1,
+            "the digest string must be freed with the struct"
+        );
+    }
+
+    /// Callers compiled against the pre-split header read `mode`,
+    /// `allow_net`, `allow_net_count` and `published_ports` at the offsets
+    /// they had before `outbound`/`inbound` existed. Pin those offsets: moving
+    /// them is an ABI break that no recompile of the caller would reveal.
+    #[test]
+    fn legacy_network_info_fields_keep_their_pre_split_offsets() {
+        use std::mem::offset_of;
+
+        assert_eq!(offset_of!(CNetworkInfo, mode), 0);
+        assert_eq!(
+            offset_of!(CNetworkInfo, allow_net),
+            offset_of!(CNetworkInfo, mode) + size_of::<usize>()
+        );
+        assert_eq!(
+            offset_of!(CNetworkInfo, allow_net_count),
+            offset_of!(CNetworkInfo, allow_net) + size_of::<*mut *mut c_char>()
+        );
+        assert_eq!(
+            offset_of!(CNetworkInfo, published_ports),
+            offset_of!(CNetworkInfo, allow_net) + 2 * size_of::<usize>()
+        );
+        // The legacy prefix must sit ahead of the nested view, otherwise the
+        // offsets above would only hold by accident.
+        assert!(offset_of!(CNetworkInfo, outbound) > offset_of!(CNetworkInfo, published_ports));
+    }
+
+    /// The legacy scalar fields alias `outbound`'s allocations, so they must
+    /// report the same values — and the aliasing must not double-free.
+    #[test]
+    fn legacy_network_info_fields_mirror_outbound() {
+        let _guard = FREE_STR_LOCK.lock().unwrap();
+
+        let network = NonNull::new(network_to_c_ptr(&Some(NetworkInfo::new(
+            OutboundNetworkInfo {
+                mode: NetworkMode::Enabled,
+                allow_net: vec!["api.example.com".to_string()],
+            },
+            InboundNetworkInfo {
+                mode: NetworkMode::Disabled,
+                allow_net: Vec::new(),
+            },
+            None,
+        ))))
+        .expect("Some network metadata must allocate CNetworkInfo");
+
+        {
+            let network = unsafe { network.as_ref() };
+            assert_eq!(network.mode, network.outbound.mode);
+            assert_eq!(network.allow_net_count, network.outbound.allow_net_count);
+            assert_eq!(network.allow_net, network.outbound.allow_net);
+            assert_eq!(
+                unsafe { CStr::from_ptr(*network.allow_net) }
+                    .to_str()
+                    .unwrap(),
+                "api.example.com"
+            );
+        }
+
+        // One free of the aliased allowlist, not two.
+        let before = FREE_STR_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        unsafe { free_network_info(network.as_ptr()) };
+        assert_eq!(
+            FREE_STR_CALLS.load(std::sync::atomic::Ordering::SeqCst) - before,
+            1
+        );
+    }
+
+    #[test]
+    fn typed_network_info_preserves_network_and_publication_state() {
+        let _guard = FREE_STR_LOCK.lock().unwrap();
+        let before = FREE_STR_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+
+        assert!(network_to_c_ptr(&None).is_null());
+
+        let unresolved = NonNull::new(network_to_c_ptr(&Some(NetworkInfo::new(
+            OutboundNetworkInfo {
+                mode: NetworkMode::Enabled,
+                allow_net: vec!["api.example.com".to_string()],
+            },
+            InboundNetworkInfo {
+                mode: NetworkMode::Disabled,
+                allow_net: Vec::new(),
+            },
+            None,
+        ))))
+        .expect("Some network metadata must allocate CNetworkInfo");
+        let unresolved_ref = unsafe { unresolved.as_ref() };
+        assert_eq!(
+            unresolved_ref.outbound.mode,
+            AcrylMicrovmNetworkMode::AcrylMicrovmNetworkModeEnabled
+        );
+        assert_eq!(unresolved_ref.outbound.allow_net_count, 1);
+        assert_eq!(
+            unsafe { CStr::from_ptr(*unresolved_ref.outbound.allow_net) }
+                .to_str()
+                .unwrap(),
+            "api.example.com"
+        );
+        assert_eq!(
+            unresolved_ref.inbound.mode,
+            AcrylMicrovmNetworkMode::AcrylMicrovmNetworkModeDisabled
+        );
+        assert_eq!(unresolved_ref.inbound.allow_net_count, 0);
+        assert!(unresolved_ref.published_ports.is_null());
+        unsafe { free_network_info(unresolved.as_ptr()) };
+
+        let resolved_empty = NonNull::new(network_to_c_ptr(&Some(NetworkInfo::new(
+            OutboundNetworkInfo {
+                mode: NetworkMode::Disabled,
+                allow_net: Vec::new(),
+            },
+            InboundNetworkInfo {
+                mode: NetworkMode::Enabled,
+                allow_net: Vec::new(),
+            },
+            Some(Vec::new()),
+        ))))
+        .expect("Some network metadata must allocate CNetworkInfo");
+        let resolved_empty_ref = unsafe { resolved_empty.as_ref() };
+        assert_eq!(
+            resolved_empty_ref.outbound.mode,
+            AcrylMicrovmNetworkMode::AcrylMicrovmNetworkModeDisabled
+        );
+        assert!(!resolved_empty_ref.published_ports.is_null());
+        let resolved_empty_ports = unsafe { &*resolved_empty_ref.published_ports };
+        assert!(resolved_empty_ports.items.is_null());
+        assert_eq!(resolved_empty_ports.count, 0);
+        unsafe { free_network_info(resolved_empty.as_ptr()) };
+
+        let resolved = NonNull::new(network_to_c_ptr(&Some(NetworkInfo::new(
+            OutboundNetworkInfo {
+                mode: NetworkMode::Enabled,
+                allow_net: Vec::new(),
+            },
+            InboundNetworkInfo {
+                mode: NetworkMode::Enabled,
+                allow_net: Vec::new(),
+            },
+            Some(vec![PublishedPort {
+                guest_port: 3000,
+                host_ip: "127.0.0.1".to_string(),
+                host_port: 49152,
+                protocol: PortProtocol::Tcp,
+            }]),
+        ))))
+        .expect("Some network metadata must allocate CNetworkInfo");
+        let resolved_ref = unsafe { resolved.as_ref() };
+        assert!(!resolved_ref.published_ports.is_null());
+        let resolved_ports = unsafe { &*resolved_ref.published_ports };
+        assert_eq!(resolved_ports.count, 1);
+        let port = unsafe { &*resolved_ports.items };
+        assert_eq!(port.host_port, 49152);
+        assert_eq!(port.guest_port, 3000);
+        assert_eq!(port.protocol, AcrylMicrovmPortProtocol::AcrylMicrovmPortProtocolTcp);
+        assert_eq!(
+            unsafe { CStr::from_ptr(port.host_ip) }.to_str().unwrap(),
+            "127.0.0.1"
+        );
+        unsafe { free_network_info(resolved.as_ptr()) };
+
+        let after = FREE_STR_CALLS.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(after - before, 2, "nested network strings must be freed");
+    }
+    fn box_info_with_exit_code(exit_code: Option<i32>) -> acrylmicrovm::runtime::types::BoxInfo {
+        use acrylmicrovm::runtime::id::BoxID;
+        use acrylmicrovm::{BoxStatus, HealthStatus};
+        use std::collections::HashMap;
+        use std::time::SystemTime;
+
+        acrylmicrovm::runtime::types::BoxInfo {
+            id: BoxID::parse("box-c-info").unwrap(),
+            name: None,
+            status: BoxStatus::Stopped,
+            created_at: SystemTime::UNIX_EPOCH.into(),
+            last_updated: SystemTime::UNIX_EPOCH.into(),
+            pid: None,
+            image: "alpine:latest".to_string(),
+            cpus: 1.0,
+            memory_mib: 256,
+            privileged: None,
+            network: None,
+            labels: HashMap::new(),
+            auto_stop: 0,
+            auto_delete: 0,
+            auto_resume: false,
+            health_status: HealthStatus::default(),
+            exit_code,
+            started_at: None,
+            last_activity_at: None,
+            resolved_image: None,
+        }
+    }
+
+    // The C struct is where `Option<i32>` crosses into C, and `0` is a real
+    // exit code that cannot double as "nothing recorded". A null pointer is
+    // the absence; `Some(0)` is the case that separates the two encodings, so
+    // it is the one that fails first if absence ever becomes a value again.
+    #[test]
+    fn box_info_carries_exit_code_as_owned_pointer_null_when_absent() {
+        // Freeing the strings below moves the shared counter the event-queue
+        // tests assert exact values on; they serialize on this lock, so this
+        // test has to as well.
+        let _guard = FREE_STR_LOCK.lock().unwrap();
+
+        for (exit_code, want) in [(None, None), (Some(0), Some(0)), (Some(42), Some(42))] {
+            let mut info = CBoxInfo::from_box_info(&box_info_with_exit_code(exit_code));
+
+            // SAFETY: `from_box_info` either allocated this pointer or left it
+            // null, and nothing has freed it yet. `as_ref` maps both cases onto
+            // an Option, so one assertion compares what crossed the boundary
+            // against what went in — null against `None` included.
+            let got = unsafe { info.exit_code.as_ref() }.copied();
+            assert_eq!(got, want, "exit_code for {exit_code:?}");
+
+            // Frees the exit code too; running under Miri or a leak checker is
+            // what makes this line load-bearing rather than incidental.
+            unsafe { super::free_box_info(&mut info) };
+        }
+    }
+}

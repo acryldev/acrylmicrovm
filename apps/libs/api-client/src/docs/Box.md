@@ -1,0 +1,78 @@
+# Box
+
+
+## Properties
+
+Name | Type | Description | Notes
+------------ | ------------- | ------------- | -------------
+**id** | **string** | The public 12-character Box ID | [default to undefined]
+**organizationId** | **string** | The organization ID of the box | [default to undefined]
+**name** | **string** | The name of the box | [default to undefined]
+**user** | **string** | The user associated with the project | [default to undefined]
+**env** | **{ [key: string]: string; }** | Environment variables for the box | [default to undefined]
+**labels** | **{ [key: string]: string; }** | Labels for the box | [default to undefined]
+**network** | [**NetworkInfo**](NetworkInfo.md) | The network policy in both directions | [optional] [default to undefined]
+**target** | **string** | The target environment for the box | [default to undefined]
+**image** | **string** | The image used for the box | [optional] [default to undefined]
+**cpu** | **number** | The CPU quota for the box | [default to undefined]
+**gpu** | **number** | The GPU quota for the box | [default to undefined]
+**memory** | **number** | The memory quota for the box | [default to undefined]
+**disk** | **number** | The disk quota for the box | [default to undefined]
+**privileged** | **boolean** | Persisted guest privilege mode; absent when an older server does not report it | [optional] [default to undefined]
+**state** | [**BoxState**](BoxState.md) | The state of the box | [optional] [default to undefined]
+**desiredState** | [**BoxDesiredState**](BoxDesiredState.md) | The desired state of the box | [optional] [default to undefined]
+**errorReason** | **string** | The error reason of the box | [optional] [default to undefined]
+**recoverable** | **boolean** | Whether the box error is recoverable. | [optional] [default to undefined]
+**autoStop** | **number** | Auto-stop interval in seconds (0 means disabled) | [optional] [default to undefined]
+**autoDelete** | **number** | Auto-delete interval in seconds (0 means disabled) | [optional] [default to undefined]
+**autoResume** | **boolean** | Whether the box should be automatically resumed on proxy access | [optional] [default to undefined]
+**volumes** | [**Array&lt;BoxVolume&gt;**](BoxVolume.md) | Array of volumes attached to the box | [optional] [default to undefined]
+**createdAt** | **string** | The creation timestamp of the box | [optional] [default to undefined]
+**updatedAt** | **string** | The last update timestamp of the box | [optional] [default to undefined]
+**lastActivityAt** | **string** | The timestamp of the last recorded activity on the box, absent when no activity has been recorded yet | [optional] [default to undefined]
+**exitCode** | **number** | How the box\&#39;s main command ended, present once the box has stopped and the runtime recorded it: its own code when it exited, or &#x60;128 + n&#x60; when a signal ended it. Stopping a box signals that command, so a stop is recorded here too. &#x60;0&#x60; is a real value, so a client must tell the missing field from a zero one. Only reading a single box carries it: this schema is shared with the box list and with the replies that change a box, which leave it out whether or not one was recorded. | [optional] [default to undefined]
+**_class** | **string** | The class of the box | [optional] [default to undefined]
+**daemonVersion** | **string** | The version of the daemon running in the box | [optional] [default to undefined]
+**runnerId** | **string** | The runner ID of the box | [optional] [default to undefined]
+**progress** | [**BoxProgress**](BoxProgress.md) | What a box still being created is waiting on. Absent once it has started, and absent while it is being created from an image that has already been pulled | [optional] [default to undefined]
+
+## Example
+
+```typescript
+import { Box } from './api';
+
+const instance: Box = {
+    id,
+    organizationId,
+    name,
+    user,
+    env,
+    labels,
+    network,
+    target,
+    image,
+    cpu,
+    gpu,
+    memory,
+    disk,
+    privileged,
+    state,
+    desiredState,
+    errorReason,
+    recoverable,
+    autoStop,
+    autoDelete,
+    autoResume,
+    volumes,
+    createdAt,
+    updatedAt,
+    lastActivityAt,
+    exitCode,
+    _class,
+    daemonVersion,
+    runnerId,
+    progress,
+};
+```
+
+[[Back to Model list]](../README.md#documentation-for-models) [[Back to API list]](../README.md#documentation-for-api-endpoints) [[Back to README]](../README.md)

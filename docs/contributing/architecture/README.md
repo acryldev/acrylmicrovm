@@ -1,0 +1,618 @@
+# Architecture
+
+How ACRYL microVMs' code fits together, for contributors: the runtime, and the hosted platform under
+`apps/`. The user-level picture is in [Concepts](../../concepts/README.md).
+
+## Design documents
+
+- [Hosted platform](platform/README.md): how the `apps/` services fit together, their
+  [interfaces](platform/api.md), and their [data model](platform/schema.md).
+- [VMM](vmm/README.md): ACRYL microVMs' own VMM, which is replacing libkrun.
+- [Jailer network permissions](jailer-network-permissions.md): guest networking, host IP grants,
+  and the AF_UNIX control plane.
+- [Container capabilities](container-capabilities.md): the Linux capability API.
+- [Guest SSH](../../../src/guest/src/service/ssh/README.md): russh APIs, authentication,
+  container workloads, forwarding, and shutdown ownership.
+- [Jailer threat model](../../../src/acrylmicrovm/src/jailer/README.md).
+
+## Source map
+
+| Subsystem   | Code                                            | User-level explanation                        |
+| ----------- | ----------------------------------------------- | --------------------------------------------- |
+| Runtime     | `src/acrylmicrovm/src/runtime/`                      | [Concepts](../../concepts/README.md)          |
+| Box handle  | `src/acrylmicrovm/src/litebox/`                      | [Concepts](../../concepts/README.md)          |
+| Images      | `src/acrylmicrovm/src/images/`                       | [Images](../../concepts/images.md)            |
+| Storage     | `src/acrylmicrovm/src/rootfs/`, `src/acrylmicrovm/src/volumes/` | [Storage](../../concepts/storage.md)    |
+| Networking  | `src/acrylmicrovm/src/net/`                          | [Networking](../../concepts/networking.md)    |
+| Jailer      | `src/acrylmicrovm/src/jailer/`                       | [Security](../../concepts/security.md)        |
+| Metrics     | `src/acrylmicrovm/src/metrics/`                      | [Metrics](../../concepts/metrics.md)          |
+| Agents      | `src/acrylmicrovm/src/agents/`                       | [Agents](../../reference/agents.md)           |
+| VMM         | `src/acrylmicrovm/src/vmm/`                          | —                                             |
+| Shared      | `src/shared/`                                   | —                                             |
+
+## Core components
+
+### AcrylMicrovmRuntime
+
+The main entry point for creating and managing Boxes. Holds all runtime state protected by a single
+`RwLock`.
+
+**Source:** `src/acrylmicrovm/src/runtime/`
+
+**Key responsibilities:**
+
+- Box lifecycle management (create, list, get, remove)
+- Image management (pull, cache)
+- Runtime-wide metrics collection
+- Filesystem layout management
+
+**State architecture:**
+
+```text
+RuntimeInnerImpl
+├── sync_state (RwLock)
+│   ├── BoxManager      # Tracks all Boxes and their states (Source: src/acrylmicrovm/src/litebox/manager.rs)
+│   └── ImageManager    # OCI image cache and management (Source: src/acrylmicrovm/src/images/manager.rs)
+└── non_sync_state (immutable)
+    ├── FilesystemLayout  # Directory structure (~/.acryl/microvm)
+
+    ├── InitRootfs        # Shared init rootfs for guests
+    └── RuntimeMetrics    # Atomic counters (lock-free)
+```
+
+### LiteBox
+
+Individual Box handle providing execution capabilities. Supports lazy initialization - heavy work (
+image pulling, Box startup) is deferred until first use.
+
+**Source:** `src/acrylmicrovm/src/litebox/`
+
+**Key responsibilities:**
+
+- Command execution (`exec`)
+- Metrics collection
+- Graceful shutdown
+
+**Lazy initialization flow:**
+
+1. `runtime.create()` returns immediately with handle
+2. First API call triggers initialization pipeline
+3. Pipeline: filesystem layout → boot assets + rootfs prep → Box spawn → guest ready
+
+Custom kernels are an [RC feature](../../guides/custom-kernel.md). They are
+prepared by the initialization pipeline, not by the VMM controller. The pipeline
+copies the kernel and optional initramfs into an immutable per-box generation,
+verifies their checksums, and atomically publishes the generation before
+`VmmSpawn`. Restarting a stopped or failed Box reuses the published generation,
+so the caller-owned source files are only required when a generation must first
+be created. Reattaching to a running Box skips preparation.
+
+Nested virtualization is also an
+[RC feature](../../guides/nested-virtualization.md). Its opt-in is persisted
+with the box and rechecked on every local start. The VMM exposes virtualization
+extensions to the guest, then the guest agent grants only its `/dev/kvm` device
+to the OCI workload.
+
+### Reader/writer locks
+
+`LockGuard::new_async` and `ReadLockGuard::new_async` first await a shared per-ID
+Tokio reader/writer gate within their manager, then retry nonblocking kernel
+acquisition every 10ms with Tokio sleep. Local waiters queue fairly and wake on
+gate release; fairness does not extend across managers or processes. Cancelling a
+pending waiter releases only its own admission, not the current owner's lock.
+Dropping an acquired guard releases its lock; process exit also releases file
+locks when the last owning descriptor closes.
+
+Run `ACRYLMICROVM_DEPS_STUB=1 make test:unit:rust FILTER=lock::` for the lock contract
+checks. Blocking tests acknowledge a failed acquisition before checking that the
+waiter cannot acquire until release. Cancellation checks probe read and write
+exclusion before releasing the owner. Reexecuted child processes independently
+open the manager and verify shared readers, writer exclusion, and exit release;
+control messages and deadlines bound the scenario, and cleanup kills/reaps children.
+
+The errno fixtures exercise real fatal kernel errors. Separate child-process tests
+interrupt blocking read/write acquisition with handled signals without `SA_RESTART`,
+verify that waiters remain excluded, then release the owner and verify acquisition.
+This covers blocking `EINTR` retries, not nonblocking `EINTR` injection: no
+deterministic local-filesystem trigger for the latter is established on macOS or
+Linux.
+See the [Linux error contract](https://man7.org/linux/man-pages/man2/flock.2.html#ERRORS)
+and [Darwin blocking semantics](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/man/man2/flock.2).
+
+### Per-box lifecycle ownership
+
+`BoxImpl::with_operation` acquires the box's lifecycle write lock and refreshes
+persisted state before start/stop, implicit boot/adoption, outbound updates, and
+watcher reports. Internal boot and attach helpers reuse that admission; they never
+acquire a second lifecycle lock. An initialized handle cannot attach its old live
+resources to a different PID or `started_at`.
+
+Guards acquire the manager's per-ID local gate before `flock` and release `flock`
+before the gate; existing handles retain their gate even if removal frees the ID.
+Synchronous removal/shutdown use nonblocking `try_*` admission: a busy local gate
+or kernel lock returns `None`, so removal requests a retry and shutdown defers cleanup.
+The blocking constructors wait on the kernel lock alone, so they never queue behind
+the local gate.
+
+Implicit operations recheck whether booting may run a user-specified command after
+this refresh, under the same admission as boot. For example, `metrics()` waiting
+behind a stop must not restart a job whose command already ran. Explicit `start()`
+still permits a restart; attach-before-start still permits preparing a fresh box.
+
+Watcher observes processes and probes health without holding admission. It reports
+events through `RuntimeImpl::apply_box_observation` using a weak runtime reference;
+resolving an event does not arm another watcher. Successful observation resolution
+reuses the in-process handle cache without reading config/state; a cache miss loads them.
+For cached lookup failures, `None` confirms the box row is gone; other lookup errors
+remain retryable by health reporting. In particular, a missing entity lock while
+the row still exists leaves health probing enabled; a later tick can persist its
+report after the lock is restored. A missing row stops health reporting instead.
+The state refresh under lifecycle admission remains the sole authority.
+`BoxImpl::apply_observation` acquires lifecycle write admission, checks
+PID/`started_at`, and applies the report:
+health persistence or shared stop finalization (exit records, cache invalidation,
+and configured removal). The name distinguishes this state-changing commit phase
+from the watcher's process observation and health probing outside admission.
+Successful automatic removal is recorded on that handle, so a later `stop()` remains
+idempotent even after its row and lock are gone. Unrelated missing state is not
+treated as completed automatic removal.
+
+Stop finalization publishes its in-memory terminal state only after persistence
+succeeds (or the row is already gone). A failed write leaves the run identity
+retryable instead of making the handle appear to belong to an earlier VM.
+
+Explicit start keeps `Container.Start` background and cancellable. Outbound updates
+use the host network backend without awaiting that RPC: a pending container start
+cannot hold lifecycle admission and prevent stop. Returning live resources releases
+admission before subsequent executions, streams, or tunnels; metadata reads retain
+their short state lock.
+
+Explicit removal uses a nonblocking lifecycle write attempt and returns
+`InvalidState` when busy. Synchronous shutdown skips detached boxes and defers busy
+cleanup or lock-retrieval failures, including a missing lock file. A missing box row
+is already gone; a missing lock is not proof of completed cleanup. Async shutdown
+marks cleanup pending before awaiting stops and clears it only after every stop
+succeeds. Timeout, failure, or cancellation leaves a later synchronous shutdown or
+runtime Drop able to retry.
+
+Disk APIs retain their existing **per-handle `disk_ops` mutex**, not a disk-lock
+registry. The quiesce bracket also takes lifecycle write admission through
+freeze, pause, disk work, resume, and thaw. The order is `disk_ops` → lifecycle →
+state; lifecycle entrypoints never acquire `disk_ops`. Final archive writing
+releases lifecycle admission but retains disk exclusion while its caller awaits it.
+
+Disk operations still execute in the caller's future. Cancelling that future does
+not guarantee completion of disk work or resume/thaw cleanup: a blocking worker
+may continue after the caller drops its guards. Cancellation-safe owner tasks are
+a separate change, not a guarantee provided by lifecycle admission.
+
+Stopped-disk operations retain their existing coordination limits. There is no
+cross-handle disk registry or lifecycle-read/disk-write composition yet; complete
+snapshot/clone/export lock migration is separate work.
+
+Run `ACRYLMICROVM_DEPS_STUB=1 make test:unit:rust FILTER=operation_lock` for host
+admission and cleanup checks. Stand-in processes and loopback guest RPCs are not
+VM evidence. For real boot/stop races and implicit-job restart prevention, leave
+dependency stubs unset and run `make test:integration:lifecycle-race` with
+`ACRYLMICROVM_REPRO_ROOTFS` pointing to a local OCI image layout, not an unpacked rootfs.
+The image must provide `/bin/sh` and `/bin/sleep`, which both VM test suites invoke.
+This target explicitly runs the ignored tests. The implicit-operation regression
+counts guest-written markers before cleanup and checks that explicit restart still
+works.
+
+
+### ShimController
+
+Universal subprocess-based Box controller. Spawns `acrylmicrovm-shim` binary in a subprocess to isolate
+Box process takeover from the host application.
+
+**Source:** `src/acrylmicrovm/src/vmm/controller/shim.rs`, `src/shim/src/main.rs`
+
+**Why subprocess isolation:**
+
+- libkrun performs process takeover (`krun_start_enter` never returns)
+- Subprocess ensures host application continues running
+- Clean process tree management
+- Enables jailer to sandbox the shim process
+
+### Jailer (security isolation)
+
+Defense-in-depth sandbox around the shim process. The layers, platforms, and configuration are
+described in [Security](../../concepts/security.md).
+
+**Source:** `src/acrylmicrovm/src/jailer/`
+
+### Portal (host-guest communication)
+
+gRPC-based communication layer between host and guest.
+
+**Components:**
+
+- `GuestSession`: High-level facade for service interfaces
+- `Connection`: Lazy gRPC channel management
+- Service interfaces: `GuestInterface`, `ContainerInterface`, `ExecutionInterface`
+
+Guest-ready confirms the guest agent's listener, while libkrun initializes the
+host Unix listener asynchronously. The portal attempts to connect immediately,
+then retries missing or refused sockets with asynchronous backoff from 10 ms to
+100 ms, bounded by the existing 30-second connection timeout.
+
+Other connection errors return immediately. A socket that never becomes
+connectable reaches the timeout; the retry covers connection establishment and
+does not replay RPCs. Run `ACRYLMICROVM_DEPS_STUB=1 make test:unit:rust FILTER=portal::connection`
+for delayed-listener, timeout, and permanent-error regressions.
+
+### Guest agent
+
+Runs inside the Box, receives commands from host via gRPC.
+
+**Source:** `src/guest/` (crate: `acrylmicrovm-guest`)
+
+**Services:**
+
+- `Guest`: Environment initialization (mounts, rootfs, network)
+- `Container`: OCI container lifecycle management (via libcontainer). `Mount`
+  binds a folder of the container's share (`source`, a folder name, never a path)
+  read-only at `destination` in the running container: the agent clones a child
+  with exit signal 0 and a pidfd, which closes every other descriptor, joins the
+  container's mount namespace and moves an `open_tree` clone there
+  (`storage/attach.rs`). The agent lets it mount only within 30 s and kills it
+  otherwise. It refuses a destination that already has entries or is reached
+  through a link, so no image content is hidden. File copies into the container
+  wait for a `Mount` in progress.
+- `Execution`: Command execution with streaming I/O
+- `Files`: Copies in and out as tar streams. An upload streams straight into extraction, landed
+  by the archive's first entry (see `tar` under [Shared library](#shared-library)); an entry
+  that would land under a container mount is refused before it is written, and the entries
+  before it stay. Successful uploads hand only written files and newly created directories
+  to the container user. An empty archive preserves existing destination contents and
+  ownership, even with overwrite disabled; it creates no destination or parent directories.
+  An archive containing an empty directory can create a destination directory, which is
+  handed to the container user.
+
+**Guest-side modules:**
+
+- `container/`: OCI container lifecycle using libcontainer
+- `storage/`: Filesystem mounts and overlayfs management
+- `network.rs`: Virtual NIC configuration and DHCP
+
+## Image store
+
+```text
+ImageManager
+├── ImageStore         # OCI blob storage and retrieval
+├── ImageStorage       # Layer extraction and caching
+└── Archive handlers   # TAR archive processing
+```
+
+## Network backend interface
+
+```rust
+pub trait NetworkBackend: Send + Sync {
+    fn start(&mut self) -> AcrylMicrovmResult<NetworkConfig>;
+    fn stop(&mut self) -> AcrylMicrovmResult<()>;
+    fn metrics(&self) -> NetworkMetrics;
+}
+```
+
+## Vmm abstraction
+
+ACRYL microVMs uses a pluggable Vmm (Virtual Machine Monitor) architecture for Box execution.
+
+**Location:** `src/acrylmicrovm/src/vmm/`
+
+### Vmm trait
+
+```rust
+pub trait Vmm {
+    fn create(&mut self, config: InstanceSpec) -> AcrylMicrovmResult<VmmInstance>;
+}
+```
+
+### VmmInstance
+
+Represents a configured Box ready to execute:
+
+```rust
+pub struct VmmInstance {
+    inner: Box<dyn VmmInstanceImpl>,
+}
+
+impl VmmInstance {
+    /// Transfer control to the Box (may never return)
+    pub fn enter(self) -> AcrylMicrovmResult<()>;
+}
+```
+
+### libkrun (Krun Vmm)
+
+Current production Vmm implementation using libkrun hypervisor.
+
+**Features:**
+
+- Hardware virtualization (macOS Hypervisor.framework, Linux KVM)
+- virtio-fs for filesystem sharing
+- virtio-blk for disk images
+- vsock for host-guest communication
+- Process takeover model (`krun_start_enter`)
+
+**Configuration flow:**
+
+1. Create libkrun context
+2. Set Box resources (CPUs, memory)
+3. Configure network (TSI or gvproxy)
+4. Mount virtiofs shares
+5. Attach disk images
+6. Configure vsock ports
+7. Set guest entrypoint
+8. Return `VmmInstance`
+
+### Adding new Vmm implementations
+
+To add a new Vmm implementation:
+
+1. Implement `Vmm` trait
+2. Implement `VmmInstanceImpl` for the instance type
+3. Register in `VmmFactory`
+4. Add `VmmKind` variant
+
+## Agent adapters
+
+```text
+Agents / Agent / AgentTurn        agents/mod.rs: public facade, turn.wait polling
+        │ Arc<dyn AgentBackend>
+        ▼
+opencode::Session                 agents/opencode/: OpenCode 2.2 protocol over a Box tunnel
+```
+
+The facade forwards every operation to the private `AgentBackend` trait. Each
+agent implementation is one module whose agent type implements it. Operations
+the native interface lacks keep the trait's defaults, which return `Unsupported`
+naming the adapter before anything reaches the Box.
+
+### Adding an agent implementation
+
+1. Add a module under `src/acrylmicrovm/src/agents/` and implement `AgentBackend`
+   for its agent type: `adapter`, `config`, `capabilities`, `send`, `turn` and
+   `events`, plus any optional operation it supports.
+2. List every supported operation in its `capabilities`.
+3. Add a match arm for its implementation name in `Agents::create`.
+4. Before release, decide how `Agents::get` routes an agent ID to it. Today the
+   OpenCode `ses_` prefix picks the adapter, and a second adapter's IDs could
+   share that shape.
+
+### Installed agents
+
+`agents/install/` delivers an agent binary into an unchanged image
+([design #2322](https://github.com/acryldev/acrylmicrovm/issues/2322)):
+
+```text
+host file ──sha256──► mounts_dir/containers/<id>/volumes/agents/<agent>/<sha256>/<agent>  (0555)
+          └─record──► <box>/agents.json  {"<agent>": "<sha256>"}  (outside the share)
+first agents call of a VM run ──Container.Mount──► /opt/acrylmicrovm/agents (read-only)
+OpenCode commands run with /opt/acrylmicrovm/agents/opencode/<sha256> first on PATH
+```
+
+- **Placement.** The guest can write the share, so `AgentShare::place` opens
+  each folder below the share root from its parent with `O_NOFOLLOW` and refuses
+  a link at any level. It copies into a staging folder and renames it to the
+  digest; a folder already named by the digest is kept.
+- **Mount.** `LiveState` holds a once-per-VM-run cell. `AgentInstaller::installed`
+  mounts the folder when the record names the agent, so a restart mounts again
+  on the next `agents.create` or `agents.get`, not in the start path. A failed
+  mount fails that call, never the start, and the next call retries it.
+- **Source.** Only tests install today, through `Agents::install_from_host`
+  under the `test-support` feature; the agent catalog of #2322 will be the first
+  public source. Without an install, OpenCode runs from the image's `PATH`.
+
+## Host-guest communication
+
+Communication uses gRPC over transport channels, bridged via libkrun's vsock support.
+
+### Transport flow
+
+```text
+Host Application
+      │
+      │ Unix Socket (boxes/{id}/sockets/box.sock)
+      ▼
+┌─────────────────┐
+│  libkrun vsock  │  (Unix socket ↔ vsock bridge)
+│     bridge      │
+└─────────────────┘
+      │
+      │ Vsock (port 2695)
+      ▼
+Guest Agent (gRPC Server)
+```
+
+### Protocol definition
+
+Defined in `src/shared/proto/acrylmicrovm/v1/service.proto`:
+
+```protobuf
+service Guest {
+  rpc Init(GuestInitRequest) returns (GuestInitResponse);
+  rpc Ping(PingRequest) returns (PingResponse);
+  rpc Shutdown(ShutdownRequest) returns (ShutdownResponse);
+}
+
+service Container {
+  rpc Init(ContainerInitRequest) returns (ContainerInitResponse);
+}
+
+service Execution {
+  rpc Exec(ExecRequest) returns (ExecResponse);
+  rpc Attach(AttachRequest) returns (stream ExecOutput);
+  rpc SendInput(stream ExecStdin) returns (SendInputAck);
+  rpc Wait(WaitRequest) returns (WaitResponse);
+  rpc Kill(KillRequest) returns (KillResponse);
+  rpc ResizeTty(ResizeTtyRequest) returns (ResizeTtyResponse);
+}
+```
+
+### Initialization sequence
+
+```text
+Host                              Guest (Box)
+  │                                 │
+  │──── spawn Box subprocess ──────▶│
+  │                                 │
+  │◀─── ready notification ─────────│ (vsock connect to port 2696)
+  │                                 │
+  │──── Guest.Init ────────────────▶│ (mounts, rootfs, network)
+  │◀─── GuestInitResponse ──────────│
+  │                                 │
+  │──── Container.Init ────────────▶│ (OCI container setup)
+  │◀─── ContainerInitResponse ──────│
+  │                                 │
+  │──── Execution.Exec ────────────▶│ (run commands)
+  │◀─── streaming stdout/stderr ────│
+  │                                 │
+```
+
+## SDK architecture
+
+ACRYL microVMs provides language-specific SDKs built on the core Rust library.
+
+```text
+┌─────────────────────────────────────────┐
+│           Host Application              │
+└─────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────┐
+│     Language SDK (Python, Node, C)      │
+│         (Native bindings)               │
+└─────────────────────────────────────────┘
+                    │
+                    ▼
+┌─────────────────────────────────────────┐
+│         AcrylMicrovm Core (Rust)             │
+└─────────────────────────────────────────┘
+```
+
+| SDK         | Technology     | Status      | Location       |
+|-------------|----------------|-------------|----------------|
+| **Python**  | PyO3 + maturin | Available   | `sdks/python/` |
+| **Node.js** | napi-rs        | In Progress | `sdks/node/`   |
+| **C**       | FFI + cbindgen | Available   | `sdks/c/`      |
+
+## Shared library
+
+The `acrylmicrovm-shared` crate contains data types, error definitions, and constants shared between the
+host runtime, the shim, and the guest agent.
+
+**Location:** `src/shared/`
+
+**Key Components:**
+
+- `AcrylMicrovmError`: Centralized error type.
+- `Constants`: Shared constants (e.g. socket paths, default ports).
+- `Transport`: gRPC transport utilities.
+- `tar`: Packs and unpacks the archives that copies carry between host and guest. Extraction
+  decides where each entry lands and writes it there with tar-rs's `Entry::unpack`, or creates the
+  hard link itself. tar-rs's `unpack_in` would take the place from the entry's own name, so
+  extraction repeats its checks: missing parents are created only inside the destination, a parent
+  that resolves outside it is refused, and a hard link's target is looked up in the destination.
+  The archive's first entry decides where a copy lands, as `docker cp` lands it, so no side channel
+  has to say whether the source was a directory:
+
+  | Destination | First entry | Lands |
+  | --- | --- | --- |
+  | An existing directory | anything | every entry inside it, under its own name |
+  | Missing, with or without a trailing `/` | directory `X/` | `X` as the destination: `X/a` lands as `a` (`./` roots nothing) |
+  | An existing non-directory | directory | nothing: the copy is refused |
+  | Missing, or an existing directory, with a trailing `/` | file or symlink | inside it, under its own name |
+  | Missing, or an existing non-directory, without a trailing `/` | file or symlink with a one-part name | that entry as the destination |
+  | Missing | file with a nested name (`app/main.py`) | every entry inside it, under its own name |
+
+  An existing non-directory destination fails the copy when the path ends in `/` or the
+  archive's leading file has a nested name. Records about other entries (PAX headers, GNU
+  long names) never decide. Entries are written as
+  they are read, so an entry the first one rules out fails the copy as the caller's error, keeping
+  what was written: one outside `X/`, anything after a file that became the destination, or a hard
+  link leading the archive. An empty archive lands nothing.
+
+  After upload, the guest transfers ownership of copied files and newly created paths to the
+  container user. A new destination symlink is handed over as the link itself, without selecting
+  children through its target. An existing directory symlink remains a valid copy destination;
+  only the copied children are handed over.
+
+## Concurrency model
+
+### Thread safety
+
+- `AcrylMicrovmRuntime`: `Send + Sync`, safely shareable across threads
+- `LiteBox`: `Send + Sync`, handles can be passed between threads
+- Single `RwLock` protects all mutable runtime state
+- Metrics use `AtomicU64` for lock-free updates
+
+### Runtime state lock
+
+ACRYL microVMs uses an `RwLock` for shared runtime state:
+
+- Eliminates nested locking complexity
+- Simplifies reasoning about concurrency
+- Filesystem lock prevents multiple runtimes using same `ACRYLMICROVM_HOME`
+
+### Per-entity reader/writer locks
+
+`src/acrylmicrovm/src/lock/` provides locks identified by persisted `LockId` values.
+`FileLockManager` uses shared/exclusive `flock` locks across processes;
+`InMemoryLockManager` supplies the same read/write compatibility for tests within
+one process. Different lock IDs are independent.
+
+| Mode | Manual acquisition/release | RAII guard | Compatibility |
+| --- | --- | --- | --- |
+| Read | `read_lock` / `read_unlock`; `try_read_lock` | `ReadLockGuard` | Multiple readers may coexist. |
+| Write | `lock` / `unlock`; `try_lock` | `LockGuard` | Excludes readers and other writers. |
+
+Retrieve a separate handle for every concurrent acquisition, even for the same
+ID: cloning an `Arc<dyn Locker>` shares the file descriptor and lock ownership.
+For example, retrieve two handles to hold two read guards; dropping either guard
+then leaves the other reader protected. Nested acquisition and read-to-write
+upgrades are unsupported. Blocking guard acquisition is synchronous and waits on
+the kernel lock alone; it bypasses the local gate, as do the manual `Locker`
+methods. FIFO fairness covers queued async acquisitions on the manager-local
+per-ID gate, not kernel contention. Try acquisition takes no queue position: it
+respects existing admission reservations and fails fast while a queued async writer
+owns the gate.
+
+Blocking and nonblocking file-lock acquisition retry interrupted calls (`EINTR`)
+without changing the requested mode. Nonblocking acquisition returns `false` only
+for contention (`EWOULDBLOCK`/`EAGAIN`); other OS errors panic with their details.
+Async guards propagate those failures instead of treating them as a reason to keep
+polling.
+
+Existing boot and outbound-policy changes still acquire exclusive guards. Shared
+read support alone does not coordinate lifecycle and disk operations that use
+other locks. Custom `Locker` implementations inherit exclusive fallback read
+methods unless they implement shared reads themselves.
+
+### Async design
+
+- All I/O operations are async (Tokio runtime)
+- Streaming operations use `futures::Stream`
+- gRPC uses tonic's async support
+
+## Error handling
+
+Centralized error type: `AcrylMicrovmError`
+
+```rust
+pub enum AcrylMicrovmError {
+    UnsupportedEngine,
+    Engine(String),
+    Storage(String),
+    Image(String),
+    Portal(String),
+    Network(String),
+    Rpc(String),
+    RpcTransport(String),
+    Internal(String),
+    Execution(String),
+}
+```
+
+All public APIs return `AcrylMicrovmResult<T>` = `Result<T, AcrylMicrovmError>`.

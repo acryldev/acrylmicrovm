@@ -1,0 +1,110 @@
+// Modified by ACRYL, 2026
+//! Connection management.
+//!
+//! Converts BoxTransport to tonic Channel with lazy initialization.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use acrylmicrovm_shared::{BoxTransport, AcrylMicrovmError, AcrylMicrovmResult};
+use hyper_util::rt::TokioIo;
+use tokio::sync::OnceCell;
+use tonic::transport::{Channel, Endpoint, Uri};
+use tower::service_fn;
+
+/// Lazy connection to guest.
+///
+/// Connects on first use to ensure connection happens in the correct async runtime.
+#[derive(Clone)]
+pub struct Connection {
+    transport: BoxTransport,
+    channel: Arc<OnceCell<Channel>>,
+}
+
+impl Connection {
+    /// Create a lazy connection (does not connect immediately).
+    pub fn new(transport: BoxTransport) -> Self {
+        Self {
+            transport,
+            channel: Arc::new(OnceCell::new()),
+        }
+    }
+
+    /// Get or establish the channel.
+    pub async fn channel(&self) -> AcrylMicrovmResult<Channel> {
+        let channel = self
+            .channel
+            .get_or_try_init(|| async { connect_transport(&self.transport).await })
+            .await?;
+
+        Ok(channel.clone())
+    }
+}
+
+/// Connect to a transport.
+async fn connect_transport(transport: &BoxTransport) -> AcrylMicrovmResult<Channel> {
+    match transport {
+        BoxTransport::Unix { socket_path } => {
+            tracing::debug!("Connecting via Unix: {}", socket_path.display());
+            connect_unix(socket_path).await
+        }
+        BoxTransport::Tcp { port } => {
+            tracing::debug!("Connecting via TCP: 127.0.0.1:{}", port);
+            connect_tcp(*port).await
+        }
+        BoxTransport::Vsock { port } => Err(AcrylMicrovmError::Internal(format!(
+            "Vsock client not yet implemented (port: {})",
+            port
+        ))),
+    }
+}
+
+async fn connect_unix(socket_path: &std::path::Path) -> AcrylMicrovmResult<Channel> {
+    let socket_path = socket_path.to_path_buf();
+
+    let channel = Endpoint::try_from("http://[::]:50051")?
+        .connect_timeout(Duration::from_secs(30))
+        .connect_with_connector(service_fn(move |_: Uri| {
+            let socket_path = socket_path.clone();
+            async move {
+                // Guest-ready can precede libkrun's host listener. Retry only
+                // connection establishment; tonic's connect_timeout bounds
+                // this entire future, including every asynchronous backoff.
+                let mut retry_delay = Duration::from_millis(10);
+                loop {
+                    match tokio::net::UnixStream::connect(&socket_path).await {
+                        Ok(stream) => return Ok::<_, std::io::Error>(TokioIo::new(stream)),
+                        Err(error)
+                            if matches!(
+                                error.kind(),
+                                std::io::ErrorKind::NotFound
+                                    | std::io::ErrorKind::ConnectionRefused
+                            ) =>
+                        {
+                            tokio::time::sleep(retry_delay).await;
+                            retry_delay = (retry_delay * 2).min(Duration::from_millis(100));
+                        }
+                        Err(error) => return Err(error),
+                    }
+                }
+            }
+        }))
+        .await?;
+
+    tracing::debug!("Connected via Unix socket");
+    Ok(channel)
+}
+
+async fn connect_tcp(port: u16) -> AcrylMicrovmResult<Channel> {
+    let addr = format!("http://127.0.0.1:{}", port);
+    let channel = Endpoint::try_from(addr)?
+        .connect_timeout(Duration::from_secs(30))
+        .connect()
+        .await?;
+
+    tracing::debug!("Connected via TCP");
+    Ok(channel)
+}
+
+#[cfg(test)]
+mod tests;

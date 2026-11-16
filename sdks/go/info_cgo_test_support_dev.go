@@ -1,0 +1,133 @@
+// Modified by ACRYL, 2026
+//go:build acrylmicrovm_dev
+
+package acrylmicrovm
+
+/*
+#include "bridge.h"
+#include <stdlib.h>
+*/
+import "C"
+
+import "unsafe"
+
+// Go does not support importing C from a _test.go file. Keep the native test
+// fixtures development-only so prebuilt SDK consumers do not compile test
+// support into their package.
+func cNetworkInfoTraversalTestFixtures() [4]*NetworkInfo {
+	allowHost := C.CString("api.example.com")
+	defer C.free(unsafe.Pointer(allowHost))
+	allowNet := []*C.char{allowHost}
+	unresolved := C.CNetworkInfo{
+		outbound: C.COutboundNetworkInfo{
+			mode:            C.AcrylMicrovmNetworkModeEnabled,
+			allow_net:       (**C.char)(unsafe.Pointer(&allowNet[0])),
+			allow_net_count: 1,
+		},
+		inbound: C.CInboundNetworkInfo{
+			mode: C.AcrylMicrovmNetworkModeDisabled,
+		},
+	}
+
+	resolvedPorts := C.CPublishedPortList{}
+	resolvedEmpty := C.CNetworkInfo{
+		outbound: C.COutboundNetworkInfo{
+			mode: C.AcrylMicrovmNetworkModeDisabled,
+		},
+		inbound: C.CInboundNetworkInfo{
+			mode: C.AcrylMicrovmNetworkModeEnabled,
+		},
+		published_ports: &resolvedPorts,
+	}
+
+	tcpHost := C.CString("127.0.0.1")
+	defer C.free(unsafe.Pointer(tcpHost))
+	udpHost := C.CString("::1")
+	defer C.free(unsafe.Pointer(udpHost))
+	portItems := []C.CPublishedPort{
+		{
+			guest_port: 3000,
+			host_ip:    tcpHost,
+			host_port:  49152,
+			protocol:   C.AcrylMicrovmPortProtocolTcp,
+		},
+		{
+			guest_port: 53,
+			host_ip:    udpHost,
+			host_port:  5353,
+			protocol:   C.AcrylMicrovmPortProtocolUdp,
+		},
+	}
+	populatedPorts := C.CPublishedPortList{
+		items: &portItems[0],
+		count: C.int(len(portItems)),
+	}
+	populated := C.CNetworkInfo{
+		outbound: C.COutboundNetworkInfo{
+			mode:            C.AcrylMicrovmNetworkModeEnabled,
+			allow_net:       (**C.char)(unsafe.Pointer(&allowNet[0])),
+			allow_net_count: 1,
+		},
+		inbound: C.CInboundNetworkInfo{
+			mode: C.AcrylMicrovmNetworkModeEnabled,
+		},
+		published_ports: &populatedPorts,
+	}
+
+	return [4]*NetworkInfo{
+		cNetworkInfoToGo(nil),
+		cNetworkInfoToGo(&unresolved),
+		cNetworkInfoToGo(&resolvedEmpty),
+		cNetworkInfoToGo(&populated),
+	}
+}
+
+// cBoxInfoExitCodeTestFixtures runs the owned pointer the C struct carries
+// back through the real decode. `0` and "not recorded" are the two the design
+// turns on, and nothing above this layer can tell them apart if this hop ever
+// derives presence from the value instead of the pointer.
+func cBoxInfoExitCodeTestFixtures() [3]*int {
+	id := C.CString("box-1")
+	defer C.free(unsafe.Pointer(id))
+	image := C.CString("alpine:latest")
+	defer C.free(unsafe.Pointer(image))
+	status := C.CString("stopped")
+	defer C.free(unsafe.Pointer(status))
+
+	withCode := func(code *C.int) *int {
+		info := C.CBoxInfo{
+			id:        id,
+			image:     image,
+			status:    status,
+			exit_code: code,
+		}
+		boxInfo := cBoxInfoToGo(&info)
+		return boxInfo.ExitCode
+	}
+
+	// Allocated the way the real struct's owner does, so the decode sees a
+	// genuine pointer rather than the address of a Go local.
+	cleanExit := (*C.int)(C.malloc(C.sizeof_int))
+	defer C.free(unsafe.Pointer(cleanExit))
+	*cleanExit = 0
+
+	failedExit := (*C.int)(C.malloc(C.sizeof_int))
+	defer C.free(unsafe.Pointer(failedExit))
+	*failedExit = 42
+
+	return [3]*int{
+		withCode(nil),
+		withCode(cleanExit),
+		withCode(failedExit),
+	}
+}
+
+// cBoxInfoResolvedImageTestFixtures converts a native BoxInfo that carries a
+// resolved image and one that does not.
+func cBoxInfoResolvedImageTestFixtures() (known, unknown BoxInfo) {
+	digest := C.CString("sha256:0a7ed0d449b9318548e66674610d757de19b7645759f74b587b610b59d6b43fd")
+	defer C.free(unsafe.Pointer(digest))
+	withDigest := C.CBoxInfo{resolved_image_digest: digest, resolved_image_size: 3974501}
+	withoutDigest := C.CBoxInfo{resolved_image_size: 0}
+	return cBoxInfoToGo(&withDigest), cBoxInfoToGo(&withoutDigest)
+}

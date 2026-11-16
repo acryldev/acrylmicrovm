@@ -1,0 +1,27 @@
+{
+  "compileOnSave": false,
+  "compilerOptions": {
+    "rootDir": ".",
+    "sourceMap": true,
+    "declaration": false,
+    "moduleResolution": "node",
+    "emitDecoratorMetadata": true,
+    "experimentalDecorators": true,
+    "importHelpers": true,
+    "target": "ES2022",
+    "module": "commonjs",
+    "lib": ["es2022", "dom"],
+    "skipLibCheck": true,
+    "skipDefaultLibCheck": true,
+    "baseUrl": ".",
+    "paths": {
+      "@acryldev/api-client": ["libs/api-client/src/index.ts"],
+      "@acryldev/runner-api-client": ["libs/runner-api-client/src/index.ts"],
+      "@acryldev/analytics-api-client": ["libs/analytics-api-client/src/index.ts"],
+      "@acryldev/ci-listener": ["libs/ci-listener/src/index.ts"],
+      "@acryldev/ci-listener/sqlite": ["libs/ci-listener/src/state/sqlite.ts"],
+      "@acryldev/ci-listener/testing": ["libs/ci-listener/tests/capacity.ts"]
+    }
+  },
+  "exclude": ["node_modules", "tmp"]
+}

@@ -1,0 +1,51 @@
+// Modified by ACRYL, 2026
+//! `acrylmicrovm auth {login,logout,status}` — manage stored REST credentials.
+//!
+//! Subcommands are dispatched from `main.rs`. Each leaf module owns its own
+//! `Args` struct and `run()` to keep workflows isolated (login is async because
+//! it validates against the server; logout/status are sync).
+
+use clap::{Args, Subcommand};
+
+use crate::cli::GlobalFlags;
+
+pub mod api_key;
+pub mod login;
+pub mod logout;
+pub mod oidc;
+pub mod status;
+pub mod whoami;
+
+#[derive(Args, Debug, Clone)]
+pub struct AuthArgs {
+    #[command(subcommand)]
+    pub command: AuthCommand,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum AuthCommand {
+    /// Log in to a ACRYL microVMs REST server.
+    Login(login::LoginArgs),
+    /// Remove stored credentials.
+    Logout(logout::LogoutArgs),
+    /// Show current authentication status (offline).
+    Status,
+    /// Confirm the active credential's identity via `GET /v1/me`.
+    Whoami,
+}
+
+pub async fn run(args: AuthArgs, global: &GlobalFlags) -> anyhow::Result<()> {
+    let profile = global.resolved_context();
+    let store = global.credential_store();
+    match args.command {
+        AuthCommand::Login(_) if profile == crate::credentials::EMBEDDED_CONTEXT => {
+            anyhow::bail!(
+                "context `{profile}` is reserved for the embedded runtime; log in under another name with `acrylmicrovm --context NAME auth login`"
+            )
+        }
+        AuthCommand::Login(a) => login::run(a, &profile, &store).await,
+        AuthCommand::Logout(a) => logout::run(a, &profile, &store).await,
+        AuthCommand::Status => status::run(global, &store),
+        AuthCommand::Whoami => whoami::run(global, &store).await,
+    }
+}

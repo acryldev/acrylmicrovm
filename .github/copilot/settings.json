@@ -1,0 +1,14 @@
+{
+  "extraKnownMarketplaces": {
+    "acrylmicrovm-agent-tooling": {
+      "source": {
+        "source": "github",
+        "repo": "acryldev/agent-tooling",
+        "ref": "main"
+      }
+    }
+  },
+  "enabledPlugins": {
+    "acrylmicrovm-agent-tooling@acrylmicrovm-agent-tooling": true
+  }
+}

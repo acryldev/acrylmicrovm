@@ -1,0 +1,1336 @@
+#![cfg(target_os = "linux")]
+// Modified by ACRYL, 2026
+//! Execution service implementation.
+//!
+//! Provides gRPC service for executing commands in containers with
+//! streaming I/O, process control, and state management.
+//!
+//! ## Architecture
+//!
+//! This module follows a clean layered design:
+//!
+//! - **Protocol Layer** (mod.rs): gRPC service implementation
+//! - **Executor Layer** (executor.rs): Process spawning abstraction
+//! - **Lifecycle Layer** (timeout.rs): Process management
+//! - **State Layer** (registry.rs, state.rs): Execution state
+//! - **Types** (types.rs): Shared types
+//!
+//! Each file has a single, clear responsibility.
+
+pub(in crate::service) mod error;
+#[cfg(target_os = "linux")]
+pub mod exec_handle;
+pub(in crate::service) mod executor;
+mod output;
+pub(crate) mod process_instance;
+pub(in crate::service) mod registry;
+pub(in crate::service) mod state;
+mod timeout;
+pub(crate) mod tty;
+
+// Re-export trait so container module can implement it
+pub(crate) use state::InitHealthCheck;
+
+use crate::service::exec::error::ExecutionError;
+use crate::service::exec::executor::{ContainerExecutor, GuestExecutor};
+use crate::service::exec::registry::ExecutionLookup;
+use crate::service::exec::state::ExecutionExit;
+use crate::service::server::GuestServer;
+use acrylmicrovm_shared::{
+    constants::executor as executor_const, AttachRequest, ExecError, ExecOutput, ExecRequest,
+    ExecResponse, ExecStdin, Execution, KillRequest, KillResponse, ResizeTtyRequest,
+    ResizeTtyResponse, SendInputAck, WaitRequest, WaitResponse,
+};
+use futures::stream::{Stream, StreamExt as _};
+use std::future::Future;
+use std::pin::Pin;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Request, Response, Status, Streaming};
+use tracing::{debug, info, warn};
+
+/// The execution core, addressed in native types.
+///
+/// This is the whole contract for driving a running execution, and it is
+/// transport-free on purpose: `impl Execution for GuestServer` below is one
+/// adapter over it, and the in-process SSH server is another. Neither is
+/// privileged, and neither can drift from the other, because the behaviour
+/// lives here rather than in either adapter.
+impl GuestServer {
+    async fn execution_lookup(&self, exec_id: &str) -> Result<ExecutionLookup, ExecutionError> {
+        self.registry
+            .lookup(exec_id)
+            .await
+            .ok_or_else(|| ExecutionError::NotFound(exec_id.to_string()))
+    }
+
+    /// Stream a running execution's stdout/stderr. One attach per execution.
+    pub(crate) async fn attach_execution(
+        &self,
+        exec_id: &str,
+    ) -> Result<mpsc::Receiver<Result<ExecOutput, Status>>, ExecutionError> {
+        info!(execution_id = %exec_id, "attach request");
+        match self.execution_lookup(exec_id).await? {
+            ExecutionLookup::Live(state) => match state.attach(exec_id).await {
+                Ok(output) => Ok(output),
+                Err(ExecutionError::AlreadyAttached) => state.attach_retained(exec_id).await,
+                Err(error @ ExecutionError::HandleUnavailable) => state
+                    .sealed_terminal_output_summary()
+                    .await
+                    .map(terminal_output_receiver)
+                    .ok_or(error),
+                Err(error) => Err(error),
+            },
+            ExecutionLookup::Retained { state, snapshot } => {
+                match state.attach_retained(exec_id).await {
+                    Ok(output) => Ok(output),
+                    Err(ExecutionError::HandleUnavailable) => {
+                        Ok(terminal_output_receiver(snapshot.output))
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            ExecutionLookup::Tombstone(snapshot) => Ok(terminal_output_receiver(snapshot.output)),
+        }
+    }
+
+    /// Forward `first` and then everything `stream` yields to the execution's
+    /// stdin. The returned task completes when the stream ends or stdin closes.
+    pub(crate) async fn send_execution_input(
+        &self,
+        first: ExecStdin,
+        stream: impl Stream<Item = Result<ExecStdin, ExecutionError>> + Send + Unpin + 'static,
+    ) -> Result<JoinHandle<Result<(), ExecutionError>>, ExecutionError> {
+        if first.execution_id.is_empty() {
+            return Err(ExecutionError::InvalidArgument(
+                "execution_id is required".into(),
+            ));
+        }
+        let exec_id = first.execution_id.clone();
+        match self.execution_lookup(&exec_id).await? {
+            ExecutionLookup::Live(state) => state.send_input(first, stream).await,
+            ExecutionLookup::Retained { .. } | ExecutionLookup::Tombstone(_) => {
+                Err(ExecutionError::HandleUnavailable)
+            }
+        }
+    }
+
+    /// Wait for exit, already classified — see [`ExecutionState::wait_exit`].
+    pub(crate) async fn wait_execution(
+        &self,
+        exec_id: &str,
+    ) -> Result<ExecutionExit, ExecutionError> {
+        debug!(execution_id = %exec_id, "wait request");
+        match self.execution_lookup(exec_id).await? {
+            ExecutionLookup::Live(state) => Ok(state.wait_exit(exec_id).await),
+            ExecutionLookup::Retained { snapshot, .. } | ExecutionLookup::Tombstone(snapshot) => {
+                Ok(snapshot.exit)
+            }
+        }
+    }
+
+    /// Signal the execution. `false` means the process had already exited.
+    pub(crate) async fn kill_execution(
+        &self,
+        exec_id: &str,
+        signal: i32,
+        process_group: bool,
+    ) -> Result<bool, ExecutionError> {
+        info!(execution_id = %exec_id, signal, process_group, "kill request");
+        // Resolve before parsing: signal 0 is the conventional liveness probe and
+        // is not a `Signal`, so parsing first would report an unknown execution
+        // as an invalid argument.
+        let state = self.execution_lookup(exec_id).await?;
+        let parsed = nix::sys::signal::Signal::try_from(signal)
+            .map_err(|_| ExecutionError::InvalidArgument(format!("signal number {signal}")))?;
+        let sent = match state {
+            ExecutionLookup::Live(state) => state.kill(parsed, process_group).await,
+            ExecutionLookup::Retained { .. } | ExecutionLookup::Tombstone(_) => false,
+        };
+        if sent {
+            info!(execution_id = %exec_id, signal, "signal sent");
+        } else {
+            info!(execution_id = %exec_id, "failed to send signal");
+        }
+        Ok(sent)
+    }
+
+    /// Resize the execution's PTY.
+    ///
+    /// A device-level refusal — no handle, no PTY, failed ioctl — is an outcome
+    /// rather than an error, because that is what the wire contract reports
+    /// (`success: false` on an otherwise successful call). `Err` is reserved for
+    /// a caller mistake: an out-of-range dimension or an unknown execution.
+    pub(crate) async fn resize_execution_tty(
+        &self,
+        exec_id: &str,
+        rows: u32,
+        cols: u32,
+        x_pixels: u32,
+        y_pixels: u32,
+    ) -> Result<TtyResize, ExecutionError> {
+        // Unwrap the inner detail rather than the rendered `AcrylMicrovmError`: both
+        // types render an "invalid argument: " prefix, and nesting them stutters.
+        let dimension = |name, value| {
+            tty::dimension(name, value).map_err(|error| match error {
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(detail) => {
+                    ExecutionError::InvalidArgument(detail)
+                }
+                other => ExecutionError::InvalidArgument(other.to_string()),
+            })
+        };
+        let rows = dimension("rows", rows)?;
+        let cols = dimension("cols", cols)?;
+        let x_pixels = dimension("x_pixels", x_pixels)?;
+        let y_pixels = dimension("y_pixels", y_pixels)?;
+
+        info!(execution_id = %exec_id, rows, cols, "resize_tty request");
+        let outcome = match self.execution_lookup(exec_id).await? {
+            ExecutionLookup::Live(state) => state.resize_pty(rows, cols, x_pixels, y_pixels).await,
+            ExecutionLookup::Retained { .. } | ExecutionLookup::Tombstone(_) => {
+                Err(ExecutionError::HandleUnavailable)
+            }
+        };
+        Ok(match outcome {
+            Ok(()) => {
+                info!(execution_id = %exec_id, rows, cols, "tty resized");
+                TtyResize::Resized
+            }
+            Err(error) => {
+                info!(execution_id = %exec_id, %error, "failed to resize tty");
+                TtyResize::Rejected(error)
+            }
+        })
+    }
+}
+
+/// What a resize did, for callers that must distinguish "the terminal refused"
+/// from "you asked for something impossible".
+#[derive(Debug)]
+pub(crate) enum TtyResize {
+    Resized,
+    Rejected(ExecutionError),
+}
+
+#[tonic::async_trait]
+impl Execution for GuestServer {
+    async fn exec(&self, request: Request<ExecRequest>) -> Result<Response<ExecResponse>, Status> {
+        let req = request.into_inner();
+        Ok(Response::new(start_execution(self, req, None).await))
+    }
+
+    async fn list_executions(
+        &self,
+        _request: Request<acrylmicrovm_shared::ListExecutionsRequest>,
+    ) -> Result<Response<acrylmicrovm_shared::ListExecutionsResponse>, Status> {
+        Ok(Response::new(acrylmicrovm_shared::ListExecutionsResponse {
+            executions: self.registry.list_executions().await,
+        }))
+    }
+
+    type AttachStream = Pin<Box<dyn Stream<Item = Result<ExecOutput, Status>> + Send + 'static>>;
+
+    async fn attach(
+        &self,
+        request: Request<AttachRequest>,
+    ) -> Result<Response<Self::AttachStream>, Status> {
+        let rx = self
+            .attach_execution(&request.into_inner().execution_id)
+            .await?;
+        let stream = ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(stream) as Self::AttachStream))
+    }
+
+    async fn send_input(
+        &self,
+        request: Request<Streaming<ExecStdin>>,
+    ) -> Result<Response<SendInputAck>, Status> {
+        let mut stream = request.into_inner();
+
+        // First message must carry execution_id.
+        let first = stream
+            .message()
+            .await?
+            .ok_or_else(|| Status::invalid_argument("Empty stdin stream"))?;
+
+        let rest = stream.map(|msg| msg.map_err(|status| ExecutionError::Input(Box::new(status))));
+        let task = self.send_execution_input(first, Box::pin(rest)).await?;
+
+        match task.await {
+            Ok(Ok(())) => Ok(Response::new(SendInputAck {})),
+            Ok(Err(error)) => Err(error.into()),
+            Err(error) => Err(Status::internal(format!("Stdin task panicked: {error}"))),
+        }
+    }
+
+    async fn wait(&self, request: Request<WaitRequest>) -> Result<Response<WaitResponse>, Status> {
+        let exit = self
+            .wait_execution(&request.into_inner().execution_id)
+            .await?;
+        Ok(Response::new(WaitResponse {
+            exit_code: exit.exit_code,
+            signal: exit.signal,
+            timed_out: false,
+            duration_ms: 0,
+            error_message: exit.error_message,
+        }))
+    }
+
+    async fn kill(&self, request: Request<KillRequest>) -> Result<Response<KillResponse>, Status> {
+        let req = request.into_inner();
+        let sent = self
+            .kill_execution(&req.execution_id, req.signal, req.process_group)
+            .await?;
+        Ok(Response::new(KillResponse {
+            success: sent,
+            error: (!sent).then(|| "Failed to send signal".to_string()),
+        }))
+    }
+
+    async fn resize_tty(
+        &self,
+        request: Request<ResizeTtyRequest>,
+    ) -> Result<Response<ResizeTtyResponse>, Status> {
+        let req = request.into_inner();
+        let outcome = self
+            .resize_execution_tty(
+                &req.execution_id,
+                req.rows,
+                req.cols,
+                req.x_pixels,
+                req.y_pixels,
+            )
+            .await?;
+        Ok(Response::new(match outcome {
+            TtyResize::Resized => ResizeTtyResponse {
+                success: true,
+                error: None,
+            },
+            TtyResize::Rejected(reason) => ResizeTtyResponse {
+                success: false,
+                error: Some(reason.to_string()),
+            },
+        }))
+    }
+}
+
+fn terminal_output_receiver(
+    summary: output::OutputTerminalSummary,
+) -> mpsc::Receiver<Result<ExecOutput, Status>> {
+    let (tx, rx) = mpsc::channel(2);
+    if let Some(failure) = summary.reader_failure {
+        tx.try_send(Err(Status::internal(failure)))
+            .expect("terminal attach receiver must be live");
+    } else {
+        for event in output::terminal_events(&summary) {
+            tx.try_send(Ok(event))
+                .expect("terminal attach receiver must be live");
+        }
+    }
+    rx
+}
+
+/// Start a typed workload selected by the in-process SSH server. This entry
+/// point is intentionally outside the public Execution RPC contract.
+pub(crate) async fn start_ssh_execution(
+    server: &GuestServer,
+    req: ExecRequest,
+    workload: crate::service::ssh::SshWorkload,
+) -> ExecResponse {
+    start_execution(server, req, Some(workload)).await
+}
+
+async fn start_execution(
+    server: &GuestServer,
+    req: ExecRequest,
+    ssh_workload: Option<crate::service::ssh::SshWorkload>,
+) -> ExecResponse {
+    let execution_id =
+        match execution_id_for_request(req.execution_id.as_deref(), ssh_workload.is_some()) {
+            Ok(id) => id,
+            Err(detail) => {
+                return error_response(
+                    req.execution_id.clone().unwrap_or_default(),
+                    "invalid_argument",
+                    detail,
+                );
+            }
+        };
+
+    let reservation = if ssh_workload.is_some() {
+        if server.registry.exists(&execution_id).await {
+            return error_response(execution_id, "execution_exists", "Execution already exists");
+        }
+        None
+    } else {
+        match server.registry.reserve(execution_id.clone()).await {
+            Some(reservation) => Some(reservation),
+            None => {
+                return error_response(
+                    execution_id,
+                    "execution_exists",
+                    "Execution already exists",
+                );
+            }
+        }
+    };
+
+    match spawn_execution(
+        server,
+        execution_id,
+        req,
+        ssh_workload,
+        reservation.as_ref(),
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(response) => {
+            if let Some(reservation) = reservation {
+                server.registry.release_reservation(&reservation).await;
+            }
+            response
+        }
+    }
+}
+
+fn execution_id_for_request(requested: Option<&str>, is_ssh: bool) -> Result<String, &'static str> {
+    match (requested, is_ssh) {
+        (Some(_), false) => Err("execution_id is assigned by the guest"),
+        (Some(id), true) => Ok(id.to_owned()),
+        (None, _) => Ok(uuid::Uuid::new_v4().to_string()),
+    }
+}
+
+/// Spawn execution (orchestrates full lifecycle).
+async fn spawn_execution(
+    server: &GuestServer,
+    execution_id: String,
+    req: ExecRequest,
+    ssh_workload: Option<crate::service::ssh::SshWorkload>,
+    reservation: Option<&registry::ExecutionReservation>,
+) -> Result<ExecResponse, ExecResponse> {
+    let started_at_ms = now_ms();
+
+    let spawned_at = std::time::Instant::now();
+
+    let (state, pid, process) = match spawn_with_executor(server, &req, &execution_id, ssh_workload)
+        .await?
+    {
+        SpawnedExecution::Rejected(rejection) => (
+            state::ExecutionState::rejected(rejection, req.tty.is_some()).await,
+            0,
+            None,
+        ),
+        SpawnedExecution::Process(child, container_ref) => {
+            let leader_pid = child.pid();
+            let pid = leader_pid.as_raw() as u32;
+            let process = process_instance::ProcessInstance::capture(leader_pid);
+            if process.is_none() {
+                warn!(execution_id = %execution_id, pid, "failed to capture process identity; signals will be skipped");
+            }
+            let exit = crate::reaper::REAPER
+                .get()
+                .expect("reaper installed at startup")
+                .register(leader_pid, spawned_at)
+                .await;
+            let state = match container_ref {
+                Some(container) => {
+                    let health: std::sync::Arc<tokio::sync::Mutex<dyn InitHealthCheck>> = container;
+                    state::ExecutionState::new_with_init_health(child, health, exit, process)
+                }
+                None => state::ExecutionState::new(child, exit, process),
+            };
+            (state, pid, process)
+        }
+    };
+    let state = state.with_metadata(acrylmicrovm_shared::ExecutionInfo {
+        execution_id: execution_id.clone(),
+        argv: std::iter::once(req.program.clone())
+            .chain(req.args.iter().cloned())
+            .collect(),
+        started_at: started_at_ms,
+        tty: req.tty.is_some(),
+        is_main_session: false,
+    });
+    if let Some(reservation) = reservation {
+        if !server.registry.publish(reservation, state.clone()).await {
+            state.abort_unpublished().await;
+            return Err(error_response(
+                execution_id,
+                "execution_cancelled",
+                "Execution reservation was released before spawn completed",
+            ));
+        }
+    } else if !server
+        .registry
+        .register(execution_id.clone(), state.clone())
+        .await
+    {
+        state.abort_unpublished().await;
+        return Err(error_response(
+            execution_id,
+            "execution_cancelled",
+            "Execution registry is shutting down",
+        ));
+    }
+
+    // Step 3: Start timeout watcher (if requested)
+    if req.timeout_ms > 0 && pid != 0 {
+        let timeout_task = timeout::start_timeout_watcher(
+            timeout::TimeoutTarget::new(process),
+            execution_id.clone(),
+            std::time::Duration::from_millis(req.timeout_ms),
+        );
+        state.set_timeout_task(timeout_task).await;
+    }
+
+    if reservation.is_some() {
+        server
+            .registry
+            .observe_terminal(execution_id.clone(), state.clone());
+    }
+
+    Ok(ExecResponse {
+        execution_id,
+        pid,
+        started_at_ms,
+        error: None,
+    })
+}
+
+/// Classify a failed spawn for the host: an unknown exec user or group is
+/// the caller's mistake (#2116), so it keeps the invalid_argument class and
+/// surfaces as InvalidArgument/400 instead of an internal fault. Everything
+/// else stays a spawn failure.
+fn spawn_failure_response(
+    execution_id: &str,
+    e: acrylmicrovm_shared::errors::AcrylMicrovmError,
+) -> ExecResponse {
+    match e {
+        acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(detail) => {
+            error_response(execution_id.to_string(), "invalid_argument", &detail)
+        }
+        e => spawn_error(execution_id, e.to_string()),
+    }
+}
+
+#[cfg(test)]
+mod spawn_failure_tests {
+    use super::*;
+
+    /// The exec-user contract (#2116): an unknown user or group reaches the
+    /// host as invalid_argument (→ 400), other spawn faults stay spawn_failed.
+    #[test]
+    fn spawn_failure_keeps_invalid_argument_class() {
+        let response = spawn_failure_response(
+            "exec-1",
+            acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument("User 'x' not found".into()),
+        );
+        assert_eq!(
+            response.error.as_ref().expect("error").reason,
+            "invalid_argument"
+        );
+
+        let response = spawn_failure_response(
+            "exec-1",
+            acrylmicrovm_shared::errors::AcrylMicrovmError::Internal("boom".into()),
+        );
+        assert_eq!(
+            response.error.as_ref().expect("error").reason,
+            "spawn_failed"
+        );
+    }
+}
+
+fn error_response(id: String, reason: &str, detail: &str) -> ExecResponse {
+    ExecResponse {
+        execution_id: id,
+        pid: 0,
+        started_at_ms: 0,
+        error: Some(ExecError {
+            reason: reason.to_string(),
+            detail: detail.to_string(),
+        }),
+    }
+}
+
+fn spawn_error(exec_id: &str, err: String) -> ExecResponse {
+    ExecResponse {
+        execution_id: exec_id.to_string(),
+        pid: 0,
+        started_at_ms: 0,
+        error: Some(ExecError {
+            reason: "spawn_failed".to_string(),
+            detail: err,
+        }),
+    }
+}
+
+fn now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64
+}
+
+enum SpawnedExecution {
+    Process(
+        exec_handle::ExecHandle,
+        Option<std::sync::Arc<tokio::sync::Mutex<crate::container::Container>>>,
+    ),
+    Rejected(crate::container::CommandRejection),
+}
+
+/// Spawn process with executor selected by ACRYLMICROVM_EXECUTOR env var.
+///
+/// Returns (ExecHandle, Option<container_ref>) — the container ref is provided
+/// when running inside a container, enabling init-death detection.
+///
+/// Syntax:
+/// - No env var or empty: use guest executor
+/// - "guest": run directly on guest VM
+/// - "container=<id>": run in container with specified ID
+async fn spawn_with_executor(
+    server: &GuestServer,
+    req: &ExecRequest,
+    execution_id: &str,
+    ssh_workload: Option<crate::service::ssh::SshWorkload>,
+) -> Result<SpawnedExecution, ExecResponse> {
+    let executor_value = req.env.get(executor_const::ENV_VAR).map(|s| s.as_str());
+
+    match executor_value {
+        Some(executor_const::GUEST) | None | Some("") => {
+            if ssh_workload.is_some() {
+                return Err(spawn_error(
+                    execution_id,
+                    "internal SSH workloads require a container executor".into(),
+                ));
+            }
+            // Guest executor (explicit or default)
+            debug!(execution_id = %execution_id, "Using GuestExecutor");
+            let handle = match GuestExecutor.spawn_attempt(req).await {
+                Ok(handle) => handle,
+                Err(crate::container::SpawnFailure::Rejected(rejection)) => {
+                    return Ok(SpawnedExecution::Rejected(rejection));
+                }
+                Err(crate::container::SpawnFailure::Failed(error)) => {
+                    return Err(spawn_error(execution_id, error.to_string()));
+                }
+            };
+            Ok(SpawnedExecution::Process(handle, None))
+        }
+        Some(s) if s.starts_with(executor_const::CONTAINER_KEY) => {
+            // Container executor: parse "container=<id>"
+            let container_id = s
+                .strip_prefix(executor_const::CONTAINER_KEY)
+                .and_then(|rest| rest.strip_prefix('='))
+                .unwrap_or("");
+            if container_id.is_empty() {
+                return Err(spawn_error(
+                    execution_id,
+                    format!("Invalid {}: missing container_id", executor_const::ENV_VAR),
+                ));
+            }
+            // Caller-controllable (a client can override ACRYLMICROVM_EXECUTOR in its
+            // exec env) and joined into a filesystem path below, so require a
+            // single normal component — `..`/`/…` must not escape containers/.
+            if !is_single_path_component(container_id) {
+                return Err(spawn_error(
+                    execution_id,
+                    format!(
+                        "Invalid {}: container_id must be a single path component",
+                        executor_const::ENV_VAR
+                    ),
+                ));
+            }
+            debug!(
+                execution_id = %execution_id,
+                container_id = %container_id,
+                "Using ContainerExecutor"
+            );
+            // Refuse cleanly when the container's init has already exited
+            // (docker semantics: no exec in a stopped container). Without
+            // this, the tenant build reaches libcontainer against a dead
+            // init and surfaces an opaque procfs internal error.
+            //
+            // Presence is the signal, not parseability: a torn record still
+            // means init is gone, and letting a bad parse fall through here
+            // would hand the exec straight back to the panic.
+            let exit_file = server.layout.shared().container(container_id).exit_file();
+            if exit_file.exists() {
+                let how = acrylmicrovm_shared::layout::ExitRecord::read(&exit_file).map_or_else(
+                    || "init exited".to_string(),
+                    |record| format!("init exited with code {}", record.exit_code),
+                );
+                return Err(spawn_error(
+                    execution_id,
+                    format!("container is not running: {how}"),
+                ));
+            }
+
+            // Look up container from registry
+            let container_arc = {
+                let containers_guard = server.containers.lock().await;
+                containers_guard.get(container_id).cloned().ok_or_else(|| {
+                    spawn_error(
+                        execution_id,
+                        format!("Container not found: {}", container_id),
+                    )
+                })?
+            };
+            let executor = ContainerExecutor::new(container_arc);
+            let container_ref = executor.container_ref();
+            let spawn = match ssh_workload.as_ref() {
+                Some(workload) => executor
+                    .spawn_ssh_workload(req, workload.clone())
+                    .await
+                    .map_err(crate::container::SpawnFailure::from),
+                None => executor.spawn_attempt(req).await,
+            };
+            let handle = match spawn {
+                Ok(h) => h,
+                Err(e) => {
+                    // Zombie revival: run -d's Container.Start handoff can be
+                    // lost when the creating CLI process exits before the RPC
+                    // leaves the machine — the container sits in Created while
+                    // the host has already marked the box Running. Re-issue the
+                    // start here: run_init is idempotent, and a start still in
+                    // flight holds the per-container lock, so this call queues
+                    // behind it and then no-ops. On success, retry the spawn
+                    // once (the lock must be dropped first — spawn takes it).
+                    let retry = revive_and_retry(
+                        &container_ref,
+                        move || async move {
+                            match ssh_workload {
+                                Some(workload) => executor
+                                    .spawn_ssh_workload(req, workload)
+                                    .await
+                                    .map_err(crate::container::SpawnFailure::from),
+                                None => executor.spawn_attempt(req).await,
+                            }
+                        },
+                        e,
+                    )
+                    .await;
+                    match retry {
+                        Ok(h) => h,
+                        Err(crate::container::SpawnFailure::Rejected(rejection)) => {
+                            return Ok(SpawnedExecution::Rejected(rejection));
+                        }
+                        Err(crate::container::SpawnFailure::Failed(e)) => {
+                            // Check if container init died — provide actionable diagnostics
+                            let mut container = container_ref.lock().await;
+                            if !container.is_running() {
+                                let (init_stdout, init_stderr) = container.drain_init_output();
+                                let mut msg = format!(
+                                    "Container init process exited — cannot exec. Error: {}",
+                                    e
+                                );
+                                if !init_stdout.is_empty() {
+                                    msg.push_str(&format!(". Init stdout: {}", init_stdout.trim()));
+                                }
+                                if !init_stderr.is_empty() {
+                                    msg.push_str(&format!(". Init stderr: {}", init_stderr.trim()));
+                                }
+                                return Err(spawn_error(execution_id, msg));
+                            }
+                            return Err(spawn_failure_response(execution_id, e));
+                        }
+                    }
+                }
+            };
+            Ok(SpawnedExecution::Process(handle, Some(container_ref)))
+        }
+        Some(unknown) => {
+            // Unknown executor value
+            Err(spawn_error(
+                execution_id,
+                format!(
+                    "Unknown {} value: '{}'. Expected 'guest' or 'container=<id>'",
+                    executor_const::ENV_VAR,
+                    unknown
+                ),
+            ))
+        }
+    }
+}
+
+/// One revival attempt for a failed exec spawn.
+///
+/// Retries via `spawn_again` only when the container is provably not running:
+/// a non-running container can never have spawned the command (libcontainer
+/// refuses to build into Created), so the first failure was the Created-window
+/// build error and one retry after run_init is safe. A *running* container
+/// must NOT be retried: `spawn_request` can fail in Phase 2 (the PTY console
+/// handshake) after Phase 1 already spawned the process, and a retry would
+/// execute the user's command twice. A Stopped container fails run_init and
+/// the original error is returned unchanged.
+async fn revive_and_retry<F, Fut, E>(
+    container_ref: &std::sync::Arc<tokio::sync::Mutex<crate::container::Container>>,
+    spawn_again: F,
+    original_error: E,
+) -> Result<exec_handle::ExecHandle, E>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<exec_handle::ExecHandle, E>>,
+{
+    let revive = {
+        let container = container_ref.lock().await;
+        !container.is_running() && container.run_init().is_ok()
+    };
+    if revive {
+        spawn_again().await
+    } else {
+        Err(original_error)
+    }
+}
+
+/// True when `id` is a single normal path component (no `..`, `/`, or a prefix),
+/// so joining it under `containers/` cannot escape that directory. Real container
+/// ids are 64-char hex, so this never rejects a legitimate one.
+fn is_single_path_component(id: &str) -> bool {
+    let mut components = std::path::Path::new(id).components();
+    matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none()
+}
+
+#[cfg(test)]
+mod container_id_path_tests {
+    use super::{
+        execution_id_for_request, is_single_path_component, revive_and_retry, start_execution,
+        GuestServer, TtyResize,
+    };
+    use crate::layout::GuestLayout;
+    use crate::reaper::ExitSlot;
+    use crate::service::exec::error::ExecutionError;
+    use crate::service::exec::exec_handle::{ExecHandle, ExitStatus};
+    use crate::service::exec::output::{OutputStreamSummary, OutputTerminalSummary};
+    use crate::service::exec::state::{ExecutionExit, ExecutionState, TerminalSnapshot};
+    use acrylmicrovm_shared::errors::AcrylMicrovmError;
+    use acrylmicrovm_shared::{exec_output, ExecStdin};
+    use nix::unistd::{pipe, write, Pid};
+
+    /// The retry gate must not re-spawn when the container is already running:
+    /// `spawn_request` can fail after spawning (the PTY console handshake), and
+    /// a retry would execute the user's command twice. With the old
+    /// `is_running() || run_init()` condition the assertion below fails:
+    /// "a running container must not be retried — the command may already have
+    /// been spawned".
+    #[tokio::test]
+    async fn failed_spawn_on_a_running_container_is_not_retried() {
+        use crate::container::Container;
+        use libcontainer::container::{ContainerStatus, State};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use tokio::sync::Mutex;
+
+        // Running state with our own (alive) pid — the same trick as
+        // `run_init_is_noop_when_init_already_running` in lifecycle.rs.
+        let dir = tempfile::TempDir::new().expect("create temp dir");
+        let state_root = dir
+            .path()
+            .parent()
+            .expect("temp dir has a parent")
+            .to_path_buf();
+        let id = dir
+            .path()
+            .file_name()
+            .expect("temp dir has a name")
+            .to_string_lossy()
+            .to_string();
+        let state = State::new(
+            &id,
+            ContainerStatus::Running,
+            Some(i32::try_from(std::process::id()).expect("current pid fits in i32")),
+            dir.path().to_path_buf(),
+        );
+        state.save(dir.path()).expect("save libcontainer state");
+
+        let container = Container::for_unit_test(&id, state_root, dir.path().join("bundle"));
+        let container_ref = Arc::new(Mutex::new(container));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_closure = Arc::clone(&calls);
+        let original = AcrylMicrovmError::Internal("first spawn failed".into());
+
+        let result = revive_and_retry(
+            &container_ref,
+            move || {
+                let calls = Arc::clone(&calls_for_closure);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    Err::<ExecHandle, _>(AcrylMicrovmError::Internal("retry ran".into()))
+                }
+            },
+            original,
+        )
+        .await;
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "a running container must not be retried — the command may already have been spawned"
+        );
+        assert!(result.is_err(), "the original error must be returned");
+    }
+
+    #[test]
+    fn rejects_ids_that_would_escape_the_containers_dir() {
+        for bad in ["../../etc", "/etc/passwd", "a/b", "..", ".", ""] {
+            assert!(!is_single_path_component(bad), "must reject {bad:?}");
+        }
+        assert!(is_single_path_component(
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        ));
+    }
+
+    #[test]
+    fn public_exec_rejects_a_caller_supplied_execution_id() {
+        assert!(execution_id_for_request(Some("caller-id"), false).is_err());
+        assert_eq!(
+            execution_id_for_request(Some("ssh-id"), true).unwrap(),
+            "ssh-id"
+        );
+    }
+
+    /// A failure that is not a command refusal still reaches the host as an error.
+    #[tokio::test]
+    async fn guest_executor_spawn_failure_is_reported_as_an_error() {
+        use acrylmicrovm_shared::ExecRequest;
+        use std::collections::HashMap;
+
+        let server = GuestServer::new(GuestLayout::new());
+        let req = ExecRequest {
+            execution_id: None,
+            program: "sh".to_string(),
+            args: Vec::new(),
+            env: HashMap::from([("ACRYLMICROVM_EXECUTOR".to_string(), "guest".to_string())]),
+            workdir: "/pol55/no-such-directory".to_string(),
+            timeout_ms: 0,
+            tty: None,
+            user: None,
+        };
+
+        let response = start_execution(&server, req, None).await;
+
+        let error = response.error.expect("a spawn failure must stay an error");
+        assert_eq!(error.reason, "spawn_failed", "{}", error.detail);
+    }
+
+    /// `ACRYLMICROVM_EXECUTOR=guest` runs the command directly in the guest. A
+    /// program that cannot be executed is the caller's POSIX outcome there
+    /// too, not a spawn fault, so it must publish like any exec result.
+    #[tokio::test]
+    async fn guest_executor_missing_program_is_a_completed_execution() {
+        use acrylmicrovm_shared::ExecRequest;
+        use std::collections::HashMap;
+
+        let server = GuestServer::new(GuestLayout::new());
+        let req = ExecRequest {
+            execution_id: None,
+            program: "pol55-missing-program".to_string(),
+            args: Vec::new(),
+            env: HashMap::from([("ACRYLMICROVM_EXECUTOR".to_string(), "guest".to_string())]),
+            workdir: String::new(),
+            timeout_ms: 0,
+            tty: None,
+            user: None,
+        };
+
+        let response = start_execution(&server, req, None).await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(response.pid, 0, "a rejected spawn reports no process");
+        let exit = server.wait_execution(&response.execution_id).await.unwrap();
+        assert_eq!(exit.exit_code, 127);
+        let mut output = server
+            .attach_execution(&response.execution_id)
+            .await
+            .unwrap();
+        let event = output.recv().await.unwrap().unwrap();
+        let diagnostic = match event.event.unwrap() {
+            exec_output::Event::Stderr(stderr) => String::from_utf8(stderr.data).unwrap(),
+            event => panic!("diagnostic must arrive on stderr: {event:?}"),
+        };
+        assert!(diagnostic.contains("pol55-missing-program"), "{diagnostic}");
+        assert!(
+            diagnostic.trim_end().ends_with("not found in $PATH"),
+            "{diagnostic}"
+        );
+    }
+
+    /// TTY requests take the PTY spawn branch instead of the pipe branch, and
+    /// the rejection diagnostic must land on the merged stdout stream there.
+    #[tokio::test]
+    async fn guest_executor_missing_program_with_tty_is_a_completed_execution() {
+        use acrylmicrovm_shared::ExecRequest;
+        use std::collections::HashMap;
+
+        let server = GuestServer::new(GuestLayout::new());
+        let req = ExecRequest {
+            execution_id: None,
+            program: "pol55-missing-tty-program".to_string(),
+            args: Vec::new(),
+            env: HashMap::from([("ACRYLMICROVM_EXECUTOR".to_string(), "guest".to_string())]),
+            workdir: String::new(),
+            timeout_ms: 0,
+            tty: Some(acrylmicrovm_shared::TtyConfig {
+                rows: 24,
+                cols: 80,
+                x_pixels: 0,
+                y_pixels: 0,
+                modes: Vec::new(),
+            }),
+            user: None,
+        };
+
+        let response = start_execution(&server, req, None).await;
+
+        assert!(response.error.is_none(), "{:?}", response.error);
+        assert_eq!(response.pid, 0, "a rejected spawn reports no process");
+        let exit = server.wait_execution(&response.execution_id).await.unwrap();
+        assert_eq!(exit.exit_code, 127);
+        let mut output = server
+            .attach_execution(&response.execution_id)
+            .await
+            .unwrap();
+        let event = output.recv().await.unwrap().unwrap();
+        let diagnostic = match event.event.unwrap() {
+            exec_output::Event::Stdout(stdout) => String::from_utf8(stdout.data).unwrap(),
+            event => panic!("a TTY rejection must arrive on merged stdout: {event:?}"),
+        };
+        assert!(
+            diagnostic.contains("pol55-missing-tty-program"),
+            "{diagnostic}"
+        );
+        assert!(
+            diagnostic.trim_end().ends_with("not found in $PATH"),
+            "{diagnostic}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_executions_finish_and_replay_on_the_requested_stream() {
+        for (tty, exit_code) in [(false, 127), (false, 126), (true, 127), (true, 126)] {
+            let server = GuestServer::new(GuestLayout::new());
+            let state = ExecutionState::rejected(
+                crate::container::CommandRejection {
+                    message: "executable 'unavailable' cannot run".into(),
+                    exit_code,
+                },
+                tty,
+            )
+            .await;
+            assert!(
+                server
+                    .registry
+                    .register("rejected".into(), state.clone())
+                    .await
+            );
+
+            let exit = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                server.wait_execution("rejected"),
+            )
+            .await
+            .expect("a rejection must finish without a process")
+            .unwrap();
+            assert_eq!(exit.exit_code, exit_code);
+            assert_eq!(exit.signal, 0);
+            assert!(!server.kill_execution("rejected", 15, true).await.unwrap());
+            assert!(matches!(
+                server
+                    .send_execution_input(
+                        ExecStdin {
+                            execution_id: "rejected".into(),
+                            data: b"input after rejection".to_vec(),
+                            close: true,
+                        },
+                        futures::stream::empty(),
+                    )
+                    .await,
+                Err(ExecutionError::HandleUnavailable)
+            ));
+
+            // Terminal output must remain replayable even if wait completed first.
+            let snapshot = state.wait_terminal_snapshot("rejected").await;
+            let retained_bytes = state.retained_output_bytes().await;
+            assert!(
+                server
+                    .registry
+                    .retain("rejected", snapshot, retained_bytes)
+                    .await
+            );
+            let mut output = server.attach_execution("rejected").await.unwrap();
+            let data = match output.recv().await.unwrap().unwrap().event.unwrap() {
+                exec_output::Event::Stdout(data) if tty => data.data,
+                exec_output::Event::Stderr(data) if !tty => data.data,
+                event => panic!("diagnostic arrived on the wrong stream: {event:?}"),
+            };
+            assert!(data.ends_with(b"\n"), "diagnostic must terminate its line");
+            match output.recv().await.unwrap().unwrap().event.unwrap() {
+                exec_output::Event::Stdout(end) if tty => {
+                    assert_eq!(end.total_bytes, Some(data.len() as u64));
+                    assert!(end.data.is_empty());
+                }
+                exec_output::Event::Stderr(end) if !tty => {
+                    assert_eq!(end.total_bytes, Some(data.len() as u64));
+                    assert!(end.data.is_empty());
+                }
+                event => panic!("missing diagnostic stream end: {event:?}"),
+            }
+            assert!(output.recv().await.is_none());
+            assert_eq!(server.wait_execution("rejected").await.unwrap(), exit);
+            server.registry.shutdown_all(1_000).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn tombstone_routes_terminal_rpcs_without_reopening_the_process() {
+        let server = GuestServer::new(GuestLayout::new());
+        server
+            .registry
+            .store_tombstone(
+                "terminal-exec".into(),
+                TerminalSnapshot {
+                    exit: ExecutionExit {
+                        exit_code: 9,
+                        signal: 0,
+                        error_message: String::new(),
+                    },
+                    output: OutputTerminalSummary {
+                        stdout: OutputStreamSummary {
+                            enabled: true,
+                            total_bytes: 4,
+                        },
+                        stderr: OutputStreamSummary {
+                            enabled: false,
+                            total_bytes: 0,
+                        },
+                        reader_failure: None,
+                    },
+                },
+            )
+            .await;
+
+        assert_eq!(
+            server
+                .wait_execution("terminal-exec")
+                .await
+                .unwrap()
+                .exit_code,
+            9
+        );
+        assert_eq!(
+            server
+                .wait_execution("terminal-exec")
+                .await
+                .unwrap()
+                .exit_code,
+            9
+        );
+
+        let mut output = server.attach_execution("terminal-exec").await.unwrap();
+        let event = output.recv().await.unwrap().unwrap();
+        let Some(exec_output::Event::Stdout(stdout)) = event.event else {
+            panic!("tombstone attach must return stdout terminal event");
+        };
+        assert!(stdout.data.is_empty());
+        assert_eq!(stdout.offset, Some(4));
+        assert_eq!(stdout.total_bytes, Some(4));
+
+        let input = ExecStdin {
+            execution_id: "terminal-exec".into(),
+            data: Vec::new(),
+            close: true,
+        };
+        assert!(matches!(
+            server
+                .send_execution_input(
+                    input,
+                    futures::stream::empty::<Result<ExecStdin, ExecutionError>>()
+                )
+                .await,
+            Err(ExecutionError::HandleUnavailable)
+        ));
+        assert!(!server
+            .kill_execution("terminal-exec", 15, false)
+            .await
+            .unwrap());
+        assert!(matches!(
+            server
+                .resize_execution_tty("terminal-exec", 24, 80, 0, 0)
+                .await,
+            Ok(TtyResize::Rejected(ExecutionError::HandleUnavailable))
+        ));
+    }
+
+    #[tokio::test]
+    async fn reader_failure_tombstone_attach_returns_the_stored_internal_error() {
+        let server = GuestServer::new(GuestLayout::new());
+        server
+            .registry
+            .store_tombstone(
+                "reader-failure".into(),
+                TerminalSnapshot {
+                    exit: ExecutionExit {
+                        exit_code: 0,
+                        signal: 0,
+                        error_message: String::new(),
+                    },
+                    output: OutputTerminalSummary {
+                        stdout: OutputStreamSummary {
+                            enabled: true,
+                            total_bytes: 7,
+                        },
+                        stderr: OutputStreamSummary {
+                            enabled: false,
+                            total_bytes: 0,
+                        },
+                        reader_failure: Some("stdout reader failed".into()),
+                    },
+                },
+            )
+            .await;
+
+        let mut output = server.attach_execution("reader-failure").await.unwrap();
+        let error = output.recv().await.unwrap().unwrap_err();
+        assert_eq!(error.code(), tonic::Code::Internal);
+        assert_eq!(error.message(), "stdout reader failed");
+        assert!(output.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn retained_attach_returns_terminal_output_after_the_ring_is_sealed() {
+        let server = GuestServer::new(GuestLayout::new());
+        let (_stdin_peer, stdin) = pipe().unwrap();
+        let (stdout, stdout_peer) = pipe().unwrap();
+        let (stderr, stderr_peer) = pipe().unwrap();
+        drop(stdout_peer);
+        drop(stderr_peer);
+        let handle = ExecHandle::new(Pid::from_raw(13_001), stdin, stdout, Some(stderr))
+            .expect("test pipes must register with Tokio");
+        let state = ExecutionState::new_for_test(handle, ExitSlot::settled(ExitStatus::Code(0)));
+        let snapshot = state.wait_terminal_snapshot("retained-exec").await;
+        server
+            .registry
+            .register("retained-exec".into(), state)
+            .await;
+        assert!(server.registry.retain("retained-exec", snapshot, 0).await);
+
+        let mut output = server.attach_execution("retained-exec").await.unwrap();
+        let event = output.recv().await.unwrap().unwrap();
+        let Some(exec_output::Event::Stdout(stdout)) = event.event else {
+            panic!("retained attach must return stdout terminal event");
+        };
+        assert!(stdout.data.is_empty());
+        assert_eq!(stdout.offset, Some(0));
+        assert_eq!(stdout.total_bytes, Some(0));
+    }
+
+    #[tokio::test]
+    async fn retained_attach_replays_buffered_output_before_its_terminal_event() {
+        let server = GuestServer::new(GuestLayout::new());
+        let (_stdin_peer, stdin) = pipe().unwrap();
+        let (stdout, stdout_peer) = pipe().unwrap();
+        let (stderr, stderr_peer) = pipe().unwrap();
+        write(&stdout_peer, b"snapshot-data").unwrap();
+        drop(stdout_peer);
+        drop(stderr_peer);
+        let handle = ExecHandle::new(Pid::from_raw(13_004), stdin, stdout, Some(stderr))
+            .expect("test pipes must register with Tokio");
+        let state = ExecutionState::new_for_test(handle, ExitSlot::settled(ExitStatus::Code(0)));
+        let snapshot = state.wait_terminal_snapshot("retained-output-exec").await;
+        server
+            .registry
+            .register("retained-output-exec".into(), state)
+            .await;
+        assert!(
+            server
+                .registry
+                .retain("retained-output-exec", snapshot, b"snapshot-data".len())
+                .await
+        );
+
+        let mut output = server
+            .attach_execution("retained-output-exec")
+            .await
+            .unwrap();
+        let mut saw_data = false;
+        while let Some(event) = output.recv().await {
+            let Some(exec_output::Event::Stdout(stdout)) = event.unwrap().event else {
+                continue;
+            };
+            if !saw_data {
+                assert_eq!(stdout.data, b"snapshot-data");
+                assert_eq!(stdout.offset, Some(0));
+                assert_eq!(stdout.total_bytes, None);
+                saw_data = true;
+                continue;
+            }
+            assert!(stdout.data.is_empty());
+            assert_eq!(stdout.offset, Some(b"snapshot-data".len() as u64));
+            assert_eq!(stdout.total_bytes, Some(b"snapshot-data".len() as u64));
+            return;
+        }
+        panic!("retained attach must replay stdout before its terminal event");
+    }
+
+    #[tokio::test]
+    async fn sealed_live_attach_returns_terminal_output_while_retention_is_pending() {
+        let server = GuestServer::new(GuestLayout::new());
+        let (_stdin_peer, stdin) = pipe().unwrap();
+        let (stdout, stdout_peer) = pipe().unwrap();
+        let (stderr, stderr_peer) = pipe().unwrap();
+        drop(stdout_peer);
+        drop(stderr_peer);
+        let handle = ExecHandle::new(Pid::from_raw(13_002), stdin, stdout, Some(stderr))
+            .expect("test pipes must register with Tokio");
+        let state = ExecutionState::new_for_test(handle, ExitSlot::settled(ExitStatus::Code(0)));
+        state.wait_terminal_output_summary().await;
+        server
+            .registry
+            .register("sealed-live-exec".into(), state)
+            .await;
+
+        let mut output = server.attach_execution("sealed-live-exec").await.unwrap();
+        let event = output.recv().await.unwrap().unwrap();
+        let Some(exec_output::Event::Stdout(stdout)) = event.event else {
+            panic!("sealed live attach must return stdout terminal event");
+        };
+        assert!(stdout.data.is_empty());
+        assert_eq!(stdout.total_bytes, Some(0));
+    }
+
+    #[tokio::test]
+    async fn sealed_live_attach_returns_terminal_output_after_resource_release() {
+        let server = GuestServer::new(GuestLayout::new());
+        let (_stdin_peer, stdin) = pipe().unwrap();
+        let (stdout, stdout_peer) = pipe().unwrap();
+        let (stderr, stderr_peer) = pipe().unwrap();
+        drop(stdout_peer);
+        drop(stderr_peer);
+        let handle = ExecHandle::new(Pid::from_raw(13_003), stdin, stdout, Some(stderr))
+            .expect("test pipes must register with Tokio");
+        let state = ExecutionState::new_for_test(handle, ExitSlot::settled(ExitStatus::Code(0)));
+        state.wait_terminal_output_summary().await;
+        server
+            .registry
+            .register("released-sealed-live-exec".into(), state.clone())
+            .await;
+        assert!(state.release_resources().await);
+
+        let mut output = server
+            .attach_execution("released-sealed-live-exec")
+            .await
+            .expect("sealed live state must retain its terminal output");
+        let event = output.recv().await.unwrap().unwrap();
+        let Some(exec_output::Event::Stdout(stdout)) = event.event else {
+            panic!("released sealed live attach must return stdout terminal event");
+        };
+        assert!(stdout.data.is_empty());
+        assert_eq!(stdout.total_bytes, Some(0));
+    }
+}

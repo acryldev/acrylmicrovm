@@ -1,0 +1,1090 @@
+# ACRYL microVMs Python SDK
+
+Python bindings for ACRYL microVMs - an embeddable virtual machine runtime for secure, isolated code execution.
+
+Access the [agent API](../../docs/reference/agents.md) through `Box.agents`
+and `SimpleBox.agents`, including synchronous wrappers, grouped options and error handling.
+
+**Upgrade notice:** existing local boxes with secrets must be recreated with explicit
+`headers`, including boxes managed by `acrylmicrovm serve`. See the
+[required-headers migration notes](../../docs/reference/configuration.md#secrets).
+
+## Managed checkpoints
+
+Checkpoint settings must be omitted, including explicit defaults such as
+`detach=False`, `tty=False`, or `advanced=AdvancedBoxOptions(privileged=False)`.
+Explicit empty `env`, `volumes`, `ports`, or `secrets` lists also reject.
+Omitted collection arguments default to `None` and normalize to empty lists;
+ordinary image creation continues accepting empty lists.
+
+A checkpoint is a source for a new box, like an image: pass it to the ordinary
+create call. The checkpoint handle only manages checkpoints. Archive import is a
+separate operation for local `.acrylmicrovm` files and is unchanged. The CLI form is
+`acrylmicrovm create --checkpoint ID [--name NAME]`.
+
+The source must be stopped before `create`; stop it and wait for `stopped` first.
+Checkpoint creation rejects other states and never stops the source automatically.
+
+On REST runtimes, `runtime.checkpoints` exposes async `create(source, name=None)`, `list()`,
+`get(key)` and `remove(key, force=False)`. `SyncAcrylMicrovm.checkpoints` exposes the same
+operations synchronously. These independent archives survive source deletion.
+
+```python
+checkpoint = await runtime.checkpoints.create("source", "dev-base")
+worker = await runtime.create(BoxOptions(checkpoint=checkpoint.id), name="worker")
+```
+
+A box created from a checkpoint inherits all saved execution settings. Setting any
+other `BoxOptions` field, including `image` or `rootfs_path`, raises an
+invalid-argument error before a request is sent. A cloud capture can initially report
+`creating`; query it until `ready` before use. Force removal only ignores absence.
+Storage belongs to the server. Local runtime checkpoint operations, including
+`create` with a checkpoint, raise an unsupported-operation error.
+See [CLI lifecycle details](../../src/cli/README.md#checkpoint-management).
+
+## Overview
+
+The ACRYL microVMs Python SDK provides a Pythonic API for creating and managing isolated execution environments. Built with PyO3, it wraps the Rust ACRYL microVMs runtime with async-first Python bindings.
+
+**Python:** 3.10+
+**Platforms:** macOS (Apple Silicon), Linux (x86_64, ARM64)
+
+### Key Features
+
+- **Async-first API** - All I/O operations use async/await
+- **Context managers** - Automatic cleanup with `async with`
+- **Streaming I/O** - Real-time stdout/stderr as execution happens
+- **Multiple box types** - SimpleBox, CodeBox, BrowserBox, ComputerBox, InteractiveBox
+- **Resource control** - Configure CPUs, memory, volumes, ports
+- **OCI compatible** - Use any Docker/OCI image
+
+## Installation
+
+```bash
+pip install acrylmicrovm
+```
+
+Requires Python 3.10 or later.
+
+### Verify Installation
+
+```python
+import acrylmicrovm
+
+print(acrylmicrovm.__version__)  # Prints installed package version
+```
+
+### System Requirements
+
+| Platform | Architecture  | Requirements                        |
+|----------|---------------|-------------------------------------|
+| macOS    | Apple Silicon | macOS 12+                           |
+| Linux    | x86_64, ARM64 | KVM enabled (`/dev/kvm` accessible) |
+
+On Linux, verify KVM is available:
+```bash
+grep -E 'vmx|svm' /proc/cpuinfo  # Should show CPU virtualization support
+ls -l /dev/kvm                    # Should exist and be accessible
+```
+
+## Quick Start
+
+### Basic Execution
+
+```python
+import asyncio
+import acrylmicrovm
+
+
+async def main():
+    # Create a box and run a command
+    async with acrylmicrovm.SimpleBox(image="python:slim") as box:
+        result = await box.exec("python", "-c", "print('Hello from AcrylMicrovm!')")
+        print(result.stdout)
+        # Output: Hello from AcrylMicrovm!
+
+
+asyncio.run(main())
+```
+
+### Code Execution (AI Agents)
+
+```python
+import asyncio
+import acrylmicrovm
+
+
+async def main():
+    # Execute untrusted Python code safely
+    code = """
+import requests
+response = requests.get('https://api.github.com/zen')
+print(response.text)
+"""
+
+    async with acrylmicrovm.CodeBox() as codebox:
+        # CodeBox automatically installs packages
+        result = await codebox.run(code)
+        print(result)
+
+
+asyncio.run(main())
+```
+
+## Core API Reference
+
+### Runtime Management
+
+#### `acrylmicrovm.AcrylMicrovm`
+
+The main runtime for creating and managing boxes.
+
+**Methods:**
+
+- `AcrylMicrovm.default() -> AcrylMicrovm`
+  Create runtime with default settings (`~/.acryl/microvm`)
+
+- `AcrylMicrovm(options: Options) -> AcrylMicrovm`
+  Create runtime with custom options
+
+- `async create(box_options: BoxOptions) -> Box`
+  Create a new box with specified configuration
+
+- `async get(box_id: str) -> Optional[Box]`
+  Reattach to an existing box by ID
+
+- `async get_info(box_id: str) -> Optional[BoxInfo]`
+  Get current metadata for a box by ID or name
+
+- `async list_info() -> List[BoxInfo]`
+  List all boxes (running and stopped)
+
+- `async metrics() -> RuntimeMetrics`
+  Get runtime-wide metrics
+
+**Example:**
+
+```python
+# Default runtime
+runtime = acrylmicrovm.AcrylMicrovm.default()
+
+# Custom runtime with different home directory
+runtime = acrylmicrovm.AcrylMicrovm(acrylmicrovm.Options(home_dir="/custom/path"))
+
+# Custom registry host with basic auth
+runtime = acrylmicrovm.AcrylMicrovm(
+    acrylmicrovm.Options(
+        image_registries=[
+            acrylmicrovm.ImageRegistry(
+                host="registry.example.com",
+                username="user",
+                password="password",
+            )
+        ]
+    )
+)
+
+# Create a box
+box = await runtime.create(acrylmicrovm.BoxOptions(image="alpine:latest"))
+
+# Reattach to existing box
+box = await runtime.get("01JJNH8...")
+
+# List all boxes
+boxes = await runtime.list_info()
+for info in boxes:
+    print(f"{info.id}: {info.state.status}")
+```
+
+#### Runtime Image Management
+
+`runtime.images` holds the images a runtime can boot from: the local cache on
+an embedded runtime, the server's catalog on `AcrylMicrovm.rest(...)`. The same
+code runs against either; `pull` is local only (a REST runtime pulls when a
+box is created) and `usage`, `create_alias` and `delete_alias` are REST only.
+
+```python
+runtime = acrylmicrovm.AcrylMicrovm.default()
+
+for image in await runtime.images.list():
+    print(image.repository, image.tag, image.id)
+
+detail = await runtime.images.get("docker.io/library/alpine")
+print(detail.aliases, [version.digest for version in detail.versions])
+await runtime.images.remove("docker.io/library/alpine")
+```
+
+`pull` fills a local cache ahead of time. A REST runtime refuses it with
+`UnsupportedError`, because creating a box there pulls the image:
+
+```python
+pull = await runtime.images.pull("alpine:latest")
+print(pull.reference, pull.config_digest, pull.layer_count)
+```
+
+See [the Python reference](../../docs/reference/python/README.md#acrylmicrovmimagehandle)
+for each method on each runtime.
+
+#### Private Registry Logins
+
+On `AcrylMicrovm.rest(...)`, `runtime.images.registries` manages the logins the server
+pulls private images with. The password goes up once and is never returned.
+A local runtime raises `UnsupportedError`: pass `image_registries` to
+`acrylmicrovm.Options` instead.
+
+```python
+runtime = acrylmicrovm.AcrylMicrovm.rest(acrylmicrovm.AcrylMicrovmRestOptions.from_env())
+
+login = await runtime.images.registries.create(
+    registry_host="ghcr.io",
+    repository_prefix="acme/",  # leave out for the whole registry
+    username="acme-bot",
+    password=os.environ["GHCR_TOKEN"],
+)
+box = await runtime.create(acrylmicrovm.BoxOptions(image="ghcr.io/acme/private-app:1"))
+...
+await runtime.images.registries.remove(login.id)  # refused while a box pulls through it
+```
+
+See [the Python reference](../../docs/reference/python/README.md#acrylmicrovmregistryhandle).
+
+### Remote ACRYL microVMs server (REST)
+
+Connect to a remote ACRYL microVMs server instead of the local runtime. Auth
+uses a credential class: `ApiKeyCredential` is a concrete
+implementation of the `Credential` ABC.
+
+```python
+from acrylmicrovm import AcrylMicrovm, AcrylMicrovmRestOptions, ApiKeyCredential
+
+rt = AcrylMicrovm.rest(
+    AcrylMicrovmRestOptions(
+        url="http://localhost:8100",
+        credential=ApiKeyCredential("your-api-key"),
+    )
+)
+boxes = await rt.list_info()
+
+# Env discovery — returns None when ACRYLMICROVM_API_KEY is unset:
+cred = ApiKeyCredential.from_env()
+
+# Or read everything (ACRYLMICROVM_REST_URL + ACRYLMICROVM_API_KEY) from the env:
+rt = AcrylMicrovm.rest(AcrylMicrovmRestOptions.from_env())
+```
+
+`isinstance(ApiKeyCredential(k), Credential)` is `True` (registered as
+a virtual subclass), so code can type-check against the `Credential`
+ABC and accept any future credential kind unchanged.
+
+#### Routing prefix (vendor-agnostic)
+
+Box-scoped requests resolve to `{url}/v1/{prefix}/…`. The
+`v1` segment is hardcoded; `path_prefix` is an opaque, deployment-
+defined routing value that the server tells the client to use via
+`Principal.path_prefix` from `GET /v1/me`. The slot's semantics
+are vendor-specific: acrylmicrovm cloud uses it for the organization
+id; another deployment may use a workspace name, a region+team
+pair, or any other multi-segment value such as `us-east/team-42`.
+
+```python
+rt = AcrylMicrovm.rest(
+    AcrylMicrovmRestOptions(
+        url="https://api.webboxes.ai",
+        credential=ApiKeyCredential("blk_live_…"),
+        path_prefix="acme",  # → requests hit /v1/acme/boxes
+    )
+)
+```
+
+When `path_prefix` is unset or empty, the client builds URLs
+without the segment (`/v1/boxes/…`) — the canonical shape for
+single-tenant deployments such as the local `acrylmicrovm serve`
+reference server.
+
+The CLI captures `Principal.path_prefix` at login and caches it
+under the active profile, so subsequent `acrylmicrovm` commands route
+correctly without an extra flag.
+
+### Box Configuration
+
+#### `acrylmicrovm.BoxOptions`
+
+Configuration options for creating a box.
+
+**Parameters:**
+
+- `image: str` - OCI image URI (default: `"python:slim"`)
+- `cpus: float` - CPU allocation (default: 1, range: 0.125–16, step: 0.001); fractions require a Linux execution host
+- `memory_mib: int` - Memory in MiB (default: 512, range: 128-65536)
+- `disk_size_gb: int | None` - Container disk size in GB, never smaller than the image (default: None, the image size)
+- `working_dir: str` - Working directory in container (default: `"/root"`)
+- `env: List[Tuple[str, str]]` - Environment variables as (key, value) pairs
+- `volumes: List[Tuple | Dict]` - Volume mounts; a tuple is a host bind, a dict takes `managed_volume` (id or name) or `host_path`
+  - `read_only` is a bool and defaults to `False`
+- `network: NetworkSpec | None` - Structured network configuration
+- `ports: List[Tuple | Dict]` - Local TCP forwarding; omit `host_port` in a dict for automatic allocation
+  - Protocol: `"tcp"`; UDP is rejected
+  - Portable local/remote code uses `box.network.tunnel(("127.0.0.1", port), TunnelOptions(is_public=True))`;
+    pass `False` for a private cloud tunnel. Call `forward()` for a listener;
+    connections reuse the declaration and cannot undo revocation. See
+    [private tunnel examples](../../docs/concepts/networking.md#private-cloud-tunnels).
+- `secrets: List[Secret]` - Secrets overwrite configured headers already present on outbound HTTPS requests.
+  `Secret(..., headers={"x-goog-api-key": "{value}"})` selects a raw API key header;
+  multiple entries share the same secret value. Each template must contain exactly one `{value}`.
+  `headers` is a required keyword argument; omission, `None`, empty maps and strings are rejected.
+- `advanced: AdvancedBoxOptions | None` - Expert-only container options
+  - `capabilities.add: List[str]` - Capabilities added to ACRYL microVMs' baseline
+  - `capabilities.drop: List[str]` - Capabilities removed from the resulting set
+- `auto_delete: int | None` - `0` keeps the box after stop; above `0`, a REST runtime deletes it that many seconds after stop and a local runtime at stop. Default `None` keeps the runtime's default (`auto_remove` locally)
+- `auto_remove: bool` - Deprecated: use `auto_delete`. Auto cleanup after stop (default: True)
+
+`NetworkSpec` uses:
+
+- `outbound: OutboundNetworkSpec` - Guest egress policy
+- `inbound: InboundNetworkSpec` - Service access policy (default: `mode="disabled"`, unreachable from outside)
+
+The pre-split form `NetworkSpec(mode=..., allow_net=...)` still works and
+configures the outbound direction, positionally as well as by keyword.
+Supplying it together with `outbound` raises `ValueError`. `spec.mode` and
+`spec.allow_net` remain readable as views onto `outbound`.
+
+`allow_net` restricts both TCP and UDP egress. Hostname entries are enforced by
+inspecting TLS SNI / HTTP Host, which only TCP carries, so an `allow_net`
+holding only hostnames denies all UDP egress — add the IP or CIDR to keep UDP
+open. A host matched by a configured `Secret` is additionally reachable on port
+443 without a rule of its own, so `allow_net` is not the only egress gate. The
+connection is dialed by name, and under a non-empty `allow_net` an answer in a
+private, loopback or CGNAT range is refused unless an IP or CIDR rule covers it.
+
+`mode="disabled"` removes the guest network interface entirely.
+
+**Example:**
+
+```python
+options = acrylmicrovm.BoxOptions(
+    image="postgres:latest",
+    cpus=2,
+    memory_mib=1024,
+    disk_size_gb=10,  # 10 GB disk
+    env=[
+        ("POSTGRES_PASSWORD", "secret"),
+        ("POSTGRES_DB", "mydb"),
+    ],
+    volumes=[
+        ("/host/data", "/mnt/data", True),  # Read-only mount
+    ],
+    ports=[
+        (5432, 5432, "tcp"),  # PostgreSQL
+    ],
+    network=acrylmicrovm.NetworkSpec(
+        outbound=acrylmicrovm.OutboundNetworkSpec(
+            mode="enabled",
+            allow_net=["api.openai.com"],
+        ),
+        inbound=acrylmicrovm.InboundNetworkSpec(mode="disabled"),
+    ),
+    advanced=acrylmicrovm.AdvancedBoxOptions(
+        capabilities=acrylmicrovm.ContainerCapabilities(
+            add=["NET_ADMIN"],
+            drop=["NET_RAW"],
+        ),
+    ),
+    secrets=[
+        acrylmicrovm.Secret(
+            name="openai",
+            value="sk-...",
+            hosts=["api.openai.com"],
+            headers={"Authorization": "Bearer {value}"},
+        ),
+    ],
+)
+box = await runtime.create(options)
+```
+
+### Box Handle
+
+#### `acrylmicrovm.Box`
+
+Handle to a running or stopped box.
+
+**Properties:**
+
+- `id: str` - Unique box identifier (ULID format)
+
+**Methods:**
+
+- `exec(command, args=None, env=None, tty=False, user=None, timeout_secs=None, cwd=None) -> Execution`
+  Execute a command in the box (async); `args` is a list
+
+- `stop() -> None`
+  Stop the box gracefully (async)
+
+- `info() -> Awaitable[BoxInfo]`
+  Get box metadata (async)
+  - `info.network` contains `NetworkInfo` when network metadata is available
+  - When `info.network` is not `None`, `published_ports` is `None` when
+    this handle does not know the bindings, `[]` when there are no active
+    publications, or a list of named `PublishedPort` objects
+  - bindings become available after this handle starts or reattaches the box
+
+- `metrics() -> BoxMetrics`
+  Get box resource usage metrics (async)
+
+**Example:**
+
+```python
+box = await runtime.create(acrylmicrovm.BoxOptions(image="alpine:latest"))
+
+# Execute commands
+execution = await box.exec("echo", ["Hello"])
+result = await execution.wait()
+
+# Get box info
+info = await box.info()
+print(f"Box {info.id}: {info.state.status}")
+
+# Stop; by default this also removes the box
+await box.stop()
+```
+
+### Live Execution Inventory
+
+`await box.executions().list()` returns `list[acrylmicrovm.ExecutionInfo]` from the
+guest's live process inventory, including the main command (`is_main_session=True`).
+Each record has `execution_id` (canonical guest ID), `argv`, `started_at`
+(Unix milliseconds), `tty`, and `is_main_session`. Completed commands are not history
+entries and disappear from this list. Listing never starts a box: a stopped
+or not-yet-started native box returns an empty list, and a paused box returns
+an invalid-state error.
+
+`SimpleBox.executions()` exposes the same async operations without creating a
+box. `SyncBox.executions()` and `SyncSimpleBox.executions()` return the same
+metadata synchronously. Uncreated convenience wrappers also return an empty
+list. No inventory call attaches streams or consumes command output.
+
+Use `await box.executions().get(id)` for a control-only handle when another client
+still owns output. Use `await box.executions().attach(id, stdin=False)` to recover streams
+after the old reader disconnects. Both are available on native and convenience
+boxes, with synchronous counterparts; neither starts a stopped box. Attaching
+while a reader is active is a conflict, not an implicit takeover.
+The control handle's `stdin()`, `stdout()`, and `stderr()` raise `RuntimeError`
+because it has no streams; synchronous handles behave the same way.
+
+```python
+for execution in await box.executions().list():
+    print(execution.execution_id, execution.argv, execution.is_main_session)
+```
+
+### Command Execution
+
+#### `acrylmicrovm.Execution`
+
+Represents a running command execution.
+
+**Methods:**
+
+- `stdout() -> ExecStdout`
+  Get stdout stream (async iterator)
+
+- `stderr() -> ExecStderr`
+  Get stderr stream (async iterator)
+
+- `stdin() -> ExecStdin`
+  Get stdin writer
+
+- `wait() -> ExecResult`
+  Wait for command to complete and get result (async)
+
+- `kill(signal: int = 9) -> None`
+  Send signal to process (async)
+
+- `resize_tty(rows: int, cols: int) -> None`
+  Resize PTY terminal window (async). Only works with TTY-enabled executions.
+
+**Example:**
+
+```python
+# Streaming output
+execution = await box.exec("python", ["-c", "for i in range(5): print(i)"])
+
+stdout = execution.stdout()
+async for line in stdout:
+    print(f"Output: {line}")
+
+# Wait for completion
+result = await execution.wait()
+print(f"Exit code: {result.exit_code}")
+```
+
+#### `acrylmicrovm.ExecStdout` / `acrylmicrovm.ExecStderr`
+
+Async iterators for streaming output.
+
+**Usage:**
+
+```python
+execution = await box.exec("ls", ["-la"])
+
+# Stream stdout line by line
+stdout = execution.stdout()
+async for line in stdout:
+    print(line)
+
+# Stream stderr
+stderr = execution.stderr()
+async for line in stderr:
+    print(f"Error: {line}", file=sys.stderr)
+```
+
+### Higher-Level APIs
+
+#### `acrylmicrovm.SimpleBox`
+
+Context manager for basic execution with automatic cleanup.
+
+**Parameters:** Same as `BoxOptions`
+
+**Methods:**
+
+- `exec(cmd, *args, env=None, user=None, timeout=None, cwd=None) -> ExecResult`
+  Execute command and wait for result
+  - `env`: Dict of environment variables (e.g., `{"FOO": "bar"}`)
+  - `user`: Run as user (format: `name` or `uid:gid`, like `docker exec --user`)
+  - `timeout`: Timeout in seconds (default: no timeout)
+  - `cwd`: Working directory inside the container
+
+**Example:**
+
+```python
+async with acrylmicrovm.SimpleBox(image="python:slim") as box:
+    result = await box.exec("python", "-c", "print('Hello')")
+    print(result.stdout)  # "Hello\n"
+    print(result.exit_code)  # 0
+
+    # Run in a specific directory as a specific user
+    result = await box.exec("pwd", cwd="/tmp", user="nobody")
+    print(result.stdout)  # "/tmp\n"
+
+    # With a timeout
+    result = await box.exec("sleep", "60", timeout=5)
+```
+
+#### `acrylmicrovm.CodeBox`
+
+Specialized box for Python code execution with package management.
+
+**Methods:**
+
+- `run(code: str) -> str`
+  Execute Python code and return output
+
+- `install_package(package: str) -> None`
+  Install a Python package with pip
+
+**Example:**
+
+```python
+async with acrylmicrovm.CodeBox() as codebox:
+    # Install packages
+    await codebox.install_package("requests")
+
+    # Run code
+    result = await codebox.run("""
+import requests
+print(requests.get('https://api.github.com/zen').text)
+""")
+    print(result)
+```
+
+#### `acrylmicrovm.BrowserBox`
+
+Box configured for browser automation (Chromium, Firefox, WebKit).
+
+**Example:**
+
+```python
+async with acrylmicrovm.BrowserBox() as browser:
+    endpoint = browser.endpoint()
+    print(f"Connect Puppeteer to: {endpoint}")
+    # Use with Puppeteer/Playwright for browser automation
+```
+
+#### `acrylmicrovm.ComputerBox`
+
+Box with desktop automation capabilities (mouse, keyboard, screenshots).
+
+**Methods:**
+
+14 desktop interaction functions including:
+- `screenshot() -> bytes` - Capture screen
+- `left_click()` - Click mouse
+- `type_text(text: str)` - Type text
+- `get_screen_size() -> Tuple[int, int]` - Get screen dimensions
+
+**Example:**
+
+```python
+async with acrylmicrovm.ComputerBox() as computer:
+    # Get screen size
+    width, height = await computer.get_screen_size()
+
+    # Take screenshot
+    screenshot_bytes = await computer.screenshot()
+
+    # Mouse and keyboard
+    await computer.left_click()
+    await computer.type_text("Hello, world!")
+```
+
+#### `acrylmicrovm.InteractiveBox`
+
+Box for interactive shell sessions.
+
+**Example:**
+
+```python
+async with acrylmicrovm.InteractiveBox(image="alpine:latest") as itbox:
+    # Drop into interactive shell
+    await itbox.wait()
+```
+
+## API Patterns
+
+### Async/Await
+
+All I/O operations are async. Use `await` for operations and `async for` for streams.
+
+```python
+# Create and use box (async)
+async with acrylmicrovm.SimpleBox(image="alpine") as box:
+    result = await box.exec("echo", "Hello")
+
+# Stream output (async iterator) from a low-level Box
+low_level_box = await runtime.create(acrylmicrovm.BoxOptions(image="python:slim"))
+execution = await low_level_box.exec("python", ["script.py"])
+async for line in execution.stdout():
+    print(line)
+```
+
+### Context Managers
+
+Use `async with` for automatic cleanup:
+
+```python
+# SimpleBox - auto cleanup
+async with acrylmicrovm.SimpleBox() as box:
+    result = await box.exec("command")
+# Box automatically stopped and removed
+
+# Manual cleanup (if not using context manager)
+box = await runtime.create(acrylmicrovm.BoxOptions(image="alpine"))
+try:
+    await box.exec("command")
+finally:
+    await box.stop()  # also removes the box by default
+```
+
+### Streaming I/O
+
+Stream output line-by-line as it's produced:
+
+```python
+execution = await box.exec("tail", ["-f", "/var/log/app.log"])
+
+# Process output in real-time
+stdout = execution.stdout()
+async for line in stdout:
+    if "ERROR" in line:
+        print(f"Alert: {line}")
+```
+
+### Error Handling
+
+Catch exceptions from ACRYL microVMs operations:
+
+```python
+import acrylmicrovm
+from acrylmicrovm import AcrylMicrovmError, ExecError
+
+try:
+    async with acrylmicrovm.SimpleBox(image="invalid:image") as box:
+        result = await box.exec("command")
+except AcrylMicrovmError as e:
+    print(f"AcrylMicrovm error: {e}")
+except ExecError as e:
+    print(f"Execution error: {e}")
+```
+
+## Configuration Reference
+
+### Image Selection
+
+Any OCI-compatible image from Docker Hub, GHCR, ECR, or other registries:
+
+```python
+# Docker Hub (default registry)
+acrylmicrovm.BoxOptions(image="python:3.11-slim")
+acrylmicrovm.BoxOptions(image="alpine:latest")
+acrylmicrovm.BoxOptions(image="ubuntu:22.04")
+
+# GitHub Container Registry
+acrylmicrovm.BoxOptions(image="ghcr.io/owner/repo:tag")
+
+# Amazon ECR
+acrylmicrovm.BoxOptions(image="123456.dkr.ecr.us-east-1.amazonaws.com/repo:tag")
+```
+
+### Resource Limits
+
+```python
+acrylmicrovm.BoxOptions(
+    cpus=4,  # 4 CPU cores
+    memory_mib=2048,  # 2 GB RAM
+)
+```
+
+### Environment Variables
+
+```python
+acrylmicrovm.BoxOptions(
+    env=[
+        ("DATABASE_URL", "postgresql://localhost/db"),
+        ("API_KEY", "secret"),
+        ("DEBUG", "true"),
+    ]
+)
+```
+
+### Volume Mounts
+
+```python
+acrylmicrovm.BoxOptions(
+    volumes=[
+        # Read-only mount
+        ("/host/config", "/etc/app/config", True),
+        # Read-write mount
+        ("/host/data", "/mnt/data", False),
+    ]
+)
+```
+
+### Port Forwarding
+
+```python
+acrylmicrovm.BoxOptions(
+    ports=[
+        (8080, 80, "tcp"),  # Fixed host port
+        {"guest_port": 3000},  # OS-selected host port
+    ]
+)
+```
+
+### Persistent Storage
+
+```python
+# Default - the box and its disk are removed when it stops
+acrylmicrovm.BoxOptions(image="postgres")
+
+# Kept - the box and its QCOW2 disk survive stop/restart
+acrylmicrovm.BoxOptions(
+    image="postgres",
+    disk_size_gb=20,  # 20 GB disk
+    auto_delete=0,  # keep the box after stop
+)
+```
+
+## Examples Gallery
+
+The [`examples/python/`](../../examples/python/) directory contains categorized examples:
+
+### 1. **run_simplebox.py** - Foundation Patterns
+Demonstrates core ACRYL microVMs features:
+- Basic command execution with results
+- Separate stdout/stderr handling
+- Environment variables and working directory
+- Error handling and exit codes
+- Multiple commands in same box
+- Data processing pipeline
+
+[View source](../../examples/python/01_getting_started/run_simplebox.py)
+
+### 2. **run_codebox.py** - AI Code Execution
+Secure Python code execution for AI agents:
+- Basic code execution
+- Dynamic package installation
+- Data processing (AI agent use case)
+- Isolation demonstration
+
+[View source](../../examples/python/01_getting_started/run_codebox.py)
+
+### 3. **automate_with_playwright.py** - Browser Automation
+Browser automation with Playwright:
+- Basic Chromium setup
+- Custom browser configurations (Firefox, WebKit)
+- Cross-browser testing patterns
+- Integration examples
+
+[View source](../../examples/python/05_browser_desktop/automate_with_playwright.py)
+
+### 4. **automate_desktop.py** - Desktop Automation
+Desktop interaction for agent workflows:
+- 14 desktop functions (mouse, keyboard, screenshots)
+- Screen size detection
+- Workflow automation
+- GUI interaction patterns
+
+[View source](../../examples/python/05_browser_desktop/automate_desktop.py)
+
+### 5. **manage_lifecycle.py** - Box Lifecycle Management
+Managing box state:
+- Stop and restart operations
+- State persistence
+- Data persistence verification
+- Resource cleanup
+
+[View source](../../examples/python/03_lifecycle/manage_lifecycle.py)
+
+### 6. **list_boxes.py** - Runtime Introspection
+Enumerate and inspect boxes:
+- List all boxes with status
+- Display box metadata (ID, name, state, resources)
+- Filter by status
+
+[View source](../../examples/python/01_getting_started/list_boxes.py)
+
+### 7. **share_across_processes.py** - Multi-Process Operations
+Cross-process box management:
+- Reattach to running boxes from different processes
+- Restart stopped boxes
+- Multi-process runtime handling
+
+[View source](../../examples/python/03_lifecycle/share_across_processes.py)
+
+### 8. **run_interactive_shell.py** - Interactive Shells
+Direct shell access:
+- Interactive terminal sessions
+- Terminal mode handling
+- Simple container experience
+
+[View source](../../examples/python/04_interactive/run_interactive_shell.py)
+
+### 9. **use_native_api.py** - Low-Level API
+Using the Rust API directly from Python:
+- Default and custom runtime initialization
+- Resource limits (CPU, memory, volumes, ports)
+- Box information retrieval
+- Streaming execution
+
+[View source](../../examples/python/07_advanced/use_native_api.py)
+
+## Metrics & Monitoring
+
+### Runtime Metrics
+
+Get aggregate metrics across all boxes:
+
+```python
+runtime = acrylmicrovm.AcrylMicrovm.default()
+metrics = await runtime.metrics()
+
+print(f"Boxes created: {metrics.boxes_created}")
+print(f"Boxes destroyed: {metrics.boxes_destroyed}")
+print(f"Total exec calls: {metrics.total_exec_calls}")
+```
+
+**RuntimeMetrics Fields:**
+- `boxes_created: int` - Total boxes created
+- `boxes_destroyed: int` - Total boxes destroyed
+- `total_exec_calls: int` - Total command executions
+- `active_boxes: int` - Currently running boxes
+
+### Box Metrics
+
+Get per-box resource usage:
+
+```python
+box = await runtime.create(acrylmicrovm.BoxOptions(image="alpine"))
+metrics = await box.metrics()
+
+print(f"CPU time: {metrics.cpu_time_ms}ms")
+print(f"Memory: {metrics.memory_usage_bytes / (1024**2):.2f} MB")
+print(f"Network sent: {metrics.network_bytes_sent}")
+print(f"Network received: {metrics.network_bytes_received}")
+```
+
+**BoxMetrics Fields:**
+- `cpu_time_ms: int` - Total CPU time in milliseconds
+- `memory_usage_bytes: int` - Current memory usage
+- `network_bytes_sent: int` - Total bytes sent
+- `network_bytes_received: int` - Total bytes received
+
+## Error Handling
+
+### Exception Types
+
+```python
+from acrylmicrovm import AcrylMicrovmError, ExecError, TimeoutError, ParseError
+```
+
+**AcrylMicrovmError** - Base exception for all ACRYL microVMs errors
+
+**ExecError** - Command execution failed
+
+**TimeoutError** - Operation timed out
+
+**ParseError** - Failed to parse output
+
+**NotFoundError**, **InvalidStateError**, **UnsupportedError**, … - A failure
+the runtime reported, one class per kind, each with a `code` such as
+`not_found`. Every one is also a `RuntimeError`. The full list is in
+[the Python reference](../../docs/reference/python/README.md#runtime-failures).
+
+### Common Error Patterns
+
+```python
+import acrylmicrovm
+
+
+async def safe_execution():
+    try:
+        async with acrylmicrovm.SimpleBox(image="python:slim") as box:
+            result = await box.exec("python", "script.py")
+
+            # Check exit code
+            if result.exit_code != 0:
+                print(f"Command failed: {result.stderr}")
+
+    except acrylmicrovm.AcrylMicrovmError as e:
+        # Handle AcrylMicrovm-specific errors
+        print(f"AcrylMicrovm error: {e}")
+    except Exception as e:
+        # Handle other errors
+        print(f"Unexpected error: {e}")
+```
+
+## Troubleshooting
+
+### Installation Issues
+
+**Problem:** `pip install acrylmicrovm` fails
+
+**Solutions:**
+- Ensure Python 3.10+: `python --version`
+- Update pip: `pip install --upgrade pip`
+- Check platform support (macOS ARM64, Linux x86_64/ARM64 only)
+
+### Runtime Errors
+
+**Problem:** "KVM not available" error on Linux
+
+**Solutions:**
+```bash
+# Check if KVM is loaded
+lsmod | grep kvm
+
+# Check if /dev/kvm exists
+ls -l /dev/kvm
+
+# Add user to kvm group (may require logout/login)
+sudo usermod -aG kvm $USER
+```
+
+**Problem:** "Hypervisor.framework not available" on macOS
+
+**Solutions:**
+- Ensure macOS 12+ (Monterey or later)
+- Verify Apple Silicon (ARM64) - Intel Macs not supported
+- Check System Settings → Privacy & Security → Developer Tools
+
+### Image Pull Failures
+
+**Problem:** "Failed to pull image" error
+
+**Solutions:**
+- Check internet connectivity
+- Verify image name and tag exist: `docker pull <image>`
+- For private images, pass `image_registries=[acrylmicrovm.ImageRegistry(...)]` when creating `acrylmicrovm.Options`; on `AcrylMicrovm.rest(...)`, add a login with `runtime.images.registries.create(...)`
+
+### Performance Issues
+
+**Problem:** Box is slow or unresponsive
+
+**Solutions:**
+```python
+# Increase resource limits
+acrylmicrovm.BoxOptions(
+    cpus=4,  # More CPUs
+    memory_mib=4096,  # More memory
+)
+
+# Check metrics
+metrics = await box.metrics()
+print(f"Memory usage: {metrics.memory_usage_bytes / (1024**2):.2f} MB")
+print(f"CPU time: {metrics.cpu_time_ms}ms")
+```
+
+### Debug Logging
+
+Enable debug logging to troubleshoot issues:
+
+```bash
+# Set RUST_LOG environment variable
+RUST_LOG=debug python script.py
+```
+
+Log levels: `trace`, `debug`, `info`, `warn`, `error`
+
+## Contributing
+
+We welcome contributions to the Python SDK!
+
+### Development Setup
+
+```bash
+# Clone repository
+git clone https://github.com/acryldev/acrylmicrovm.git
+cd acrylmicrovm
+
+# Initialize submodules
+git submodule update --init --recursive
+
+# Build Python SDK in development mode
+make dev:python
+```
+
+### Running Tests
+
+```bash
+# Install dev dependencies
+pip install -e ".[dev]"
+
+# Unit tests
+make test:unit:python
+
+# Integration tests (need a VM; boxes pull through the local test registry)
+make test:integration:python
+```
+
+Checkpoint REST boundary tests need the native extension but do not boot a VM.
+Unit jobs omit them when the extension is absent. The native coverage job builds
+the extension and requires it with `ACRYLMICROVM_REQUIRE_NATIVE=1`, so missing or broken
+native builds fail instead of silently skipping these checks.
+
+### Building Wheels
+
+```bash
+# Build portable wheel
+make dist:python
+```
+
+## Further Documentation
+
+- [ACRYL microVMs Main README](../../README.md) - Project overview
+- [Concepts](../../docs/concepts/README.md) - How ACRYL microVMs works
+- [Getting Started Guide](../../docs/getting-started/README.md) - Installation and setup
+- [Guides](../../docs/guides/README.md) - Practical guides
+- [API Reference](../../docs/reference/README.md) - Complete API documentation
+
+## License
+
+Licensed under the Apache License, Version 2.0. See [LICENSE](../../LICENSE) for details.

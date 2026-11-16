@@ -1,0 +1,242 @@
+# ============================================================================
+# OS & Editor
+# ============================================================================
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*.orig
+*.log
+.vscode/
+.idea/
+
+# ============================================================================
+# Rust
+# ============================================================================
+/target/
+**/target/
+
+# ============================================================================
+# Python
+# ============================================================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+*.dist-info/
+.eggs/
+.venv/
+.venv-e2e/
+venv/
+env/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+wheelhouse/
+
+# ============================================================================
+# Node.js
+# ============================================================================
+node_modules/
+.npm/
+.pnpm-store/
+package-lock.json
+yarn.lock
+!/apps/yarn.lock
+!/sdks/node/package-lock.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ============================================================================
+# C/C++ Build Artifacts
+# ============================================================================
+*.o
+*.obj
+*.so
+*.dll
+*.dylib
+*.a
+*.lib
+
+# ============================================================================
+# Build Outputs
+# ============================================================================
+/dist/
+/build/
+**/coverage/
+
+# ============================================================================
+# Credentials & Secrets
+# ============================================================================
+*.pem
+*.key
+*.crt
+*.cer
+*.p12
+*.pfx
+*.sig
+*.mobileprovision
+# google-github-actions/auth exports credentials into $GITHUB_WORKSPACE, which
+# is the checkout itself — there is no input to put them anywhere else. Ignoring
+# them is the upstream prerequisite, and it is also what keeps `runner:build`
+# from reading a CI checkout as dirty and refusing to stage a commit-keyed
+# artifact (`mdeploy/src/runner-build.ts`, `inspectCheckout`).
+gha-creds-*.json
+.env
+.env.*
+!/openapi/reference-server/.env.example
+
+# ============================================================================
+# Go SDK
+# ============================================================================
+# Downloaded by setup tool, not committed
+sdks/go/libacrylmicrovm.a
+
+# ============================================================================
+# Project Specific
+# ============================================================================
+
+# Runtime data
+.acrylmicrovm-home/
+/.acrylmicrovm-home
+/.cargo/
+/.maturin/
+
+# Python SDK
+sdks/python/target/
+sdks/python/build/
+sdks/python/dist/
+sdks/python/acrylmicrovm/.libs/
+sdks/python/acrylmicrovm/.dylibs/
+sdks/python/acrylmicrovm/bin/
+sdks/python/acrylmicrovm/runtime/
+sdks/python/libkrun_dist/
+
+# C SDK
+sdks/c/target/
+sdks/c/Cargo.lock
+sdks/c/dist/
+sdks/c/tests/build/
+
+# Node SDK
+sdks/node/native/build/
+sdks/node/native/Release/
+
+# FFI build artifacts
+src/deps/libgvproxy-sys/gvproxy-bridge/libgvproxy.*
+src/deps/libgvproxy-sys/gvproxy-bridge/vendor/
+src/deps/libgvproxy-sys/gvproxy-bridge/gvproxy-bridge
+src/deps/libkrun-sys/vendor/libkrun/target/
+src/deps/libkrun-sys/vendor/libkrunfw/target/
+
+# Examples
+examples/c/build/
+examples/c/execute
+
+# Entitlements (generated)
+*.entitlements
+entitlements.plist
+
+# Local config
+CLAUDE.local.md
+.worktreeinclude
+AGENTS.local.md
+AGENTS.override.md
+Cargo.lock
+*.dylib.dSYM/
+
+# Apps workspace
+/apps/.nx/
+/apps/.turbo/
+/apps/node_modules/
+/apps/.pnp.*
+/apps/.yarn/cache/
+/apps/.yarn/unplugged/
+/apps/.yarn/build-state.yml
+/apps/.yarn/install-state.gz
+/apps/**/node_modules/
+/apps/**/dist/
+/apps/**/build/
+/apps/**/coverage/
+/apps/**/.next/
+/apps/**/.turbo/
+/apps/**/.vite/
+/apps/**/.nyc_output/
+/apps/**/.cache/
+/apps/**/tmp/
+/apps/**/temp/
+/apps/daemon/daemon
+/apps/libs/computer-use/test-computer-use
+/apps/libs/computer-use/acrylmicrovm-computer-use
+/runner
+.claude/scheduled_tasks.lock
+.claude/worktrees/
+.agents/state/
+# Legacy marker locations, kept ignored through the move to .agents/state/.
+# The first two are written by the shared preflight-commit-push hook so a
+# commit-msg from before the move still finds its audit; the rest are what a
+# checkout from before the move still writes. All must stay ignored: the verdict
+# gate keys its dossier to a tree hash that skips ignored paths, so an unignored
+# marker would self-invalidate the audit that just passed. Drop this block once
+# every checkout is past the move, together with mirror_to_legacy.
+.claude/.last-audit.json
+.claude/.last-audit-handoff.json
+.claude/.last-verdict.json
+.claude/.pr-reviewed.json
+.claude/.verdict-last-uuid
+.claude/.verdict-decisions.log
+
+# ============================================================================
+# Local dev artifacts
+# ============================================================================
+.playwright-mcp/
+dashboard-*.png
+dex-*.png
+crud-*.png
+
+# L2 boot artifacts — local-only, not for repo.
+# NOTE: gitignore syntax does NOT support inline comments — `pattern  # comment`
+# is parsed as the literal path `pattern  # comment`. Keep comments on their
+# own lines.
+
+# self-symlink workaround for apps/apps/... path resolution in webpack.config.js
+apps/apps
+# 115 MB, prebuilt from upstream releases
+sdks/go/libacrylmicrovm.a
+# 73 MB, prebuilt from upstream releases
+sdks/go/libacrylmicrovm.dylib
+# extracted prebuilt archive
+sdks/go/acrylmicrovm-c-v*/
+
+l2-*.png
+
+# Local dev stack — ALL generated state: data volumes,
+# SDK + runner homes, native binaries, logs
+/.apps-local/
+
+# Session test screenshots (Playwright runs)
+regions-*.png
+runners-*.png
+term-*.png
+test-*.png
+.venv-infra.partial.*
+.venv-infra/
+.venv-infra.partial.*/
+target/
+
+# Stage coordinates name somebody's cloud account, so they are per checkout.
+# The committed half is mstage.env.json; .mstage.config.example.json is the template.
+.mstage.config.json
+
+# AI agent tooling local state (memory, cache, session state) — per checkout only.
+.omc/
+.omx/
+.workbuddy/
+
+# Local API-owned Listener executable
+/apps/bin/ci-listener

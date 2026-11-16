@@ -1,0 +1,1613 @@
+// Modified by ACRYL, 2026
+//! HTTP client for the ACRYL microVMs REST API.
+
+use std::sync::Arc;
+use std::time::{Duration, SystemTime};
+
+use reqwest::header::CONTENT_LENGTH;
+use reqwest::{Client, Method, RequestBuilder, StatusCode};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use tokio::sync::RwLock;
+
+use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
+
+use super::credential::{AccessToken, Credential};
+use super::error::{map_http_body, map_plain_reply};
+use super::options::AcrylMicrovmRestOptions;
+use super::types::{BoxResponse, CreateBoxRequest, ServerConfig};
+use crate::runtime::auth::Principal;
+use crate::runtime::cpu_count::CpuCount;
+
+/// Re-request a token once it is within this leeway of `expires_at`.
+const REFRESH_LEEWAY: Duration = Duration::from_secs(60);
+/// File transfers cannot outlive the runner's 24-hour box lifetime cap.
+const FILE_REQUEST_TIMEOUT: Duration = Duration::from_secs(24 * 60 * 60);
+const TUNNEL_SETUP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// The native REST transport is shared by every SDK binding and the CLI.
+fn client_identity_headers() -> reqwest::header::HeaderMap {
+    use reqwest::header::HeaderValue;
+    reqwest::header::HeaderMap::from_iter([
+        (
+            reqwest::header::HeaderName::from_static("x-acrylmicrovm-source"),
+            HeaderValue::from_static("sdk"),
+        ),
+        (
+            reqwest::header::HeaderName::from_static("x-acrylmicrovm-sdk-version"),
+            HeaderValue::from_static(env!("CARGO_PKG_VERSION")),
+        ),
+    ])
+}
+
+/// The proxy states a refused tunnel in one short line (Go's `http.Error`).
+/// The limit is enforced while reading, not after: a peer that answers a
+/// handshake with megabytes is not stating a reason, and buffering it first
+/// would be trusting it for length. Past the limit the status speaks alone.
+const CONNECT_REFUSAL_MAX_BYTES: usize = 512;
+
+/// Reading the sentence off an already-arrived refusal is instant against
+/// the hosted platform (`http.Error` flushes the body with the headers); this bound
+/// only covers a peer that stalls mid-body, and a refusal should fail fast.
+const CONNECT_REFUSAL_READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Read the sentence a peer sent with its non-2xx CONNECT reply.
+async fn read_connect_refusal(response: hyper::Response<hyper::body::Incoming>) -> String {
+    use http_body_util::{BodyExt, Limited};
+
+    const FALLBACK: &str = "CONNECT proxy rejected tunnel";
+    let body = Limited::new(response.into_body(), CONNECT_REFUSAL_MAX_BYTES);
+    let Ok(Ok(collected)) =
+        tokio::time::timeout(CONNECT_REFUSAL_READ_TIMEOUT, body.collect()).await
+    else {
+        return FALLBACK.to_string();
+    };
+    let bytes = collected.to_bytes();
+    let text = String::from_utf8_lossy(&bytes);
+    let text = text.trim();
+    if text.is_empty() {
+        return FALLBACK.to_string();
+    }
+    text.to_string()
+}
+
+type TunnelConnector =
+    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>;
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TunnelDescriptor {
+    pub uri: String,
+    #[serde(default = "public_tunnel_default")]
+    pub is_public: bool,
+    pub token: Option<String>,
+}
+
+fn public_tunnel_default() -> bool {
+    true
+}
+
+/// Bound on the WebSocket handshake (TCP + TLS + HTTP upgrade). Without it a
+/// stalled connect blocks the attach caller indefinitely — unlike HTTP calls,
+/// which ride the reqwest client's own timeout.
+const WS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// An upgraded attach WebSocket.
+pub(crate) type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// The HTTP 101 response that upgraded a [`WsStream`].
+pub(crate) type WsHandshakeResponse = tokio_tungstenite::tungstenite::handshake::client::Response;
+
+/// HTTP client for the ACRYL microVMs REST API.
+///
+/// Handles base URL construction, bearer auth (any [`Credential`] impl),
+/// and error response parsing.
+#[derive(Clone)]
+pub(crate) struct ApiClient {
+    http: Client,
+    tunnel_connector: TunnelConnector,
+    base_url: String,
+    /// Routing-slot value substituted into the `{prefix}` URL segment
+    /// on box-scoped requests. `None` or empty → URL skips the segment
+    /// entirely (single-tenant / empty-prefix deployment shape).
+    /// Captured at construction from `AcrylMicrovmRestOptions::path_prefix`;
+    /// opaque to the client.
+    path_prefix: Option<String>,
+    /// Bearer credential. `None` = unauthenticated.
+    credential: Option<Arc<dyn Credential>>,
+    /// Last token fetched, cached until near expiry. Generic over any
+    /// `Credential` impl — API keys (`expires_at == None`) are fetched
+    /// once and cached forever.
+    cached: Arc<RwLock<Option<AccessToken>>>,
+    config_cache: Arc<RwLock<Option<ServerConfig>>>,
+}
+
+impl ApiClient {
+    pub fn new(config: &AcrylMicrovmRestOptions) -> AcrylMicrovmResult<Self> {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let http = Client::builder()
+            .default_headers(client_identity_headers())
+            .timeout(std::time::Duration::from_secs(300))
+            .connect_timeout(std::time::Duration::from_secs(300))
+            .build()
+            .map_err(|e| AcrylMicrovmError::Config(format!("failed to create HTTP client: {}", e)))?;
+        let tunnel_connector = hyper_rustls::HttpsConnectorBuilder::new()
+            .with_native_roots()
+            .map_err(|e| AcrylMicrovmError::Config(format!("failed to load TLS roots: {e}")))?
+            .https_or_http()
+            .enable_http1()
+            .build();
+
+        let base_url = config.url.trim_end_matches('/').to_string();
+        let path_prefix = config.path_prefix.clone();
+
+        Ok(Self {
+            http,
+            tunnel_connector,
+            base_url,
+            path_prefix,
+            credential: config.credential.clone(),
+            cached: Arc::new(RwLock::new(None)),
+            config_cache: Arc::new(RwLock::new(None)),
+        })
+    }
+
+    /// Build the full URL for a box-scoped path.
+    ///
+    /// With a non-empty `prefix`, produces `{base}/v1/{prefix}{path}`
+    /// (e.g. `https://api.example.com/v1/acme/boxes`). With an unset
+    /// or empty `prefix`, the segment is dropped entirely
+    /// (`https://api.example.com/v1/boxes`) — the single-tenant
+    /// `acrylmicrovm serve` shape. Multi-segment prefixes like
+    /// `us-east/team-42` are substituted verbatim.
+    fn url(&self, path: &str) -> String {
+        match self.path_prefix.as_deref().filter(|s| !s.is_empty()) {
+            Some(p) => format!("{}/v1/{}{}", self.base_url, p, path),
+            None => format!("{}/v1{}", self.base_url, path),
+        }
+    }
+
+    /// Build URL without the organization segment (for identity / config
+    /// endpoints — `/v1/me`, `/v1/config`).
+    fn url_root(&self, path: &str) -> String {
+        format!("{}/v1{}", self.base_url, path)
+    }
+
+    /// Return a usable bearer, re-requesting from the credential when the
+    /// cached token is absent or within [`REFRESH_LEEWAY`] of `expires_at`.
+    /// `expires_at == None` (API keys) → fetched once, cached forever.
+    /// `None` means the client has no credential configured.
+    async fn current_bearer(&self) -> AcrylMicrovmResult<Option<String>> {
+        let Some(cred) = &self.credential else {
+            return Ok(None);
+        };
+        {
+            let guard = self.cached.read().await;
+            if let Some(tok) = guard.as_ref() {
+                let fresh = match tok.expires_at {
+                    None => true,
+                    Some(exp) => SystemTime::now() + REFRESH_LEEWAY < exp,
+                };
+                if fresh {
+                    return Ok(Some(tok.token.clone()));
+                }
+            }
+        }
+        let tok = cred.get_token().await?;
+        let bearer = tok.token.clone();
+        *self.cached.write().await = Some(tok);
+        Ok(Some(bearer))
+    }
+
+    /// Add the bearer-auth header to a request builder.
+    ///
+    /// Client source and native SDK version are defaults on the HTTP client.
+    /// The routing-slot value is carried in the
+    /// URL path (`/v1/<prefix>/...`) per `openapi/box.openapi.yaml`.
+    async fn authorize(&self, builder: RequestBuilder) -> AcrylMicrovmResult<RequestBuilder> {
+        match self.current_bearer().await? {
+            Some(bearer) => Ok(builder.bearer_auth(bearer)),
+            None => Ok(builder),
+        }
+    }
+
+    /// Send a request and parse a JSON response.
+    ///
+    /// On parse failure, the response body is included (truncated) in the
+    /// error so the caller can see WHICH field mismatched — `reqwest`'s
+    /// default error is just "error decoding response body", which is
+    /// useless when the schema drifts between client and server. The body
+    /// is bounded to 4 KiB so a runaway HTML error page can't blow up
+    /// terminal output.
+    async fn send_json<T: DeserializeOwned>(&self, builder: RequestBuilder) -> AcrylMicrovmResult<T> {
+        let builder = self.authorize(builder).await?;
+        let resp = builder.send().await.map_err(transport_error)?;
+
+        let status = resp.status();
+        if !status.is_success() {
+            return self.handle_error(status, resp).await;
+        }
+        // Read the body as bytes once, then parse; this is what lets us
+        // include the body in a parse-failure error without re-issuing the
+        // request. A failure at this point is a transport fault — this client's
+        // own total timeout expiring after the headers landed, a reset
+        // connection, a corrupt compressed body — never an internal bug.
+        let bytes = resp.bytes().await.map_err(transport_error)?;
+        serde_json::from_slice::<T>(&bytes).map_err(|e| {
+            let preview = String::from_utf8_lossy(&bytes);
+            let preview = if preview.len() > 4096 {
+                format!(
+                    "{}… (truncated, {} bytes total)",
+                    &preview[..4096],
+                    bytes.len()
+                )
+            } else {
+                preview.into_owned()
+            };
+            AcrylMicrovmError::Internal(format!(
+                "failed to parse response: {} \n--- response body ({} bytes) ---\n{}\n--- end ---",
+                e,
+                bytes.len(),
+                preview
+            ))
+        })
+    }
+
+    /// Send a request and expect no response body (204).
+    async fn send_no_content(&self, builder: RequestBuilder) -> AcrylMicrovmResult<()> {
+        let builder = self.authorize(builder).await?;
+        let resp = builder.send().await.map_err(transport_error)?;
+
+        let status = resp.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            self.handle_error(status, resp).await
+        }
+    }
+
+    /// Parse an error response body and map to AcrylMicrovmError.
+    async fn handle_error<T>(
+        &self,
+        status: StatusCode,
+        resp: reqwest::Response,
+    ) -> AcrylMicrovmResult<T> {
+        let text = resp.text().await.unwrap_or_default();
+        Err(map_http_body(status, &text))
+    }
+
+    // ========================================================================
+    // Convenience methods
+    // ========================================================================
+
+    /// Some gateways reject bodyless POSTs unless zero length is explicit,
+    /// even when the HTTP transport can infer it.
+    fn empty_post_request(&self, path: &str) -> RequestBuilder {
+        self.http.post(self.url(path)).header(CONTENT_LENGTH, 0)
+    }
+
+    pub async fn get<T: DeserializeOwned>(&self, path: &str) -> AcrylMicrovmResult<T> {
+        let builder = self.http.get(self.url(path));
+        self.send_json(builder).await
+    }
+
+    pub async fn get_with_query<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> AcrylMicrovmResult<T> {
+        self.send_json(self.http.get(self.url(path)).query(query))
+            .await
+    }
+
+    pub async fn get_root<T: DeserializeOwned>(&self, path: &str) -> AcrylMicrovmResult<T> {
+        let builder = self.http.get(self.url_root(path));
+        self.send_json(builder).await
+    }
+
+    pub async fn post<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> AcrylMicrovmResult<T> {
+        let builder = self.http.post(self.url(path)).json(body);
+        self.send_json(builder).await
+    }
+
+    /// A fractional create must not silently lose its requested CPU allocation.
+    pub async fn create_box(&self, request: &CreateBoxRequest) -> AcrylMicrovmResult<BoxResponse> {
+        let requested = request.cpus.map(CpuCount::new).transpose()?;
+        let value: serde_json::Value = self.post("/boxes", request).await?;
+        if let Some(requested) = requested.filter(|cpu| cpu.is_fractional()) {
+            let actual = value
+                .get("cpus")
+                .and_then(serde_json::Value::as_f64)
+                .and_then(|cores| CpuCount::new(cores).ok());
+            if actual != Some(requested) {
+                let id = value
+                    .get("box_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown");
+                return Err(AcrylMicrovmError::Unsupported(format!(
+                    "server did not confirm requested fractional cpus={}; created Box ID: {id}; remove this box before retrying",
+                    requested.cores()
+                )));
+            }
+        }
+        serde_json::from_value(value).map_err(|error| {
+            AcrylMicrovmError::Internal(format!("invalid box creation response: {error}"))
+        })
+    }
+
+    pub async fn post_no_content<B: Serialize>(&self, path: &str, body: &B) -> AcrylMicrovmResult<()> {
+        let builder = self.http.post(self.url(path)).json(body);
+        self.send_no_content(builder).await
+    }
+
+    pub async fn put<B: Serialize, T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> AcrylMicrovmResult<T> {
+        let builder = self.http.put(self.url(path)).json(body);
+        self.send_json(builder).await
+    }
+
+    pub async fn put_no_content<B: Serialize>(&self, path: &str, body: &B) -> AcrylMicrovmResult<()> {
+        self.send_no_content(self.http.put(self.url(path)).json(body))
+            .await
+    }
+
+    pub async fn post_empty<T: DeserializeOwned>(&self, path: &str) -> AcrylMicrovmResult<T> {
+        let builder = self.empty_post_request(path);
+        self.send_json(builder).await
+    }
+
+    pub async fn post_empty_no_content(&self, path: &str) -> AcrylMicrovmResult<()> {
+        let builder = self.empty_post_request(path);
+        self.send_no_content(builder).await
+    }
+
+    pub async fn post_for_bytes<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> AcrylMicrovmResult<Vec<u8>> {
+        let builder = self.http.post(self.url(path)).json(body);
+        let builder = self.authorize(builder).await?;
+        let resp = builder.send().await.map_err(transport_error)?;
+
+        let status = resp.status();
+        if status.is_success() {
+            let bytes = resp.bytes().await.map_err(transport_error)?;
+            Ok(bytes.to_vec())
+        } else {
+            self.handle_error::<Vec<u8>>(status, resp).await
+        }
+    }
+
+    pub async fn delete(&self, path: &str) -> AcrylMicrovmResult<()> {
+        let builder = self.http.delete(self.url(path));
+        self.send_no_content(builder).await
+    }
+
+    /// `DELETE` a resource that answers with its resulting JSON state.
+    pub async fn delete_json<T: DeserializeOwned>(&self, path: &str) -> AcrylMicrovmResult<T> {
+        let builder = self.http.delete(self.url(path));
+        self.send_json(builder).await
+    }
+
+    pub async fn delete_with_query(&self, path: &str, query: &[(&str, &str)]) -> AcrylMicrovmResult<()> {
+        let builder = self.http.delete(self.url(path)).query(query);
+        self.send_no_content(builder).await
+    }
+
+    pub async fn head_exists(&self, path: &str) -> AcrylMicrovmResult<bool> {
+        let builder = self.http.head(self.url(path));
+        let builder = self.authorize(builder).await?;
+        let resp = builder.send().await.map_err(transport_error)?;
+        match resp.status().as_u16() {
+            204 | 200 => Ok(true),
+            404 => Ok(false),
+            _ => {
+                let status = resp.status();
+                self.handle_error::<bool>(status, resp).await
+            }
+        }
+    }
+
+    /// Open an authenticated WebSocket connection at the given REST path.
+    ///
+    /// Translates the http(s) URL to ws(s), attaches the Bearer header
+    /// when configured, and returns the upgraded stream.
+    pub(crate) async fn connect_ws(&self, path: &str) -> AcrylMicrovmResult<WsStream> {
+        let (stream, _resp) = self.connect_ws_with_response(path).await?;
+        Ok(stream)
+    }
+
+    /// Like [`connect_ws`](Self::connect_ws), but also returns the handshake
+    /// response so the caller can read server-assigned metadata off the
+    /// upgrade — `/boxes/{id}/attach` answers with the main session's
+    /// execution id, which the client has no other way to learn.
+    pub(crate) async fn connect_ws_with_response(
+        &self,
+        path: &str,
+    ) -> AcrylMicrovmResult<(WsStream, WsHandshakeResponse)> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        use tokio_tungstenite::tungstenite::http::HeaderValue;
+
+        let http_url = self.url(path);
+        let ws_url = if let Some(rest) = http_url.strip_prefix("https://") {
+            format!("wss://{}", rest)
+        } else if let Some(rest) = http_url.strip_prefix("http://") {
+            format!("ws://{}", rest)
+        } else {
+            return Err(AcrylMicrovmError::Internal(format!(
+                "WS connect: unsupported URL scheme in {}",
+                http_url
+            )));
+        };
+
+        let mut request = ws_url
+            .as_str()
+            .into_client_request()
+            .map_err(|e| AcrylMicrovmError::Internal(format!("WS request build failed: {}", e)))?;
+
+        request.headers_mut().extend(client_identity_headers());
+
+        if let Some(bearer) = self.current_bearer().await? {
+            let value = HeaderValue::from_str(&format!("Bearer {}", bearer))
+                .map_err(|e| AcrylMicrovmError::Internal(format!("WS auth header invalid: {}", e)))?;
+            request.headers_mut().insert("Authorization", value);
+        }
+
+        tokio::time::timeout(
+            WS_HANDSHAKE_TIMEOUT,
+            tokio_tungstenite::connect_async(request),
+        )
+        .await
+        .map_err(|_| {
+            AcrylMicrovmError::Network(format!(
+                "WebSocket handshake timed out after {}s",
+                WS_HANDSHAKE_TIMEOUT.as_secs()
+            ))
+        })?
+        .map_err(map_ws_error)
+    }
+
+    pub(crate) async fn connect_box_network_tunnel(
+        &self,
+        uri: &str,
+    ) -> AcrylMicrovmResult<hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>> {
+        use http_body_util::Empty;
+        use hyper::{Method, Request, Uri};
+        use hyper_util::rt::TokioIo;
+        use tower::Service;
+
+        let uri: Uri = uri
+            .parse()
+            .map_err(|e| AcrylMicrovmError::Config(format!("invalid CONNECT URI: {e}")))?;
+        let authority = uri
+            .authority()
+            .ok_or_else(|| AcrylMicrovmError::Config("CONNECT URI has no authority".into()))?
+            .clone();
+        let mut connector = self.tunnel_connector.clone();
+        let io = tokio::time::timeout(TUNNEL_SETUP_TIMEOUT, connector.call(uri.clone()))
+            .await
+            .map_err(|_| AcrylMicrovmError::Network("CONNECT socket setup timed out".into()))?
+            .map_err(|e| AcrylMicrovmError::Network(format!("CONNECT socket setup failed: {e}")))?;
+        let (mut sender, connection) = hyper::client::conn::http1::handshake(io)
+            .await
+            .map_err(|e| AcrylMicrovmError::Network(format!("CONNECT handshake failed: {e}")))?;
+        tokio::spawn(async move {
+            let _ = connection.with_upgrades().await;
+        });
+        let mut request = Request::builder()
+            .method(Method::CONNECT)
+            .uri(authority.as_str())
+            .header("Host", authority.as_str());
+        if let Some(token) = self.current_bearer().await? {
+            request = request.header("X-AcrylMicrovm-Authorization", format!("Bearer {token}"));
+        }
+        let request = request
+            .body(Empty::<bytes::Bytes>::new())
+            .map_err(|e| AcrylMicrovmError::Internal(format!("CONNECT request build failed: {e}")))?;
+        let response = tokio::time::timeout(TUNNEL_SETUP_TIMEOUT, sender.send_request(request))
+            .await
+            .map_err(|_| AcrylMicrovmError::Network("CONNECT response timed out".into()))?
+            .map_err(|e| AcrylMicrovmError::Network(format!("CONNECT request failed: {e}")))?;
+        let status = response.status();
+        if !status.is_success() {
+            // Our own proxy answers this handshake with a verdict of its own,
+            // in plain text rather than our envelope. Carry its sentence and
+            // read the class off the status; a refusal it wrote is never an
+            // intermediary's fault.
+            let detail = read_connect_refusal(response).await;
+            return Err(map_plain_reply(status, &detail));
+        }
+        let upgraded = hyper::upgrade::on(response)
+            .await
+            .map_err(|e| AcrylMicrovmError::Network(format!("CONNECT upgrade failed: {e}")))?;
+        // The upgraded stream is already AsyncRead + AsyncWrite, so hand it
+        // over directly. Bridging it through `tokio::io::duplex` would only buy
+        // a concrete type we already have, at the cost of a buffer, a pump task
+        // and a copy of every byte in both directions.
+        Ok(TokioIo::new(upgraded))
+    }
+
+    /// Prepare a box service tunnel and return its access descriptor.
+    pub(crate) async fn prepare_box_tunnel(
+        &self,
+        box_id: impl AsRef<str>,
+        port: u16,
+        is_public: bool,
+    ) -> AcrylMicrovmResult<TunnelDescriptor> {
+        let path = format!("/boxes/{}/network/tunnel?port={port}", box_id.as_ref());
+        // Public is the server default, so it keeps the bodiless request older
+        // servers already accept; only private sends the field.
+        let builder = if is_public {
+            self.empty_post_request(&path)
+        } else {
+            // Older APIs ignore the POST body and would publish this port.
+            self.require_private_tunnels_enabled().await?;
+            self.http
+                .post(self.url(&path))
+                .json(&serde_json::json!({"isPublic": false}))
+        }
+        .header(reqwest::header::ACCEPT, "application/json");
+        let descriptor: TunnelDescriptor = self.send_json(builder).await?;
+        if descriptor.is_public != is_public || (!is_public && descriptor.token.is_none()) {
+            return Err(AcrylMicrovmError::Unsupported(
+                "server did not honor tunnel access policy".into(),
+            ));
+        }
+        Ok(descriptor)
+    }
+
+    /// Withdraw the declaration of a box service port, regardless of access mode.
+    pub(crate) async fn revoke_box_tunnel(
+        &self,
+        box_id: impl AsRef<str>,
+        port: u16,
+    ) -> AcrylMicrovmResult<()> {
+        let path = format!("/boxes/{}/network/tunnel", box_id.as_ref());
+        self.delete_with_query(&path, &[("port", &port.to_string())])
+            .await
+    }
+
+    /// Build an authorized file request bounded by the box lifetime.
+    pub async fn authorized_request(
+        &self,
+        method: Method,
+        path: &str,
+    ) -> AcrylMicrovmResult<RequestBuilder> {
+        let builder = self
+            .http
+            .request(method, self.url(path))
+            .timeout(FILE_REQUEST_TIMEOUT);
+        self.authorize(builder).await
+    }
+
+    pub async fn get_config(&self) -> AcrylMicrovmResult<ServerConfig> {
+        {
+            let cache = self.config_cache.read().await;
+            if let Some(config) = cache.as_ref() {
+                return Ok(config.clone());
+            }
+        }
+
+        let config = self.fetch_config().await?;
+        let mut cache = self.config_cache.write().await;
+        *cache = Some(config.clone());
+        Ok(config)
+    }
+
+    async fn fetch_config(&self) -> AcrylMicrovmResult<ServerConfig> {
+        self.get_root("/config").await
+    }
+
+    /// `GET /v1/me` — identity of the calling credential. Not cached
+    /// (identity is per-credential and cheap; unlike static capabilities).
+    /// A 404 surfaces as `AcrylMicrovmError::NotFound` (server without `/v1/me`);
+    /// 401/403 as `AcrylMicrovmError::Config("auth: …")` — callers branch on these.
+    pub async fn get_me(&self) -> AcrylMicrovmResult<Principal> {
+        self.get_root("/me").await
+    }
+
+    pub async fn require_snapshots_enabled(&self) -> AcrylMicrovmResult<()> {
+        let config = self.get_config().await?;
+        let capabilities = config.capabilities.ok_or_else(|| {
+            AcrylMicrovmError::Unsupported(
+                "Remote server did not advertise snapshots capability".to_string(),
+            )
+        })?;
+        ensure_capability("snapshots", capabilities.snapshots_enabled)
+    }
+
+    pub async fn require_linux_capabilities_enabled(&self) -> AcrylMicrovmResult<()> {
+        // This gate protects a security policy, so a cached positive response
+        // is insufficient after a server rollback or replacement. Recheck the
+        // live endpoint immediately before every capability-bearing create.
+        let config = self.fetch_config().await?;
+        let capabilities = config.capabilities.ok_or_else(|| {
+            AcrylMicrovmError::Unsupported(
+                "Remote server did not advertise Linux capabilities support".to_string(),
+            )
+        })?;
+        ensure_capability(
+            "Linux capabilities",
+            capabilities.linux_capabilities_enabled,
+        )
+    }
+
+    async fn require_private_tunnels_enabled(&self) -> AcrylMicrovmResult<()> {
+        // Like Linux capabilities: an older replica would publish the port,
+        // so a cached positive response is not enough.
+        let config = self.fetch_config().await?;
+        let capabilities = config.capabilities.ok_or_else(|| {
+            AcrylMicrovmError::Unsupported(
+                "Remote server did not advertise private tunnel support".to_string(),
+            )
+        })?;
+        ensure_capability("private tunnel", capabilities.private_tunnels_enabled)
+    }
+
+    pub async fn require_exec_user_enabled(&self) -> AcrylMicrovmResult<()> {
+        // A server that ignores `user` runs the command as the box default
+        // user (often root), so recheck the live endpoint before every exec
+        // that names one rather than trusting a cached answer.
+        let config = self.fetch_config().await?;
+        let capabilities = config.capabilities.ok_or_else(|| {
+            AcrylMicrovmError::Unsupported(
+                "Remote server did not advertise per-exec user support".to_string(),
+            )
+        })?;
+        ensure_capability("per-exec user", capabilities.exec_user_enabled)
+    }
+
+    pub async fn require_privileged_enabled(&self) -> AcrylMicrovmResult<()> {
+        // Recheck before every create: cached support may outlive a rollback.
+        let config = self.fetch_config().await?;
+        ensure_capability(
+            "guest privileged",
+            config.capabilities.and_then(|caps| caps.privileged_enabled),
+        )
+    }
+
+    pub async fn require_clone_enabled(&self) -> AcrylMicrovmResult<()> {
+        let config = self.get_config().await?;
+        let capabilities = config.capabilities.ok_or_else(|| {
+            AcrylMicrovmError::Unsupported(
+                "Remote server did not advertise clone capability".to_string(),
+            )
+        })?;
+        ensure_capability("clone", capabilities.clone_enabled)
+    }
+
+    pub async fn require_export_enabled(&self) -> AcrylMicrovmResult<()> {
+        let config = self.get_config().await?;
+        let capabilities = config.capabilities.ok_or_else(|| {
+            AcrylMicrovmError::Unsupported(
+                "Remote server did not advertise export capability".to_string(),
+            )
+        })?;
+        ensure_capability("export", capabilities.export_enabled)
+    }
+
+    pub async fn require_import_enabled(&self) -> AcrylMicrovmResult<()> {
+        let config = self.get_config().await?;
+        let capabilities = config.capabilities.ok_or_else(|| {
+            AcrylMicrovmError::Unsupported(
+                "Remote server did not advertise import capability".to_string(),
+            )
+        })?;
+        ensure_capability("import", capabilities.import_enabled)
+    }
+
+    /// POST binary data with query params, parse JSON response.
+    pub async fn post_bytes_for_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        data: Vec<u8>,
+        query: &[(&str, &str)],
+    ) -> AcrylMicrovmResult<T> {
+        let builder = self
+            .http
+            .post(self.url(path))
+            .header("Content-Type", "application/octet-stream")
+            .query(query)
+            .body(data);
+        self.send_json(builder).await
+    }
+}
+
+/// Convert a `reqwest::Error` into a typed `AcrylMicrovmError::Network` with
+/// the underlying cause described in the message. Distinguishes
+/// connect/DNS/TLS failures from request-build failures from timeouts
+/// so the user can act on the diagnosis — a connect refused is "is the
+/// server running?" while a builder error is a client-side bug.
+///
+/// The wrapper preserves the original `reqwest::Error` Display chain
+/// (URL, status, cause) which usually includes the destination host —
+/// invaluable for diagnosing transparent-proxy regressions like the
+/// Clash `:7890` interception that produced bare 502s in
+/// production.
+pub(super) fn transport_error(err: reqwest::Error) -> AcrylMicrovmError {
+    let url_hint = err.url().map(|u| u.as_str().to_string());
+    let kind = if err.is_connect() {
+        "connect failed"
+    } else if err.is_timeout() {
+        "timed out"
+    } else if err.is_request() {
+        "request build failed"
+    } else if err.is_decode() {
+        "response decode failed"
+    } else {
+        "transport error"
+    };
+    let detail = match url_hint {
+        Some(url) => format!("{kind} reaching {url}: {err}"),
+        None => format!("{kind}: {err}"),
+    };
+    AcrylMicrovmError::Network(detail)
+}
+
+/// Map a tungstenite connect error to a typed `AcrylMicrovmError`.
+///
+/// The explicit arms below are the WS attach contract, not a copy of the
+/// REST baseline: on this handshake 404 means the session is gone, 409 that
+/// the single attach slot is taken, 410 that the reaper got there first —
+/// and the reattach loop in `litebox` branches on exactly those classes
+/// (`AlreadyExists` to back off, `NotFound`/`SessionReaped` to stop), with
+/// its tests pinning them. The backends also do not agree on a body shape
+/// here (`serve` rejects with the wire envelope, the runner with gin's
+/// `{"error": text}`), so the classes stay keyed on the status; the envelope,
+/// when present, contributes its sentence rather than raw JSON. Statuses
+/// with no meaning of their own on this handshake are read like any other
+/// REST reply.
+fn map_ws_error(err: tokio_tungstenite::tungstenite::Error) -> AcrylMicrovmError {
+    use tokio_tungstenite::tungstenite::Error as TgErr;
+    if let TgErr::Http(resp) = &err {
+        let status = resp.status();
+        let raw = resp
+            .body()
+            .as_ref()
+            .map(|b| String::from_utf8_lossy(b).into_owned())
+            .unwrap_or_default();
+        // `serve` rejects the upgrade with the same envelope every REST
+        // route answers with; carry its sentence, never the JSON itself.
+        let body = super::error::envelope_message(&raw).unwrap_or_else(|| raw.clone());
+        return match status.as_u16() {
+            404 => AcrylMicrovmError::NotFound(if body.is_empty() {
+                "session not found".to_string()
+            } else {
+                body
+            }),
+            409 => AcrylMicrovmError::AlreadyExists(if body.is_empty() {
+                "another client is already attached".to_string()
+            } else {
+                body
+            }),
+            410 => AcrylMicrovmError::SessionReaped(if body.is_empty() {
+                "exec session reaped; start a new exec".to_string()
+            } else {
+                body
+            }),
+            401 | 403 => AcrylMicrovmError::Config(format!("WS auth rejected ({}): {}", status, body)),
+            // No WS-specific meaning — 5xx included: read it like any other
+            // REST reply, envelope, flat body, or bare status alike. A
+            // refusal the server names (`invalid_argument` on a 400,
+            // `engine_unavailable` on a 503) keeps its class instead of
+            // arriving as a server fault or an intermediary's.
+            _ => map_http_body(status, &raw),
+        };
+    }
+    AcrylMicrovmError::Network(format!("WS connect failed: {}", err))
+}
+
+fn ensure_capability(name: &str, enabled: Option<bool>) -> AcrylMicrovmResult<()> {
+    match enabled {
+        Some(true) => Ok(()),
+        Some(false) => Err(AcrylMicrovmError::Unsupported(format!(
+            "Remote server does not support {} operations",
+            name
+        ))),
+        None => Err(AcrylMicrovmError::Unsupported(format!(
+            "Remote server did not advertise {} capability",
+            name
+        ))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_capability;
+    use super::*;
+    use crate::rest::credential::{AccessToken, Credential};
+    use crate::rest::error::map_http_body;
+    use async_trait::async_trait;
+    use acrylmicrovm_shared::errors::AcrylMicrovmError;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn activity_client_labels_reach_http_and_file_requests() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                while !bytes.ends_with(b"\r\n\r\n") {
+                    bytes.push(stream.read_u8().await.unwrap());
+                }
+                requests.push(String::from_utf8(bytes).unwrap().to_lowercase());
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                    )
+                    .await
+                    .unwrap();
+            }
+            requests
+        });
+        let client = ApiClient::new(
+            &AcrylMicrovmRestOptions::new(format!("http://{address}"))
+                .with_api_key("test-only-key")
+                .with_path_prefix("org-1"),
+        )
+        .unwrap();
+        let _: serde_json::Value = client.get("/boxes").await.unwrap();
+        client
+            .authorized_request(Method::GET, "/boxes/box-1/files")
+            .await
+            .unwrap()
+            .send()
+            .await
+            .unwrap();
+        let requests = server.await.unwrap();
+        for request in &requests {
+            assert!(request.contains("x-acrylmicrovm-source: sdk\r\n"), "{request}");
+            assert!(
+                request.contains(&format!(
+                    "x-acrylmicrovm-sdk-version: {}\r\n",
+                    env!("CARGO_PKG_VERSION")
+                )),
+                "{request}"
+            );
+            assert!(request.contains("authorization: bearer test-only-key\r\n"));
+        }
+        assert!(requests[0].starts_with("get /v1/org-1/boxes http/1.1"));
+        assert!(requests[1].starts_with("get /v1/org-1/boxes/box-1/files http/1.1"));
+    }
+
+    #[tokio::test]
+    async fn activity_client_labels_reach_api_websocket_handshakes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (sent, received) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            #[expect(
+                clippy::result_large_err,
+                reason = "tungstenite fixes the handshake callback's ErrorResponse type"
+            )]
+            let callback =
+                move |request: &tokio_tungstenite::tungstenite::handshake::server::Request,
+                      response| {
+                    sent.send((request.uri().path().to_string(), request.headers().clone()))
+                        .unwrap();
+                    Ok(response)
+                };
+            tokio_tungstenite::accept_hdr_async(stream, callback)
+                .await
+                .unwrap()
+        });
+        let client = ApiClient::new(
+            &AcrylMicrovmRestOptions::new(format!("http://{address}")).with_api_key("test-only-key"),
+        )
+        .unwrap();
+        let _stream = client.connect_ws("/boxes/box-1/attach").await.unwrap();
+        let (path, headers) = received.await.unwrap();
+        let _server_stream = server.await.unwrap();
+        assert_eq!(
+            headers
+                .get("x-acrylmicrovm-source")
+                .and_then(|value| value.to_str().ok()),
+            Some("sdk")
+        );
+        assert_eq!(
+            headers
+                .get("x-acrylmicrovm-sdk-version")
+                .and_then(|value| value.to_str().ok()),
+            Some(env!("CARGO_PKG_VERSION"))
+        );
+        assert_eq!(
+            headers.get("authorization").unwrap(),
+            "Bearer test-only-key"
+        );
+        assert_eq!(path, "/v1/boxes/box-1/attach");
+    }
+
+    async fn serve_response_body_on_signal(
+        listener: TcpListener,
+        response_started: oneshot::Sender<()>,
+        finish_body: oneshot::Receiver<()>,
+    ) {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut headers = Vec::new();
+        while !headers.ends_with(b"\r\n\r\n") {
+            headers.push(socket.read_u8().await.unwrap());
+        }
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\n\
+                  Content-Type: application/json\r\n\
+                  Content-Length: 2\r\n\
+                  Connection: close\r\n\r\n{",
+            )
+            .await
+            .unwrap();
+        response_started.send(()).unwrap();
+        finish_body.await.unwrap();
+        let _ = socket.write_all(b"}").await;
+    }
+
+    /// Rotating credential with a finite expiry already in the past, so
+    /// `current_bearer` must re-request on every call. Proves the cache
+    /// is expiry-driven and works for any `Credential` impl, not just
+    /// `ApiKeyCredential`.
+    #[derive(Debug)]
+    struct RotatingMock {
+        calls: AtomicUsize,
+        /// When false, behaves like an API key (`expires_at: None`).
+        expiring: bool,
+    }
+
+    #[async_trait]
+    impl Credential for RotatingMock {
+        async fn get_token(&self) -> AcrylMicrovmResult<AccessToken> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(AccessToken {
+                token: format!("tok-{n}"),
+                // Past instant → always within leeway → always re-fetch.
+                expires_at: self
+                    .expiring
+                    .then(|| SystemTime::now() - Duration::from_secs(3600)),
+            })
+        }
+    }
+
+    fn client_with(cred: Arc<dyn Credential>) -> ApiClient {
+        let opts = AcrylMicrovmRestOptions::new("http://localhost:1").with_credential(cred);
+        ApiClient::new(&opts).expect("client")
+    }
+
+    #[test]
+    fn empty_post_request_explicitly_declares_zero_content_length() {
+        let client = unauthenticated_client(AcrylMicrovmRestOptions::new("https://api.example.com"));
+        let request = client
+            .empty_post_request("/boxes/box1/start")
+            .build()
+            .unwrap();
+
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::CONTENT_LENGTH)
+                .and_then(|value| value.to_str().ok()),
+            Some("0"),
+            "the request must declare its empty body before the HTTP transport runs"
+        );
+        assert!(request.body().is_none(), "an empty POST must stay bodyless");
+    }
+
+    #[tokio::test]
+    async fn file_request_outlives_default_timeout() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (response_started_tx, response_started_rx) = oneshot::channel();
+        let (finish_body_tx, finish_body_rx) = oneshot::channel();
+        let server = tokio::spawn(serve_response_body_on_signal(
+            listener,
+            response_started_tx,
+            finish_body_rx,
+        ));
+
+        let client =
+            ApiClient::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let request = client
+            .authorized_request(Method::GET, "/boxes/box1/files")
+            .await
+            .unwrap();
+        let response = request.send().await.unwrap();
+
+        response_started_rx.await.unwrap();
+        tokio::time::pause();
+        tokio::time::sleep(Duration::from_secs(301)).await;
+        tokio::time::resume();
+        finish_body_tx.send(()).unwrap();
+
+        let bytes = tokio::time::timeout(Duration::from_secs(5), response.bytes())
+            .await
+            .expect("file response body must arrive after the timeout boundary")
+            .expect("file request must outlive the default 300-second timeout");
+        assert_eq!(bytes.as_ref(), b"{}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn control_request_keeps_total_timeout() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (response_started_tx, response_started_rx) = oneshot::channel();
+        let (finish_body_tx, finish_body_rx) = oneshot::channel();
+        let server = tokio::spawn(serve_response_body_on_signal(
+            listener,
+            response_started_tx,
+            finish_body_rx,
+        ));
+
+        let client =
+            ApiClient::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let control_request =
+            tokio::spawn(async move { client.get::<serde_json::Value>("/slow").await });
+
+        response_started_rx.await.unwrap();
+        tokio::time::pause();
+        tokio::time::sleep(Duration::from_secs(301)).await;
+        tokio::time::resume();
+
+        let error = control_request
+            .await
+            .unwrap()
+            .expect_err("control request must retain its total timeout");
+        assert!(
+            matches!(&error, AcrylMicrovmError::Network(detail) if detail.contains("timed out")),
+            "control request must fail because its total timeout elapsed, got {error:?}"
+        );
+        finish_body_tx.send(()).unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::result_large_err)]
+    async fn connect_box_network_tunnel_uses_connect_and_streams_both_directions() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(socket.read_u8().await.unwrap());
+            }
+            let headers = String::from_utf8(headers).unwrap();
+            assert!(headers.starts_with(&format!("CONNECT 127.0.0.1:{port} HTTP/1.1")));
+            socket
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+
+            let mut payload = [0; 4];
+            socket.read_exact(&mut payload).await.unwrap();
+            assert_eq!(&payload, b"ping");
+            socket.write_all(&payload).await.unwrap();
+        });
+
+        let client =
+            ApiClient::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let mut stream = client
+            .connect_box_network_tunnel(&format!("http://127.0.0.1:{port}"))
+            .await
+            .unwrap();
+        stream.write_all(b"ping").await.unwrap();
+        let mut response = [0; 4];
+        stream.read_exact(&mut response).await.unwrap();
+        assert_eq!(&response, b"ping");
+
+        // A remotely served connection has no descriptor to lend or surrender:
+        // hyper owns the socket and may hold already-read tunnel bytes.
+        let connection = crate::litebox::BoxConnection::new(stream);
+        assert_eq!(connection.raw_fd(), None);
+        let error = connection
+            .into_fd()
+            .expect_err("an upgraded remote stream has no descriptor");
+        assert!(
+            error.to_string().contains("no local descriptor"),
+            "unexpected error: {error}"
+        );
+
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn private_tunnel_connect_sends_platform_credentials() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let uri = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(socket.read_u8().await.unwrap());
+            }
+            socket
+                .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                .await
+                .unwrap();
+            String::from_utf8(headers).unwrap()
+        });
+        let client =
+            ApiClient::new(&AcrylMicrovmRestOptions::new(uri.clone()).with_api_key("tunnel-test-key"))
+                .unwrap();
+        let _stream = client.connect_box_network_tunnel(&uri).await.unwrap();
+        let headers = server.await.unwrap().to_ascii_lowercase();
+        assert!(
+            headers.contains("x-acrylmicrovm-authorization: bearer tunnel-test-key\r\n"),
+            "CONNECT must carry the runtime's platform credential"
+        );
+    }
+
+    /// Our proxy answers this handshake with a verdict of its own and states
+    /// it in plain text. Each refusal must keep the class its status names and
+    /// the sentence the proxy wrote: a bad target is the caller's error, a
+    /// box with inbound access disabled is an auth failure the CLI keys on, and
+    /// a runner the proxy could not reach is an upstream failure — never an
+    /// intermediary's, since the proxy plainly answered.
+    #[tokio::test]
+    #[allow(clippy::result_large_err)]
+    async fn connect_box_network_tunnel_keeps_the_proxys_own_verdict() {
+        /// One tunnel-refusal case: `(status_line, proxy_sentence,
+        /// variant_predicate)`. Aliased so clippy doesn't flag the tuple.
+        type RefusalCase = (&'static str, &'static str, fn(&AcrylMicrovmError) -> bool);
+        let cases: &[RefusalCase] = &[
+            ("400 Bad Request", "bad tunnel target", |e| {
+                matches!(e, AcrylMicrovmError::InvalidArgument(_))
+            }),
+            (
+                "403 Forbidden",
+                "box inbound access is disabled",
+                |e| matches!(e, AcrylMicrovmError::Config(msg) if msg.starts_with("auth:")),
+            ),
+            ("502 Bad Gateway", "runner unavailable", |e| {
+                matches!(e, AcrylMicrovmError::Network(_))
+            }),
+        ];
+
+        for (status_line, body, is_expected) in cases {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let reply = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(socket.read_u8().await.unwrap());
+                }
+                socket.write_all(reply.as_bytes()).await.unwrap();
+            });
+
+            let client =
+                ApiClient::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
+                    .unwrap();
+            let err = client
+                .connect_box_network_tunnel(&format!("http://127.0.0.1:{port}"))
+                .await
+                .expect_err("a non-2xx CONNECT reply is a refusal");
+
+            assert!(
+                is_expected(&err),
+                "{status_line} lost the class its status names: {err:?}"
+            );
+            let rendered = err.to_string();
+            assert!(
+                rendered.contains(body),
+                "the proxy's own sentence must survive {status_line}: {rendered}"
+            );
+            assert!(
+                !rendered.contains("no error envelope"),
+                "the proxy answered, so {status_line} is not an intermediary's \
+                 fault: {rendered}"
+            );
+
+            server.await.unwrap();
+        }
+    }
+
+    /// A peer answering a handshake with more than a sentence is not stating a
+    /// reason, and buffering whatever it sends would trust it for length. Past
+    /// the read limit the status is reported on its own.
+    #[tokio::test]
+    #[allow(clippy::result_large_err)]
+    async fn connect_box_network_tunnel_caps_an_oversized_refusal() {
+        let flood = "x".repeat(CONNECT_REFUSAL_MAX_BYTES * 4);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let reply = format!(
+            "HTTP/1.1 403 Forbidden\r\nContent-Length: {}\r\n\r\n{flood}",
+            flood.len()
+        );
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(socket.read_u8().await.unwrap());
+            }
+            let _ = socket.write_all(reply.as_bytes()).await;
+        });
+
+        let client =
+            ApiClient::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let err = client
+            .connect_box_network_tunnel(&format!("http://127.0.0.1:{port}"))
+            .await
+            .expect_err("a 403 CONNECT reply is a refusal");
+
+        let rendered = err.to_string();
+        assert!(
+            rendered.len() < CONNECT_REFUSAL_MAX_BYTES * 2,
+            "an oversized refusal must not reach the message: {} bytes",
+            rendered.len()
+        );
+        assert!(
+            !rendered.contains(&"x".repeat(CONNECT_REFUSAL_MAX_BYTES)),
+            "the flood must not be buffered into the error"
+        );
+        assert!(
+            matches!(err, AcrylMicrovmError::Config(ref msg) if msg.starts_with("auth:")),
+            "the status still names the class: {err:?}"
+        );
+
+        let _ = server.await;
+    }
+
+    /// A WS-upgrade rejection from `serve` carries the wire envelope. The
+    /// explicit arms keep the attach contract's classes, but the text they
+    /// surface must be the server's sentence, never the JSON itself — and a
+    /// status with no attach meaning takes the envelope's own class instead
+    /// of arriving as a server fault.
+    #[test]
+    fn ws_upgrade_rejections_read_the_envelope() {
+        use tokio_tungstenite::tungstenite::Error as TgErr;
+
+        let http_reject = |status: u16, body: &str| {
+            TgErr::Http(
+                tokio_tungstenite::tungstenite::http::Response::builder()
+                    .status(status)
+                    .body(Some(body.as_bytes().to_vec()))
+                    .unwrap(),
+            )
+        };
+
+        // 409 keeps the attach contract's AlreadyExists, with the sentence.
+        let err = map_ws_error(http_reject(
+            409,
+            r#"{"error":{"message":"execution e1 already has an attached client","type":"InvalidStateError","code":"invalid_state"}}"#,
+        ));
+        match err {
+            AcrylMicrovmError::AlreadyExists(msg) => {
+                assert!(msg.contains("already has an attached client"), "{msg}");
+                assert!(!msg.contains('{'), "raw JSON must not leak: {msg}");
+            }
+            other => panic!("attach 409 keeps its contract class, got {other:?}"),
+        }
+
+        // 400 has no attach meaning of its own: the envelope's code decides.
+        let err = map_ws_error(http_reject(
+            400,
+            r#"{"error":{"message":"box name contains a slash","type":"InvalidArgumentError","code":"invalid_argument"}}"#,
+        ));
+        assert!(
+            matches!(err, AcrylMicrovmError::InvalidArgument(_)),
+            "a named caller error must not arrive as a server fault: {err:?}"
+        );
+
+        // Neither has a 5xx: a 503 the server answered with a named code is
+        // the class that code names, never an intermediary's fault.
+        let err = map_ws_error(http_reject(
+            503,
+            r#"{"error":{"message":"engine is down","type":"EngineError","code":"engine_unavailable"}}"#,
+        ));
+        match err {
+            AcrylMicrovmError::Engine(msg) => {
+                assert!(msg.contains("engine is down"), "{msg}");
+            }
+            other => panic!("a named 503 must keep its class, got {other:?}"),
+        }
+        let rendered = map_ws_error(http_reject(
+            503,
+            r#"{"error":{"message":"engine is down","type":"EngineError","code":"engine_unavailable"}}"#,
+        ))
+        .to_string();
+        assert!(
+            !rendered.contains("proxy or load balancer"),
+            "an answered 503 must not be attributed to an intermediary: {rendered}"
+        );
+
+        // The runner rejects with gin's `{"error": "<text>"}` — its only
+        // attach rejection shape, and the API's WS proxy passes it through
+        // verbatim. The 404 arm keeps its class; the sentence, not the JSON,
+        // is what the user reads.
+        let err = map_ws_error(http_reject(404, r#"{"error":"execution e1 not found"}"#));
+        match err {
+            AcrylMicrovmError::NotFound(msg) => {
+                assert!(msg.contains("execution e1 not found"), "{msg}");
+                assert!(!msg.contains('{'), "raw JSON must not leak: {msg}");
+            }
+            other => panic!("a runner 404 keeps its class, got {other:?}"),
+        }
+    }
+
+    /// `prepare_box_tunnel` sends its descriptor request through the shared
+    /// control-request path, so this pins the wire contract that path owes it:
+    /// POST to the prefixed tunnel URL, JSON accepted, descriptor parsed back.
+    #[tokio::test]
+    async fn prepare_box_tunnel_posts_descriptor_request_and_parses_uri() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                headers.push(socket.read_u8().await.unwrap());
+            }
+            let headers = String::from_utf8(headers).unwrap().to_lowercase();
+            assert!(
+                headers.starts_with("post /v1/boxes/box1/network/tunnel?port=8080 http/1.1"),
+                "unexpected request line: {headers}"
+            );
+            assert!(
+                headers.contains("accept: application/json"),
+                "descriptor request must ask for json: {headers}"
+            );
+            let body = r#"{"uri":"http://127.0.0.1:9/tunnel"}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+
+        let client =
+            ApiClient::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let descriptor = client.prepare_box_tunnel("box1", 8080, true).await.unwrap();
+
+        assert_eq!(descriptor.uri, "http://127.0.0.1:9/tunnel");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn private_tunnel_rejects_old_servers_before_posting() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(socket.read_u8().await.unwrap());
+            }
+            // An older API's config lists capabilities without private tunnels.
+            let body = r#"{"capabilities":{"inbound_update_enabled":true}}"#;
+            socket
+                .write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes())
+                .await
+                .unwrap();
+            // A POST after the refusal would arrive as a second connection.
+            let posted = tokio::time::timeout(Duration::from_millis(500), listener.accept())
+                .await
+                .is_ok();
+            (String::from_utf8(head).unwrap(), posted)
+        });
+        let client = ApiClient::new(&AcrylMicrovmRestOptions::new(url)).unwrap();
+        let error = client
+            .prepare_box_tunnel("box1", 3000, false)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)));
+        let (head, posted) = server.await.unwrap();
+        assert!(head.starts_with("GET /v1/config "), "{head}");
+        assert!(
+            !posted,
+            "private prepare reached a server without the capability"
+        );
+    }
+
+    #[tokio::test]
+    async fn expiring_credential_is_re_requested_each_call() {
+        let mock = Arc::new(RotatingMock {
+            calls: AtomicUsize::new(0),
+            expiring: true,
+        });
+        let client = client_with(mock.clone());
+        let a = client.current_bearer().await.unwrap();
+        let b = client.current_bearer().await.unwrap();
+        assert_eq!(a.as_deref(), Some("tok-0"));
+        assert_eq!(b.as_deref(), Some("tok-1"), "expired token must rotate");
+        assert_eq!(mock.calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn non_expiring_credential_is_fetched_once() {
+        let mock = Arc::new(RotatingMock {
+            calls: AtomicUsize::new(0),
+            expiring: false,
+        });
+        let client = client_with(mock.clone());
+        let a = client.current_bearer().await.unwrap();
+        let b = client.current_bearer().await.unwrap();
+        assert_eq!(a.as_deref(), Some("tok-0"));
+        assert_eq!(b.as_deref(), Some("tok-0"), "API-key token must cache");
+        assert_eq!(
+            mock.calls.load(Ordering::SeqCst),
+            1,
+            "expires_at=None must be fetched exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn no_credential_yields_no_bearer() {
+        let opts = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let client = ApiClient::new(&opts).expect("client");
+        assert_eq!(client.current_bearer().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn linux_capability_gate_rechecks_uncached_server_config() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            for body in [
+                r#"{"capabilities":{"linux_capabilities_enabled":true}}"#,
+                r#"{"capabilities":{}}"#,
+            ] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(socket.read_u8().await.unwrap());
+                }
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let client =
+            ApiClient::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        client.require_linux_capabilities_enabled().await.unwrap();
+        let second = client.require_linux_capabilities_enabled().await;
+        server.abort();
+
+        assert!(matches!(second, Err(AcrylMicrovmError::Unsupported(_))));
+    }
+
+    #[test]
+    fn flat_nest_error_response_maps_by_code() {
+        let err = map_http_body(
+            StatusCode::BAD_GATEWAY,
+            r#"{"statusCode":502,"error":"Bad Gateway","message":"Runner API returned a non-JSON error response","code":"runner_non_json_error"}"#,
+        );
+
+        match err {
+            AcrylMicrovmError::Network(message) => {
+                assert!(message.contains("Runner API returned a non-JSON error response"))
+            }
+            other => panic!("expected Network error for runner non-JSON response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_ensure_capability_enabled() {
+        assert!(ensure_capability("snapshots", Some(true)).is_ok());
+    }
+
+    #[test]
+    fn test_ensure_capability_disabled() {
+        let err = ensure_capability("snapshots", Some(false)).unwrap_err();
+        assert!(matches!(err, AcrylMicrovmError::Unsupported(_)));
+    }
+
+    #[test]
+    fn test_ensure_capability_missing() {
+        let err = ensure_capability("snapshots", None).unwrap_err();
+        assert!(matches!(err, AcrylMicrovmError::Unsupported(_)));
+    }
+
+    // ========================================================================
+    // URL shape — vendor-agnostic routing slot.
+    //
+    // Locks in the three shapes the OpenAPI contract supports for the
+    // `{prefix}` slot: single-segment, empty (no slot), and
+    // multi-segment-with-slashes. The single-segment case is what
+    // acrylmicrovm cloud uses (org UUID); the empty case is what
+    // `acrylmicrovm serve` and single-tenant deployments use; the multi-
+    // segment case unlocks future region+team / workspace shapes per
+    // the spec note in `openapi/box.openapi.yaml`.
+    // ========================================================================
+
+    fn unauthenticated_client(opts: AcrylMicrovmRestOptions) -> ApiClient {
+        ApiClient::new(&opts).expect("client")
+    }
+
+    #[test]
+    fn url_substitutes_path_prefix_when_set() {
+        let opts = AcrylMicrovmRestOptions::new("https://api.example.com").with_path_prefix("acme");
+        let client = unauthenticated_client(opts);
+        assert_eq!(
+            client.url("/boxes"),
+            "https://api.example.com/v1/acme/boxes",
+            "non-empty prefix must round-trip verbatim into the URL"
+        );
+    }
+
+    #[test]
+    fn url_skips_segment_when_path_prefix_unset() {
+        let opts = AcrylMicrovmRestOptions::new("https://api.example.com");
+        let client = unauthenticated_client(opts);
+        assert_eq!(
+            client.url("/boxes"),
+            "https://api.example.com/v1/boxes",
+            "unset prefix must drop the segment — empty-prefix is the canonical \
+             single-tenant deployment shape"
+        );
+    }
+
+    #[test]
+    fn url_skips_segment_when_path_prefix_empty() {
+        let opts = AcrylMicrovmRestOptions::new("https://api.example.com").with_path_prefix("");
+        let client = unauthenticated_client(opts);
+        assert_eq!(
+            client.url("/boxes"),
+            "https://api.example.com/v1/boxes",
+            "explicit empty-string prefix is wire-equivalent to unset"
+        );
+    }
+
+    #[test]
+    fn url_passes_multi_segment_path_prefix_verbatim() {
+        // Multi-segment prefix per spec — internal `/` characters are
+        // preserved (allowReserved: true on the path parameter). Unlocks
+        // region+team / catalog routing for vendors that need it.
+        let opts =
+            AcrylMicrovmRestOptions::new("https://api.example.com").with_path_prefix("us-east/team-42");
+        let client = unauthenticated_client(opts);
+        assert_eq!(
+            client.url("/boxes"),
+            "https://api.example.com/v1/us-east/team-42/boxes",
+            "multi-segment prefix must pass slashes through verbatim"
+        );
+    }
+
+    #[test]
+    fn url_root_omits_path_prefix_segment() {
+        // `/v1/me`, `/v1/config` are root identity/discovery endpoints
+        // and never include the prefix segment, per spec.
+        let opts = AcrylMicrovmRestOptions::new("https://api.example.com").with_path_prefix("acme");
+        let client = unauthenticated_client(opts);
+        assert_eq!(
+            client.url_root("/me"),
+            "https://api.example.com/v1/me",
+            "url_root must skip the prefix segment regardless of its value"
+        );
+    }
+}

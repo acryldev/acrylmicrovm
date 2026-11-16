@@ -1,0 +1,135 @@
+// Modified by ACRYL, 2026
+//! Clone, export, and import handlers.
+
+use std::sync::Arc;
+
+use axum::Json;
+use axum::body::Bytes;
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+
+use acrylmicrovm::{BoxArchive, CloneOptions, ExportOptions};
+
+use super::super::types::{CloneRequest, ImportQuery};
+use super::super::{AppState, error_from_acrylmicrovm, error_response, get_or_fetch_box};
+
+pub(in crate::commands::serve) async fn clone_box(
+    State(state): State<Arc<AppState>>,
+    Path(box_id): Path<String>,
+    Json(req): Json<CloneRequest>,
+) -> Response {
+    let litebox = match get_or_fetch_box(&state, &box_id).await {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
+
+    match litebox.clone_box(CloneOptions::default(), req.name).await {
+        Ok(cloned) => {
+            let info = match cloned.info().await {
+                Ok(info) => info,
+                Err(e) => return error_from_acrylmicrovm(&e),
+            };
+            let cloned_id = info.id.to_string();
+            let resp = state.box_response(&info).await;
+            state
+                .boxes
+                .write()
+                .await
+                .insert(cloned_id, Arc::new(cloned));
+            (StatusCode::CREATED, Json(resp)).into_response()
+        }
+        Err(e) => error_from_acrylmicrovm(&e),
+    }
+}
+
+pub(in crate::commands::serve) async fn export_box(
+    State(state): State<Arc<AppState>>,
+    Path(box_id): Path<String>,
+) -> Response {
+    let litebox = match get_or_fetch_box(&state, &box_id).await {
+        Ok(b) => b,
+        Err(resp) => return resp,
+    };
+
+    let temp_dir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to create temp dir: {e}"),
+                "InternalError",
+                "internal",
+            );
+        }
+    };
+
+    match litebox
+        .export(ExportOptions::default(), temp_dir.path())
+        .await
+    {
+        Ok(archive) => {
+            let bytes = match std::fs::read(archive.path()) {
+                Ok(b) => b,
+                Err(e) => {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("failed to read archive: {e}"),
+                        "InternalError",
+                        "internal",
+                    );
+                }
+            };
+
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/octet-stream")
+                .body(axum::body::Body::from(bytes))
+                .unwrap()
+        }
+        Err(e) => error_from_acrylmicrovm(&e),
+    }
+}
+
+pub(in crate::commands::serve) async fn import_box(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ImportQuery>,
+    body: Bytes,
+) -> Response {
+    let temp_dir = match tempfile::tempdir() {
+        Ok(d) => d,
+        Err(e) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to create temp dir: {e}"),
+                "InternalError",
+                "internal",
+            );
+        }
+    };
+
+    let archive_path = temp_dir.path().join("import.acrylmicrovm");
+    if let Err(e) = std::fs::write(&archive_path, &body) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("failed to write archive: {e}"),
+            "InternalError",
+            "internal",
+        );
+    }
+
+    let archive = BoxArchive::from_untrusted_upload(archive_path);
+    match state.runtime.import_box(archive, query.name).await {
+        Ok(litebox) => {
+            let info = match litebox.info().await {
+                Ok(info) => info,
+                Err(e) => return error_from_acrylmicrovm(&e),
+            };
+            let box_id = info.id.to_string();
+            let resp = state.box_response(&info).await;
+            state.boxes.write().await.insert(box_id, Arc::new(litebox));
+            (StatusCode::CREATED, Json(resp)).into_response()
+        }
+        Err(e) => error_from_acrylmicrovm(&e),
+    }
+}

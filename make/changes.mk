@@ -1,0 +1,41 @@
+# Modified by ACRYL, 2026
+# Detect changed components by diffing against main (or HEAD~1 if on main).
+# Returns a space-separated list of component tags: rust cli ffi python node c go apps openapi
+define detect_changes
+$(shell \
+  BRANCH=$$(git rev-parse --abbrev-ref HEAD 2>/dev/null); \
+  if [ "$$BRANCH" = "main" ] || [ "$$BRANCH" = "master" ]; then \
+    BASE=HEAD~1; \
+  else \
+    BASE=$$(git merge-base HEAD main 2>/dev/null || git merge-base HEAD master 2>/dev/null || echo HEAD~1); \
+  fi; \
+  CHANGED=$$(git diff --name-only $$BASE HEAD 2>/dev/null; git diff --name-only 2>/dev/null; git diff --cached --name-only 2>/dev/null); \
+  if [ -z "$$CHANGED" ]; then exit 0; fi; \
+  echo "$$CHANGED" | grep -q '^src/acrylmicrovm/' && printf 'rust '; \
+  echo "$$CHANGED" | grep -q '^src/shared/' && printf 'rust '; \
+  echo "$$CHANGED" | grep -q '^src/guest/' && printf 'rust '; \
+  echo "$$CHANGED" | grep -q '^src/shim/' && printf 'rust '; \
+  echo "$$CHANGED" | grep -q '^src/hypervisor/' && printf 'rust '; \
+  echo "$$CHANGED" | grep -q '^src/vmm/' && printf 'rust '; \
+  echo "$$CHANGED" | grep -q '^apps/e2e/sdks/rust/' && printf 'rust '; \
+  echo "$$CHANGED" | grep -q '^src/cli/' && printf 'cli '; \
+  echo "$$CHANGED" | grep -q '^sdks/python/' && printf 'python '; \
+  echo "$$CHANGED" | grep -q '^sdks/node/' && printf 'node '; \
+  echo "$$CHANGED" | grep -q '^sdks/c/' && printf 'c '; \
+  echo "$$CHANGED" | grep -q '^sdks/go/' && printf 'go '; \
+  echo "$$CHANGED" | grep -q '^apps/' && printf 'apps '; \
+  echo "$$CHANGED" | grep -q '^openapi/' && printf 'openapi '; \
+  echo "$$CHANGED" | grep -q '^Cargo\.toml$$' && printf 'rust '; \
+  echo "$$CHANGED" | grep -q '^Cargo\.lock$$' && printf 'rust '; \
+)
+endef
+
+CHANGED_COMPONENTS := $(sort $(detect_changes))
+
+# Map test components to format/lint surfaces.
+# cli doesn't need a separate formatter — cargo fmt --all and clippy --workspace cover it.
+# ci and openapi are filtered out rather than mapped: quality.mk expands fmt:<comp> and
+# lint:<comp> for every tag here, and there is no formatter for workflow YAML or for the
+# Box API contract. Leaving either in would make `make lint:fix` — the pre-commit hook's
+# own entry point — invoke a target that does not exist.
+FMT_COMPONENTS := $(sort $(filter-out ci openapi,$(subst cli,rust,$(CHANGED_COMPONENTS))))

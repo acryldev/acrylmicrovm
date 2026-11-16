@@ -1,0 +1,827 @@
+// Modified by ACRYL, 2026
+import type { SocketAddress as NativeSocketAddress } from "node:net";
+import type { CopyOptions } from "./copy.js";
+import type { Agents } from "./agents.js";
+
+/**
+ * Checked-in TypeScript contracts for the native N-API module.
+ *
+ * The generated declarations under `sdks/node/native/` are build artifacts and
+ * are intentionally not part of the checked-in TypeScript dependency graph.
+ */
+
+export interface ImageInfo {
+  reference: string;
+  repository: string;
+  tag: string;
+  id: string;
+  cachedAt: string;
+  sizeBytes?: number;
+}
+
+export interface ImagePullResult {
+  reference: string;
+  configDigest: string;
+  layerCount: number;
+}
+
+/** One build of an image. */
+export interface ImageVersion {
+  /** Manifest digest, such as `sha256:…`. */
+  digest: string;
+  /** Sum of the layer sizes the manifest declares; absent when unknown. */
+  sizeBytes?: number;
+  /** The reference that was pulled to get this build. */
+  sourceRef: string;
+  /** When this build was recorded, as an RFC 3339 string. */
+  recordedAt: string;
+  /** The image's aliases that point at this build. */
+  aliases: string[];
+  /** When a box last started from this build; absent when unknown. */
+  lastUsedAt?: string;
+  /**
+   * When a pull found this build gone from its registry; absent while it is
+   * not known to be gone.
+   */
+  upstreamMissingAt?: string;
+}
+
+/** An alias registration or historical binding change; versions named by digest. */
+export interface ImageAliasEvent {
+  alias: string;
+  /** The build the alias pointed at before; absent when the alias was new. */
+  fromDigest?: string;
+  toDigest: string;
+  /** Who recorded the alias; absent when a pull recorded it. */
+  actor?: string;
+  /** As an RFC 3339 string. */
+  recordedAt: string;
+}
+
+/** An image name and every build the runtime holds under it. */
+export interface ImageDetail {
+  /** Registry and repository without a tag, such as `docker.io/library/alpine`. */
+  name: string;
+  aliases: string[];
+  /** Provided by the server's operator rather than pulled by a box. */
+  curated: boolean;
+  /** Newest first. */
+  versions: ImageVersion[];
+  /** The latest alias history entries, newest first; empty on a local cache. */
+  history: ImageAliasEvent[];
+}
+
+/** Images held against the allowance, on a REST runtime. */
+export interface ImageUsage {
+  count: number;
+  limit: number;
+  /**
+   * Sum of the sizes the held builds' manifests declare; a layer two builds
+   * share counts for each.
+   */
+  knownBytes: number;
+}
+
+/**
+ * The images a runtime can boot from: the local cache on an embedded runtime,
+ * the server's catalog on a REST runtime.
+ */
+export interface ImageHandle {
+  readonly registries: RegistryHandle;
+  /** Pull into the local cache. A REST runtime refuses: creating a box pulls. */
+  pull(reference: string): Promise<ImagePullResult>;
+  list(): Promise<ImageInfo[]>;
+  /**
+   * Every build held under an image name, such as `docker.io/library/alpine`.
+   *
+   * @throws `not_found` when nothing is held under the name, and
+   * `invalid_argument` for a reference with a tag or digest.
+   */
+  get(name: string): Promise<ImageDetail>;
+  /**
+   * Stop holding an image name, every tag of it. The layers stay.
+   *
+   * @throws `not_found` and `invalid_argument` as {@link ImageHandle.get};
+   * on a REST runtime `invalid_state` while a box can still boot from it.
+   */
+  remove(name: string): Promise<void>;
+  /** Images held against the allowance. @throws `unsupported` locally. */
+  usage(): Promise<ImageUsage>;
+  /**
+   * Point a tag of an image name at the version with that digest; boxes
+   * already created keep theirs.
+   *
+   * @throws `unsupported` locally, and `invalid_argument` for a malformed
+   * name, tag or `sha256:` digest.
+   */
+  createAlias(
+    name: string,
+    alias: string,
+    digest: string,
+  ): Promise<ImageDetail>;
+  deleteAlias(name: string, alias: string): Promise<void>;
+}
+
+/** Metadata for a managed volume returned by the native runtime. */
+export interface VolumeInfo {
+  /** Server-assigned volume id used by get and remove operations. */
+  id: string;
+  /** Volume name, mountable in place of the id. Defaults to the id. */
+  name: string;
+  /** Creation timestamp formatted as an RFC 3339 string. */
+  createdAt: string;
+  /** Volume size in bytes when the backend can report it. */
+  sizeBytes?: number;
+}
+
+/** Runtime-scoped handle for named-volume operations. */
+export interface VolumeHandle {
+  /**
+   * Creates a new managed volume.
+   *
+   * @param name Optional volume name, mountable in place of the returned id.
+   * The server names the volume after its id when omitted.
+   * @returns Metadata for the created volume.
+   * @throws A native ACRYL microVMs error when the backend does not support volumes or
+   * the volume cannot be created.
+   */
+  create(name?: string): Promise<VolumeInfo>;
+  /**
+   * Lists named volumes visible to this runtime.
+   *
+   * @returns Volume metadata entries in backend-defined order.
+   * @throws A native ACRYL microVMs error when the backend does not support volumes.
+   */
+  list(): Promise<VolumeInfo[]>;
+  /**
+   * Gets metadata for a volume by id.
+   *
+   * @param id Server-assigned volume id.
+   * @returns Metadata for the requested volume.
+   * @throws A native ACRYL microVMs error when the id is unknown or volumes are unsupported.
+   */
+  get(id: string): Promise<VolumeInfo>;
+  /**
+   * Removes a volume by id.
+   *
+   * @param id Server-assigned volume id.
+   * @param force Treat a missing volume as success when supported by the backend.
+   * @throws A native ACRYL microVMs error when removal fails or volumes are unsupported.
+   */
+  remove(id: string, force?: boolean | null): Promise<void>;
+}
+
+/** Independent managed disk archive, local or organization scoped. */
+export interface CheckpointInfo {
+  id: string;
+  name: string;
+  sourceBoxId: string;
+  createdAt: string;
+  sizeBytes: number;
+  state: "creating" | "ready" | "failed" | "deleting";
+  errorReason?: string;
+}
+
+export interface CheckpointHandle {
+  create(source: string, name?: string | null): Promise<CheckpointInfo>;
+  list(): Promise<CheckpointInfo[]>;
+  get(key: string): Promise<CheckpointInfo>;
+  remove(key: string, force?: boolean | null): Promise<void>;
+}
+
+/** A registry login the server pulls private images with. Has no password. */
+export interface RegistryCredential {
+  /** UUID that {@link RegistryHandle.remove} takes. */
+  id: string;
+  registryHost: string;
+  /** Whole path segments ending in `/`; empty for the whole registry. */
+  repositoryPrefix: string;
+  username: string;
+  /** The user who added it; absent when the server does not know. */
+  createdBy?: string;
+  /** RFC 3339. */
+  createdAt: string;
+}
+
+/** A registry login to add. */
+export interface NewRegistryCredential {
+  /** The registry the login is for, such as `ghcr.io`. */
+  registryHost: string;
+  /** Whole path segments ending in `/`, such as `acme/`; omit for the whole registry. */
+  repositoryPrefix?: string;
+  username: string;
+  /** Password or access token. Sent once, never returned. */
+  password: string;
+}
+
+/** The server's registry logins. A local runtime has none: see {@link JsAcrylMicrovm.registries}. */
+export interface RegistryHandle {
+  /** Every login the organization holds, oldest first. */
+  list(): Promise<RegistryCredential[]>;
+  /**
+   * Add a login.
+   *
+   * @throws `already_exists` while one is held for the same registry and prefix.
+   */
+  create(credential: NewRegistryCredential): Promise<RegistryCredential>;
+  /**
+   * Remove a login by id.
+   *
+   * @throws `invalid_state`, naming the boxes, while a box still pulls through
+   * it; `not_found` for an unknown id; `invalid_argument` for an id that is
+   * not a UUID, before any request.
+   */
+  remove(id: string): Promise<void>;
+}
+
+export interface JsEnvVar {
+  key: string;
+  value: string;
+}
+
+export type JsVolumeSpec = JsManagedVolumeSpec | JsHostPathVolumeSpec;
+
+export interface JsManagedVolumeSpec {
+  /** Managed volume, by server-assigned id or by name — the server resolves either. */
+  managedVolume: string;
+  guestPath: string;
+  /**
+   * Read-only managed mounts are not implemented yet; `true` is rejected
+   * rather than silently downgraded to read-write.
+   */
+  readOnly?: false;
+}
+
+export interface JsHostPathVolumeSpec {
+  /** Path on the local host for host-path mounts. Local runtimes only. */
+  hostPath: string;
+  guestPath: string;
+  readOnly?: boolean;
+}
+
+export interface JsNetworkSpec {
+  outbound?: JsOutboundNetworkSpec;
+  inbound?: JsInboundNetworkSpec;
+  /**
+   * @deprecated Use `outbound.mode`. Accepted as a legacy alias; supplying it
+   * together with `outbound` is rejected.
+   */
+  mode?: "enabled" | "disabled";
+  /**
+   * @deprecated Use `outbound.allowNet`. Accepted as a legacy alias; supplying
+   * it together with `outbound` is rejected.
+   */
+  allowNet?: string[];
+}
+
+export interface JsOutboundNetworkSpec {
+  mode: "enabled" | "disabled";
+  allowNet?: string[];
+}
+
+export interface JsInboundNetworkSpec {
+  /** Inbound mode: "enabled" (subject to the tunnel policy) or "disabled" (unreachable from outside). */
+  mode: "enabled" | "disabled";
+  /**
+   * Not supported yet: a non-empty value is rejected. Exists for shape
+   * symmetry with the outbound spec; inbound access follows `mode` alone.
+   */
+  allowNet?: string[];
+}
+
+export interface JsPortSpec {
+  hostPort?: number;
+  guestPort: number;
+  protocol?: string;
+  hostIp?: string;
+}
+
+export interface JsSecret {
+  name: string;
+  value: string;
+  hosts?: string[];
+  placeholder?: string;
+  headers: Record<string, string>;
+}
+
+export interface JsSecurityOptions {
+  jailerEnabled?: boolean;
+  seccompEnabled?: boolean;
+  maxOpenFiles?: number;
+  maxFileSize?: number;
+  maxProcesses?: number;
+  maxMemory?: number;
+  maxCpuTime?: number;
+  networkEnabled?: boolean;
+  closeFds?: boolean;
+}
+
+export interface JsHealthCheckOptions {
+  interval: number;
+  timeout: number;
+  retries: number;
+  startPeriod: number;
+}
+
+export interface JsContainerCapabilities {
+  add?: string[];
+  drop?: string[];
+}
+
+export interface JsAdvancedBoxOptions {
+  /** Guest privilege; does not relax the runner's sandbox. */
+  privileged?: boolean;
+  capabilities?: JsContainerCapabilities;
+}
+
+export interface JsBoxOptions {
+  image?: string;
+  rootfsPath?: string;
+  /** REST-managed checkpoint to create from; leave every other option unset. */
+  checkpoint?: string;
+  cpus?: number;
+  memoryMib?: number;
+  diskSizeGb?: number;
+  workingDir?: string;
+  env?: JsEnvVar[];
+  volumes?: JsVolumeSpec[];
+  network?: JsNetworkSpec;
+  ports?: JsPortSpec[];
+  /**
+   * @deprecated Use autoDelete. Preserved for embedded remove-on-stop
+   * compatibility; an explicit autoDelete value takes precedence. Remote
+   * runtimes preserve server lifecycle defaults when autoDelete is omitted.
+   */
+  autoRemove?: boolean;
+  detach?: boolean;
+  /** Idle time in seconds before AutoStop; 0 disables AutoStop. */
+  autoStop?: number;
+  /** Time in seconds after stop before AutoDelete; 0 disables AutoDelete. */
+  autoDelete?: number;
+  /** Whether access automatically resumes an auto-stopped box. */
+  autoResume?: boolean;
+  entrypoint?: string[];
+  cmd?: string[];
+  user?: string;
+  advanced?: JsAdvancedBoxOptions;
+  security?: JsSecurityOptions;
+  healthCheck?: JsHealthCheckOptions;
+  secrets?: JsSecret[];
+}
+
+export interface JsOptions {
+  homeDir?: string;
+  imageRegistries?: JsImageRegistry[];
+}
+
+export interface JsImageRegistryAuth {
+  username?: string;
+  password?: string;
+  bearerToken?: string;
+}
+
+export interface JsImageRegistry {
+  host: string;
+  transport?: "https" | "http";
+  skipVerify?: boolean;
+  search?: boolean;
+  auth?: JsImageRegistryAuth;
+}
+
+/** A bearer token plus its expiry. `expiresAt` is epoch seconds, or
+ *  `null` for non-expiring tokens (e.g. API keys). */
+export interface JsAccessToken {
+  token: string;
+  expiresAt?: number | null;
+}
+
+/** Native API-key credential class. Concrete implementation of the
+ *  `Credential` interface (see ./credential). */
+export interface ApiKeyCredential {
+  getToken(): JsAccessToken;
+}
+
+export interface ApiKeyCredentialConstructor {
+  new (key: string): ApiKeyCredential;
+  /** Build from `ACRYLMICROVM_API_KEY`; returns `null` when unset/empty. */
+  fromEnv(): ApiKeyCredential | null;
+}
+
+/** Native REST options class. Internal binding twin — the *public*
+ *  `AcrylMicrovmRestOptions` is the pure-TS class in ./options; this opaque
+ *  handle is constructed from it and consumed by `JsAcrylMicrovm.rest`. */
+export type NativeAcrylMicrovmRestOptions = object;
+
+export interface NativeAcrylMicrovmRestOptionsConstructor {
+  new (
+    url: string,
+    credential?: ApiKeyCredential | null,
+    prefix?: string | null,
+  ): NativeAcrylMicrovmRestOptions;
+}
+
+export type JsHealthState = "None" | "Starting" | "Healthy" | "Unhealthy";
+
+export interface JsHealthStatus {
+  state: JsHealthState;
+  failures: number;
+  lastCheck?: string;
+}
+
+export interface JsBoxStateInfo {
+  status: string;
+  running: boolean;
+  pid?: number;
+  /**
+   * How the box's main command ended, present once the runtime recorded it.
+   * Stopping a box signals that command, so this carries what the stop
+   * produced too. `0` is a real value; check for `undefined`, not falsiness.
+   */
+  exitCode?: number;
+}
+
+export interface JsPublishedPort {
+  guestPort: number;
+  hostIp: string;
+  hostPort: number;
+  protocol: "tcp" | "udp";
+}
+
+export interface JsOutboundNetworkInfo {
+  mode: "enabled" | "disabled";
+  allowNet: string[];
+}
+
+export interface JsInboundNetworkInfo {
+  mode: "enabled" | "disabled";
+  allowNet: string[];
+}
+
+export interface JsNetworkInfo {
+  outbound: JsOutboundNetworkInfo;
+  inbound: JsInboundNetworkInfo;
+  /** @deprecated Use `outbound.mode`. Mirrors it for legacy readers. */
+  mode: "enabled" | "disabled";
+  /** @deprecated Use `outbound.allowNet`. Mirrors it for legacy readers. */
+  allowNet: string[];
+  /** `null` means unknown to this handle; `[]` means no active publications. */
+  publishedPorts: JsPublishedPort[] | null;
+}
+
+export interface JsBoxInfo {
+  id: string;
+  name?: string;
+  state: JsBoxStateInfo;
+  createdAt: string;
+  startedAt?: string;
+  lastActivityAt?: string;
+  image: string;
+  cpus: number;
+  memoryMib: number;
+  privileged?: boolean;
+  network: JsNetworkInfo | null;
+  autoStop: number;
+  autoDelete: number;
+  autoResume: boolean;
+  healthStatus: JsHealthStatus;
+}
+
+export interface JsRuntimeMetrics {
+  boxesCreatedTotal: number;
+  boxesFailedTotal: number;
+  numRunningBoxes: number;
+  totalCommandsExecuted: number;
+  totalExecErrors: number;
+}
+
+export interface JsBoxMetrics {
+  commandsExecutedTotal: number;
+  execErrorsTotal: number;
+  bytesSentTotal: number;
+  bytesReceivedTotal: number;
+  totalCreateDurationMs?: number;
+  guestBootDurationMs?: number;
+  cpuPercent?: number;
+  memoryBytes?: number;
+  networkBytesSent?: number;
+  networkBytesReceived?: number;
+  networkTcpConnections?: number;
+  networkTcpErrors?: number;
+  stageFilesystemSetupMs?: number;
+  stageImagePrepareMs?: number;
+  stageGuestRootfsMs?: number;
+  stageBoxConfigMs?: number;
+  stageBoxSpawnMs?: number;
+  stageContainerInitMs?: number;
+}
+
+export interface JsExecResult {
+  exitCode: number;
+  errorMessage?: string;
+}
+
+export interface JsExecStdout {
+  next(): Promise<string | null>;
+}
+
+export interface JsExecStderr {
+  next(): Promise<string | null>;
+}
+
+export interface JsExecStdin {
+  write(data: Buffer): Promise<void>;
+  writeString(text: string): Promise<void>;
+  close(): Promise<void>;
+}
+
+/** Live guest execution metadata. IDs are canonical guest IDs. */
+export interface ExecutionInfo {
+  executionId: string;
+  argv: string[];
+  /** Start time in Unix milliseconds. */
+  startedAt: number;
+  tty: boolean;
+  isMainSession: boolean;
+}
+
+export interface JsExecution {
+  id(): Promise<string>;
+  stdin(): Promise<JsExecStdin>;
+  stdout(): Promise<JsExecStdout>;
+  stderr(): Promise<JsExecStderr>;
+  wait(): Promise<JsExecResult>;
+  kill(): Promise<void>;
+  resizeTty(rows: number, cols: number): Promise<void>;
+  signal(signal: number): Promise<void>;
+}
+
+export interface JsSnapshotInfo {
+  id: string;
+  boxId: string;
+  name: string;
+  createdAt: number;
+  containerDiskBytes: number;
+  sizeBytes: number;
+}
+
+export type JsSnapshotOptions = Record<string, never>;
+
+export interface JsSnapshotHandle {
+  create(
+    name: string,
+    options?: JsSnapshotOptions | null,
+  ): Promise<JsSnapshotInfo>;
+  list(): Promise<JsSnapshotInfo[]>;
+  get(name: string): Promise<JsSnapshotInfo | null>;
+  remove(name: string): Promise<void>;
+  restore(name: string): Promise<void>;
+}
+
+/** Certificate authority and required certificate principal for one login. */
+export interface JsSshCaConfig {
+  publicKey: string;
+  principal: string;
+}
+
+/** Credentials accepted for one SSH login (not a container OS identity). */
+export interface JsSshAccount {
+  login: string;
+  authorizedKeys?: string[];
+  ca?: JsSshCaConfig;
+}
+
+/** Complete guest SSH configuration; credentials persist on the container disk. */
+export interface JsSshConfig {
+  listenAddress: string;
+  hostPrivateKey: string;
+  accounts: JsSshAccount[];
+}
+
+/** Guest listener state and public host identity; contains no credentials. */
+export interface JsSshStatus {
+  enabled: boolean;
+  /** Increments on each successful listener start. `bigint` keeps the full
+   *  64-bit generation exactly. */
+  generation: bigint;
+  listenAddress: string;
+  hostPublicKey: string;
+  hostKeyFingerprint: string;
+}
+
+/** Internal contract implemented by the native N-API executions namespace.
+ *  Reached as `box.executions()`; creating it never starts the box. */
+export interface JsExecutionsHandle {
+  /** Snapshot live guest sessions; a created or stopped box lists none. */
+  list(): Promise<ExecutionInfo[]>;
+  /** Recover control without claiming the session's output reader. */
+  get(executionId: string): Promise<JsExecution>;
+  /** Attach output to a discovered session; never starts the box. */
+  attach(executionId: string, stdin?: boolean): Promise<JsExecution>;
+}
+
+/** Internal contract implemented by the native N-API SSH binding. */
+export interface JsSshHandle {
+  /** Validate and replace the configuration; the only operation that may
+   *  start the box. */
+  configure(config: JsSshConfig): Promise<JsSshStatus>;
+  /** Enable saved configuration on a running box; preserve healthy connections. */
+  enable(): Promise<JsSshStatus>;
+  /** Observe SSH state without starting the VM or its main command. */
+  status(): Promise<JsSshStatus>;
+  /** Stop SSH idempotently on a running box; never starts the VM or its main command. */
+  disable(): Promise<JsSshStatus>;
+}
+
+export interface JsNetworkHandle {
+  updateInbound(spec: {
+    mode: "enabled" | "disabled";
+    allowNet?: string[];
+  }): Promise<void>;
+  updateOutbound(spec: {
+    mode: "enabled" | "disabled";
+    allowNet?: string[];
+  }): Promise<void>;
+  /** Prepare a one-shot tunnel to a TCP service inside the box.
+   * Invalid argument types throw synchronously at the native boundary. */
+  tunnel(
+    target: NativeSocketAddress,
+    options?: TunnelOptions,
+  ): Promise<NativeBoxTunnel>;
+  /** Revoke the tunnel for a service port; open connections stay open. */
+  revokeTunnel(port: number): Promise<void>;
+}
+
+/**
+ * A Box port or a reserved App reference. App binding is not yet supported.
+ * `box` is a box id or name when binding, the id when read.
+ */
+export type DomainTarget =
+  { type: "box"; box: string; port: number } | { type: "app"; app: string };
+
+/** One domain the organization holds and what it routes to. */
+export interface Domain {
+  hostname: string;
+  url: string;
+  /** Null while the domain is held but unbound. */
+  target: DomainTarget | null;
+}
+
+/** Every domain the organization holds, with the allowance they count against. */
+export interface DomainList {
+  domains: Domain[];
+  limit: number;
+  used: number;
+  remaining: number;
+  /** The shortest platform name a new claim may use. */
+  minLength: number;
+}
+
+/**
+ * Bind and unbind require an owned full hostname; request names in Dashboard > Domains.
+ */
+export interface DomainHandle {
+  /** Every held domain, unbound ones included, with the allowance. */
+  list(): Promise<DomainList>;
+  /**
+   * Route `domain` to `target`, requiring ownership; request names in Dashboard > Domains first. A domain bound elsewhere
+   * in the organization moves; other domains on the target port stay. The
+   * port is not made public: the domain answers once its tunnel is declared.
+   */
+  bind(domain: string, target: DomainTarget): Promise<Domain>;
+  /**
+   * Stop routing a full hostname, keeping it for the organization. Safe to repeat.
+   *
+   * @throws A native ACRYL microVMs `notFound` error for a domain the organization does not hold.
+   */
+  unbind(domain: string): Promise<void>;
+}
+
+export type SocketAddress =
+  { type: "tcp"; host?: string; port: number } | { type: "unix"; path: string };
+
+/** Access policy for a tunnel; `isPublic` defaults to true. */
+export interface TunnelOptions {
+  isPublic?: boolean;
+}
+
+export interface NativeTunnelForwarder {
+  localAddr(): SocketAddress;
+  wait(): Promise<void>;
+  close(): Promise<void>;
+}
+
+/** Internal contract implemented by the native N-API tunnel binding. */
+export interface NativeBoxTunnel {
+  /** Public URL of a remotely served tunnel, or null for a local one. */
+  uri(): string | null;
+  isPublic(): boolean;
+  token(): string | null;
+  /** Consume the tunnel and return its bidirectional byte stream. */
+  connect(): Promise<NativeBoxConnection>;
+  forward(listen: SocketAddress): Promise<NativeTunnelForwarder>;
+}
+
+export interface NativeBoxConnection {
+  read(maxBytes: number): Promise<Buffer>;
+  write(data: Buffer): Promise<number>;
+  shutdownWrite(): Promise<void>;
+  close(): Promise<void>;
+}
+
+export type JsCloneOptions = Record<string, never>;
+
+export type JsExportOptions = Record<string, never>;
+
+export interface JsBox {
+  readonly agents: Agents;
+  readonly id: string;
+  readonly name: string | null;
+  info(): Promise<JsBoxInfo>;
+  executions(): JsExecutionsHandle;
+  exec(
+    command: string,
+    args?: string[] | null,
+    env?: Array<[string, string]> | null,
+    tty?: boolean | null,
+    user?: string | null,
+    timeoutSecs?: number | null,
+    workingDir?: string | null,
+  ): Promise<JsExecution>;
+  readonly snapshot: JsSnapshotHandle;
+  readonly network: JsNetworkHandle;
+  readonly ssh: JsSshHandle;
+  cloneBox(
+    options?: JsCloneOptions | null,
+    name?: string | null,
+  ): Promise<JsBox>;
+  export(dest: string, options?: JsExportOptions | null): Promise<string>;
+  start(): Promise<void>;
+  stop(): Promise<void>;
+  metrics(): Promise<JsBoxMetrics>;
+  copyIn(
+    hostPath: string,
+    containerDest: string,
+    options?: CopyOptions | null,
+  ): Promise<void>;
+  copyOut(
+    containerSrc: string,
+    hostDest: string,
+    options?: CopyOptions | null,
+  ): Promise<void>;
+}
+
+export interface JsGetOrCreateResult {
+  readonly created: boolean;
+  readonly box: JsBox;
+}
+
+export interface JsAcrylMicrovm {
+  importBox(archivePath: string, name?: string | null): Promise<JsBox>;
+  create(options: JsBoxOptions, name?: string | null): Promise<JsBox>;
+  getOrCreate(
+    options: JsBoxOptions,
+    name?: string | null,
+  ): Promise<JsGetOrCreateResult>;
+  listInfo(): Promise<JsBoxInfo[]>;
+  getInfo(idOrName: string): Promise<JsBoxInfo | null>;
+  get(idOrName: string): Promise<JsBox | null>;
+  metrics(): Promise<JsRuntimeMetrics>;
+  readonly images: ImageHandle;
+  readonly volumes: VolumeHandle;
+  readonly checkpoints: CheckpointHandle;
+  /**
+   * The organization's domains.
+   *
+   * @throws `unsupported` on a local runtime, which publishes nothing.
+   */
+  readonly domains: DomainHandle;
+  /**
+   * The server's registry logins.
+   *
+   * @throws `unsupported` on a local runtime, which pulls with the logins in
+   * `imageRegistries` instead.
+   */
+  remove(idOrName: string, force?: boolean | null): Promise<void>;
+  close(): void;
+  shutdown(timeout?: number | null): Promise<void>;
+}
+
+export interface JsAcrylMicrovmConstructor {
+  new (options: JsOptions): JsAcrylMicrovm;
+  withDefaultConfig(): JsAcrylMicrovm;
+  initDefault(options: JsOptions): void;
+  /** Connect to a remote ACRYL microVMs REST server. Takes the native
+   *  `AcrylMicrovmRestOptions` class (see `NativeAcrylMicrovmRestOptions`). */
+  rest(options: NativeAcrylMicrovmRestOptions): JsAcrylMicrovm;
+}
+
+export interface NativeModule {
+  Agents: new () => Agents;
+  JsAcrylMicrovm: JsAcrylMicrovmConstructor;
+  JsBoxTunnel: {
+    readonly prototype: NativeBoxTunnel & { connect?: () => Promise<unknown> };
+  };
+  ApiKeyCredential: ApiKeyCredentialConstructor;
+  JsAcrylMicrovmRestOptions: NativeAcrylMicrovmRestOptionsConstructor;
+  [key: string]: unknown;
+}

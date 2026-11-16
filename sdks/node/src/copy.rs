@@ -1,0 +1,26 @@
+// Modified by ACRYL, 2026
+use napi_derive::napi;
+
+/// Options for copyIn/copyOut. All fields are optional; defaults follow core CopyOptions.
+#[napi(object)]
+pub struct JsCopyOptions {
+    pub recursive: Option<bool>,
+    pub overwrite: Option<bool>,
+    pub follow_symlinks: Option<bool>,
+}
+
+pub fn into_copy_options(opts: Option<JsCopyOptions>) -> acrylmicrovm::CopyOptions {
+    let mut o = acrylmicrovm::CopyOptions::default();
+    if let Some(opt) = opts {
+        if let Some(v) = opt.recursive {
+            o.recursive = v;
+        }
+        if let Some(v) = opt.overwrite {
+            o.overwrite = v;
+        }
+        if let Some(v) = opt.follow_symlinks {
+            o.follow_symlinks = v;
+        }
+    }
+    o
+}

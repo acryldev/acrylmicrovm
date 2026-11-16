@@ -1,0 +1,31 @@
+// Modified by ACRYL, 2026
+//! Internal SSH wire boundary. No retry: a Control configuration update restarts the listener.
+
+use acrylmicrovm_shared as proto;
+use tonic::transport::Channel;
+
+pub(crate) struct SshInterface {
+    client: proto::SshClient<Channel>,
+}
+
+impl SshInterface {
+    /// Reuse an established guest channel; connection setup belongs to the session.
+    pub(crate) fn new(channel: Channel) -> Self {
+        Self {
+            client: proto::SshClient::new(channel),
+        }
+    }
+
+    /// Send one request; retrying a configuration update could disconnect clients again.
+    pub(crate) async fn control(
+        &mut self,
+        request: proto::SshControlRequest,
+    ) -> Result<proto::SshControlResponse, Box<tonic::Status>> {
+        Ok(self
+            .client
+            .control(request)
+            .await
+            .map_err(Box::new)?
+            .into_inner())
+    }
+}

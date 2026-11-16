@@ -1,0 +1,25 @@
+# Modified by ACRYL, 2026
+[package]
+name = "acrylmicrovm-shim"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "AcrylMicrovm VM subprocess shim"
+
+[[bin]]
+name = "acrylmicrovm-shim"
+path = "src/main.rs"
+
+[dependencies]
+acrylmicrovm = { path = "../acrylmicrovm", default-features = false, features = ["gvproxy", "krun", "native"] }
+acrylmicrovm-shared.workspace = true
+chrono = "0.4"
+libc = "0.2"
+serde_json = "1.0"
+signal-hook = "0.3"
+tokio = { version = "1.37", features = ["rt", "time"] }
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter", "ansi"] }

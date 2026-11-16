@@ -1,0 +1,119 @@
+# Rust style guide
+
+This guide extends the [Microsoft Rust Guidelines](https://microsoft.github.io/rust-guidelines) with ACRYL microVMs-specific patterns.
+
+## External references
+
+- **Microsoft Rust Guidelines**: https://microsoft.github.io/rust-guidelines
+- **Rust API Guidelines**: https://rust-lang.github.io/api-guidelines/
+
+## Universal guidelines (must follow)
+
+These guidelines from the Microsoft Rust Guidelines are particularly important for ACRYL microVMs:
+
+| Guideline | Summary |
+|-----------|---------|
+| **M-PANIC-IS-STOP** | Panics terminate the program - they are not exceptions |
+| **M-PANIC-ON-BUG** | Panic only on programming errors, never for expected failures |
+| **M-CONCISE-NAMES** | Avoid weasel words: "Service", "Manager", "Factory", "Handler" |
+| **M-LOG-STRUCTURED** | Use structured logging with meaningful fields |
+| **M-DOCUMENTED-MAGIC** | Document all magic numbers and constants |
+| **M-PUBLIC-DEBUG** | All public types must implement `Debug` |
+| **M-PUBLIC-DISPLAY** | User-facing types should implement `Display` |
+| **M-LINT-OVERRIDE-EXPECT** | Use `#[expect]` over `#[allow]` for lint overrides |
+| **M-REGULAR-FN** | Prefer regular functions over methods when `self` isn't needed |
+| **M-SMALLER-CRATES** | Keep crates focused on a single responsibility |
+
+## Safety guidelines
+
+| Guideline | Summary |
+|-----------|---------|
+| **M-UNSAFE** | Minimize unsafe code; isolate it in small, well-documented functions |
+| **M-UNSAFE-IMPLIES-UB** | Document all undefined behavior conditions in unsafe code |
+| **M-UNSOUND** | Never expose unsound APIs; soundness must be guaranteed |
+
+## ACRYL microVMs-specific patterns
+
+### Async-first architecture
+
+All I/O operations use async/await with Tokio runtime:
+
+```rust
+// ✅ Correct: async I/O
+async fn read_config(path: &Path) -> Result<Config> {
+    let contents = tokio::fs::read_to_string(path).await?;
+    Ok(toml::from_str(&contents)?)
+}
+
+// ❌ Wrong: blocking I/O in async context
+async fn read_config(path: &Path) -> Result<Config> {
+    let contents = std::fs::read_to_string(path)?;  // Blocks!
+    Ok(toml::from_str(&contents)?)
+}
+```
+
+### Centralized error handling
+
+Use the `AcrylMicrovmError` enum for all errors (see `acrylmicrovm-shared/src/errors.rs`):
+
+```rust
+// ✅ Correct: use AcrylMicrovmError with context
+std::fs::create_dir_all(&socket_dir).map_err(|e| {
+    AcrylMicrovmError::Storage(format!(
+        "Failed to create socket directory {}: {}", socket_dir.display(), e
+    ))
+})?;
+
+// ❌ Wrong: generic error without context
+std::fs::create_dir_all(&dir)?;
+```
+
+### Public types must be `Send + Sync`
+
+All public types exposed through the API must be thread-safe:
+
+```rust
+// ✅ Correct: Arc for shared ownership across threads
+pub struct LiteBox {
+    inner: Arc<LiteBoxInner>,
+}
+
+// ❌ Wrong: Rc is not Send
+pub struct LiteBox {
+    inner: Rc<LiteBoxInner>,  // Not thread-safe!
+}
+```
+
+## Formatting and linting
+
+- **Formatting**: `cargo fmt` (enforced in CI)
+- **Linting**: `cargo clippy` (warnings are errors in CI)
+
+Check lint overrides with the Rust version used by [CI](../../../.github/ci-config.json);
+a cached local `stable` toolchain can be older. Use `#[expect(..., reason = "...")]`
+while the lint still fires, and remove the override when it no longer does.
+
+The REST client's WebSocket header regression scopes `#[expect(clippy::result_large_err)]`
+to its handshake callback. Tungstenite 0.24 requires `Result<Response, ErrorResponse>`;
+boxing that error would violate the callback contract. Keep the expectation local and
+retain its reason so a dependency change that removes the warning requires review.
+The loopback regression remains runnable with
+`ACRYLMICROVM_DEPS_STUB=1 make test:unit:rust FILTER=activity_client_labels`.
+
+Run before committing:
+
+```bash
+cargo fmt
+cargo clippy --all-targets --all-features
+```
+
+## Quick reference
+
+When writing Rust code for ACRYL microVMs, ask yourself:
+
+1. **Is this panic necessary?** (M-PANIC-ON-BUG) - Only panic on bugs, use `Result` for errors
+2. **Is this name clear?** (M-CONCISE-NAMES) - Avoid "Manager", "Service", "Factory"
+3. **Is this unsafe minimized?** (M-UNSAFE) - Isolate and document unsafe code
+4. **Does this implement Debug?** (M-PUBLIC-DEBUG) - All public types need it
+5. **Is this async?** - All I/O should be async with Tokio
+6. **Is the error contextual?** - Use `AcrylMicrovmError` with descriptive messages

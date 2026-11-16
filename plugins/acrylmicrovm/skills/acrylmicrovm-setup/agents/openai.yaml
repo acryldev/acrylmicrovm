@@ -1,0 +1,5 @@
+# Modified by ACRYL, 2026
+interface:
+  display_name: "Set up AcrylMicrovm"
+  short_description: "Connect the AcrylMicrovm CLI to your cloud account"
+  default_prompt: "Use $acrylmicrovm-setup to check the CLI and sign in to AcrylMicrovm."

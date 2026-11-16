@@ -1,0 +1,282 @@
+# Modified by ACRYL, 2026
+name: Lint and Format
+
+on:
+  merge_group:
+  push:
+    branches: [ main ]
+    paths:
+      - '**/*.rs'
+      - '**/*.py'
+      - '**/*.ts'
+      - '**/*.c'
+      - '**/*.h'
+      - '**/*.go'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - 'sdks/python/**'
+      - 'sdks/node/**'
+      - 'sdks/c/**'
+      - 'sdks/go/**'
+      - 'make/quality.mk'
+      - 'make/test.mk'
+      - '.pre-commit-config.yaml'
+      - '.github/workflows/**'
+      - '.github/actions/**'
+      - '.github/ci-config.json'
+      - 'scripts/release/**'
+  # No path filter on pull_request: the `Lint (conclusion)` job is a required
+  # status check, so this workflow must run on EVERY PR and report it. A
+  # path-skipped workflow leaves the required check stuck "Pending" → PR blocked.
+  # Per-suite filtering still happens in the `changes` job (jobs skip when
+  # unaffected); the conclusion job reports success-or-skipped.
+  pull_request:
+    branches: [ main ]
+
+concurrency:
+  group: lint-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      platforms: ${{ steps.config.outputs.platforms }}
+      rust-toolchain: ${{ steps.config.outputs.rust-toolchain }}
+      rust: ${{ steps.filter.outputs.rust }}
+      python: ${{ steps.filter.outputs.python }}
+      node: ${{ steps.filter.outputs.node }}
+      c: ${{ steps.filter.outputs.c }}
+      go: ${{ steps.filter.outputs.go }}
+      quality: ${{ steps.filter.outputs.quality }}
+      install_script: ${{ steps.filter.outputs.install_script }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/ci-config
+        id: config
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
+        id: filter
+        with:
+          # In a merge queue, diff against the merge-group base/head (no PR base
+          # exists). Empty on pull_request/push, where paths-filter ignores them.
+          base: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || '' }}
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || '' }}
+          filters: |
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+            python:
+              - 'sdks/python/**/*.py'
+              - 'sdks/python/pyproject.toml'
+            node:
+              - 'sdks/node/**/*.ts'
+              - 'sdks/node/**/*.mjs'
+              - 'sdks/node/package.json'
+              - 'sdks/node/package-lock.json'
+              - 'sdks/node/tsconfig.json'
+            c:
+              - 'sdks/c/**/*.c'
+              - 'sdks/c/**/*.h'
+              - 'sdks/c/tests/CMakeLists.txt'
+            go:
+              - 'sdks/go/**/*.go'
+              - 'sdks/go/go.mod'
+              - 'apps/secret-server/**/*.go'
+              - 'apps/secret-server/go.mod'
+            quality:
+              - 'make/quality.mk'
+              - '.pre-commit-config.yaml'
+              - '.github/workflows/lint.yml'
+              - '.github/actions/ci-config/**'
+              - '.github/ci-config.json'
+            install_script:
+              - 'scripts/release/**'
+              - '.github/workflows/build-runtime.yml'
+              - 'make/test.mk'
+
+  rustfmt:
+    name: Check Rust formatting
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' || needs.changes.outputs.quality == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: make fmt:check:rust
+
+  clippy:
+    name: Run Clippy on ${{ matrix.os }}
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' || needs.changes.outputs.quality == 'true' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include: ${{ fromJson(needs.changes.outputs.platforms) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          components: clippy
+
+      # `make clippy` builds sdks/python, whose PyO3 build script refuses an
+      # interpreter newer than its supported maximum (3.14). Pin the same
+      # interpreter the rust test job uses instead of the runner image's
+      # `python`, which moves with the macOS image.
+      - uses: ./.github/actions/setup-python
+
+      - name: Install guest cross target (macOS)
+        if: runner.os == 'macOS'
+        run: rustup target add "$(bash scripts/util.sh --target)"
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools protobuf-compiler
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      # Only the macOS branch of `make clippy` cross-compiles acrylmicrovm-guest to
+      # linux-musl, and the guest links C since russh brought in ring. This is
+      # the same bottled toolchain and cross-linker config that
+      # scripts/setup/setup-macos.sh gives developers.
+      - name: Install guest cross toolchain (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install FiloSottile/musl-cross/musl-cross
+          mkdir -p "$HOME/.cargo"
+          {
+            printf '\n[target.x86_64-unknown-linux-musl]\nlinker = "x86_64-linux-musl-gcc"\n'
+            printf '\n[target.aarch64-unknown-linux-musl]\nlinker = "aarch64-linux-musl-gcc"\n'
+          } >> "$HOME/.cargo/config.toml"
+
+      - uses: ./.github/actions/sccache
+
+      - name: Run clippy checks
+        run: make clippy
+
+  python:
+    name: Python lint and format checks
+    needs: changes
+    if: ${{ needs.changes.outputs.python == 'true' || needs.changes.outputs.quality == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup-python
+
+      - name: Install ruff
+        run: pip install ruff==0.16.0
+
+      - name: Run Python lint
+        run: make lint:python
+
+      - name: Check Python formatting
+        run: make fmt:check:python
+
+  node:
+    name: Node.js lint and format checks
+    needs: changes
+    if: ${{ needs.changes.outputs.node == 'true' || needs.changes.outputs.quality == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: sdks/node/package-lock.json
+
+      - name: Install dependencies
+        working-directory: sdks/node
+        run: npm ci
+
+      - name: Run Node lint
+        run: make lint:node
+
+      - name: Check Node formatting
+        run: make fmt:check:node
+
+  c:
+    name: C SDK lint and format checks
+    needs: changes
+    if: ${{ needs.changes.outputs.c == 'true' || needs.changes.outputs.quality == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Install clang tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-format clang-tidy
+
+      - name: Run C lint
+        run: make lint:c
+
+      - name: Check C formatting
+        run: make fmt:check:c
+
+  go:
+    name: Go formatting
+    needs: changes
+    if: ${{ needs.changes.outputs.go == 'true' || needs.changes.outputs.quality == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup-go
+        with:
+          cache: 'false'
+
+      - name: Check Go formatting
+        run: make fmt:check:go
+
+  install_script:
+    name: Installer script smoke test
+    needs: changes
+    if: ${{ needs.changes.outputs.install_script == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Run installer script smoke test
+        run: make test:install-script
+
+  # Single required status check for branch protection / merge queue.
+  # Passes only if every job above succeeded or was skipped (path-filtered).
+  # `if: !cancelled()` is required: without it a failed dependency would skip
+  # this job, and GitHub treats a skipped required check as success.
+  # NOTE: keep `needs` in sync with the jobs above when adding/removing jobs.
+  lint-conclusion:
+    name: Lint (conclusion)
+    needs: [changes, rustfmt, clippy, python, node, c, go, install_script]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: All lint jobs passed or were skipped
+        run: |
+          jq -C <<< '${{ toJSON(needs) }}'
+          jq --exit-status 'all(.result == "success" or .result == "skipped")' <<< '${{ toJSON(needs) }}'

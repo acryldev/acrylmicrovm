@@ -1,0 +1,602 @@
+# Modified by ACRYL, 2026
+"""
+SimpleBox - Foundation for specialized container types.
+
+Provides common functionality for all specialized boxes (CodeBox, BrowserBox, etc.)
+"""
+
+import asyncio
+import logging
+from enum import IntEnum
+from typing import TYPE_CHECKING, Optional
+
+from .agents import Agents
+from .exec import ExecResult
+
+if TYPE_CHECKING:
+    from .acrylmicrovm import (
+        AcrylMicrovm,
+        Execution,
+        ExecutionInfo,
+        InboundNetworkSpec,
+        OutboundNetworkSpec,
+        TunnelForwarder,
+        TunnelOptions,
+    )
+
+logger = logging.getLogger("acrylmicrovm.simplebox")
+
+__all__ = ["BoxTunnel", "Executions", "NetworkHandle", "SimpleBox"]
+
+
+class StreamType(IntEnum):
+    """Stream type for command execution output."""
+
+    STDOUT = 1
+    STDERR = 2
+
+
+class BoxTunnel:
+    """Prepared one-shot tunnel handle for a box service port."""
+
+    def __init__(self, tunnel) -> None:
+        self._tunnel = tunnel
+
+    async def connect(self):
+        """Consume the tunnel and return its bidirectional byte stream."""
+        return await self._tunnel.connect()
+
+    def uri(self) -> str | None:
+        """Return the public URL of a remote tunnel, or ``None`` for a local one."""
+        return self._tunnel.uri()
+
+    def is_public(self) -> bool:
+        return self._tunnel.is_public()
+
+    def token(self) -> str | None:
+        """Full token on creation, masked token on subsequent preparations."""
+        return self._tunnel.token()
+
+    async def forward(self, listen) -> "TunnelForwarder":
+        return await self._tunnel.forward(listen)
+
+
+class NetworkHandle:
+    """Network operations for a ``SimpleBox``."""
+
+    def __init__(self, box: "SimpleBox") -> None:
+        self._owner = box
+
+    async def update_inbound(self, spec: "InboundNetworkSpec") -> None:
+        """Replace inbound policy on a started box."""
+        if not self._owner._started:
+            raise RuntimeError("Box not started; call await box.start() first.")
+        await self._owner._box.network.update_inbound(spec)
+
+    async def update_outbound(self, spec: "OutboundNetworkSpec") -> None:
+        """Replace outbound policy, including the entire allowlist."""
+        if not self._owner._started:
+            raise RuntimeError("Box not started; call await box.start() first.")
+        await self._owner._box.network.update_outbound(spec)
+
+    async def tunnel(
+        self,
+        target: "tuple[str, int] | tuple[str, int, int, int]",
+        options: "TunnelOptions | None" = None,
+    ) -> BoxTunnel:
+        """Prepare a one-shot tunnel to a TCP service inside the box.
+
+        ``target`` is the service's address as seen from the box; its host must
+        be localhost or the guest IP for now. ``options`` defaults to public.
+        """
+        if not self._owner._started:
+            raise RuntimeError(
+                "Box not started. Use 'async with SimpleBox(...) as box:' "
+                "or call 'await box.start()' first."
+            )
+        return BoxTunnel(await self._owner._create_tunnel(target, options))
+
+    async def revoke_tunnel(self, port: int) -> None:
+        """Revoke the tunnel for a port; open connections are not closed."""
+        await self._owner._revoke_tunnel(port)
+
+
+class Executions:
+    """Live execution sessions of a ``SimpleBox``.
+
+    Every operation reads the owner's box when it runs, so holding this wrapper
+    never creates or starts anything. An uncreated box lists nothing and cannot
+    recover or attach a session.
+    """
+
+    def __init__(self, box: "SimpleBox") -> None:
+        self._owner = box
+
+    async def list(self) -> "list[ExecutionInfo]":
+        """List live guest executions without creating or starting a box."""
+        if self._owner._box is None:
+            return []
+        return await self._owner._box.executions().list()
+
+    async def get(self, execution_id: str) -> "Execution":
+        """Recover control without claiming the session's output reader."""
+        if self._owner._box is None:
+            raise RuntimeError("Box not started. Call 'await box.start()' first.")
+        return await self._owner._box.executions().get(execution_id)
+
+    async def attach(self, execution_id: str, *, stdin: bool = True) -> "Execution":
+        """Attach to a listed live session without starting the box."""
+        if self._owner._box is None:
+            raise RuntimeError("Box not started. Call 'await box.start()' first.")
+        return await self._owner._box.executions().attach(execution_id, stdin=stdin)
+
+
+class SimpleBox:
+    """
+    Base class for specialized container types.
+
+    This class encapsulates the common patterns:
+    1. Async context manager support
+    2. Automatic runtime lifecycle management
+    3. Stdio blocking mode restoration
+
+    Subclasses should override:
+    - _create_box_options(): Return BoxOptions for their specific use case
+    - Add domain-specific methods (e.g., CodeBox.run(), BrowserBox.navigate())
+    """
+
+    @property
+    def agents(self) -> Agents:
+        """Get the agent namespace without starting the Box."""
+        return Agents()
+
+    def __init__(
+        self,
+        image: str | None = None,
+        rootfs_path: str | None = None,
+        memory_mib: int | None = None,
+        cpus: float | None = None,
+        runtime: Optional["AcrylMicrovm"] = None,
+        name: str | None = None,
+        auto_remove: bool = True,
+        reuse_existing: bool = False,
+        **kwargs,
+    ):
+        """
+        Create a specialized box.
+
+        Args:
+            image: Container image to use (e.g., "python:3.12-slim")
+            rootfs_path: Path to local OCI layout directory (overrides image if provided)
+            memory_mib: Memory limit in MiB
+            cpus: Number of CPU cores
+            runtime: Optional runtime instance (uses global default if None)
+            name: Optional name for the box (must be unique)
+            auto_remove: Remove box when stopped (default: True)
+            reuse_existing: If True and a box with the given name already exists,
+                reuse it instead of raising an error (default: False)
+            **kwargs: Additional configuration options
+
+        Note: The box is not actually created until entering the async context manager.
+        Use `async with SimpleBox(...) as box:` to create and start the box.
+
+        Either `image` or `rootfs_path` must be provided.
+        """
+        if not image and not rootfs_path:
+            raise ValueError("Either 'image' or 'rootfs_path' must be provided")
+
+        try:
+            from .acrylmicrovm import AcrylMicrovm, BoxOptions
+        except ImportError as e:
+            raise ImportError(
+                f"AcrylMicrovm native extension not found: {e}. "
+                "Please install with: pip install acrylmicrovm"
+            )
+
+        # Use provided runtime or get Rust's global default
+        if runtime is None:
+            self._runtime = AcrylMicrovm.default()
+        else:
+            self._runtime = runtime
+
+        # Store box options for deferred creation in __aenter__
+        self._box_options = BoxOptions(
+            image=image,
+            rootfs_path=rootfs_path,
+            cpus=cpus,
+            memory_mib=memory_mib,
+            auto_remove=auto_remove,
+            **kwargs,
+        )
+        self._name = name
+        self._reuse_existing = reuse_existing
+        self._box = None
+        self._started = False
+        self._created: bool | None = None
+        self._network = NetworkHandle(self)
+
+    async def _create_tunnel(
+        self,
+        target: "tuple[str, int] | tuple[str, int, int, int]",
+        options: "TunnelOptions | None" = None,
+    ):
+        """Establish a native tunnel handle for a TCP service."""
+        if self._box is None:
+            raise RuntimeError("Box not created")
+        return await self._box.network.tunnel(target, options)
+
+    async def _revoke_tunnel(self, port: int) -> None:
+        """Revoke the tunnel for a service port."""
+        if self._box is None:
+            raise RuntimeError("Box not created")
+        if not isinstance(port, int) or not 1 <= port <= 65535:
+            raise ValueError("port must be an integer between 1 and 65535")
+        await self._box.network.revoke_tunnel(port)
+
+    async def __aenter__(self):
+        """Async context manager entry - creates or reuses an existing box.
+
+        This method is idempotent - calling it multiple times is safe.
+        All initialization logic lives here; start() is just an alias.
+
+        When a name is provided, attempts to get an existing box first.
+        This enables persistence across sessions with auto_remove=False.
+        """
+        if self._started:
+            return self
+        if self._reuse_existing:
+            self._box, self._created = await self._runtime.get_or_create(
+                self._box_options, name=self._name
+            )
+        else:
+            self._box = await self._runtime.create(self._box_options, name=self._name)
+            self._created = True
+        await self._box.__aenter__()
+        self._started = True
+        return self
+
+    async def start(self):
+        """
+        Explicitly create and start the box.
+
+        Alternative to using context manager. Allows::
+
+            box = SimpleBox(image="alpine:latest")
+            await box.start()
+            await box.exec("echo", "hello")
+
+        Returns:
+            self for method chaining
+        """
+        return await self.__aenter__()
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit - delegates to Box.__aexit__ (returns awaitable)."""
+        return await self._box.__aexit__(exc_type, exc_val, exc_tb)
+
+    @property
+    def id(self) -> str:
+        """Get the box ID."""
+        if not self._started:
+            raise RuntimeError(
+                "Box not started. Use 'async with SimpleBox(...) as box:' "
+                "or call 'await box.start()' first."
+            )
+        return self._box.id
+
+    async def info(self):
+        """Get box information."""
+        if not self._started:
+            raise RuntimeError(
+                "Box not started. Use 'async with SimpleBox(...) as box:' "
+                "or call 'await box.start()' first."
+            )
+        return await self._box.info()
+
+    @property
+    def created(self) -> bool | None:
+        """Whether this box was newly created (True) or an existing box was reused (False).
+
+        Returns None if the box hasn't been started yet.
+        """
+        return self._created
+
+    @property
+    def network(self) -> NetworkHandle:
+        """Get the box-scoped network handle."""
+        if not hasattr(self, "_network"):
+            self._network = NetworkHandle(self)
+        return self._network
+
+    def executions(self) -> Executions:
+        """Get the live execution namespace without creating or starting the box.
+
+        Usage: ``await box.executions().list()``, ``await box.executions().get(id)``.
+        """
+        if not hasattr(self, "_executions"):
+            self._executions = Executions(self)
+        return self._executions
+
+    async def exec(
+        self,
+        cmd: str,
+        *args: str,
+        env: dict[str, str] | None = None,
+        user: str | None = None,
+        timeout: float | None = None,
+        cwd: str | None = None,
+    ) -> ExecResult:
+        """
+        Execute a command in the box and return the result.
+
+        Args:
+            cmd: Command to execute (e.g., 'ls', 'python')
+            *args: Arguments to the command (e.g., '-l', '-a')
+            env: Environment variables (default: guest's default environment)
+            user: User to run as (format: <name|uid>[:<group|gid>], like docker exec --user).
+                  If None, uses the container's default user from image config.
+            timeout: Execution timeout in seconds (default: no timeout).
+            cwd: Working directory inside the container (default: container's configured workdir).
+
+        Returns:
+            ExecResult with exit_code and output
+
+        Examples:
+            Simple execution::
+
+                result = await box.exec('ls', '-l', '-a')
+
+            Run as a specific user::
+
+                result = await box.exec('whoami', user='nobody')
+
+            Run in a specific directory::
+
+                result = await box.exec('pwd', cwd='/tmp')
+        """
+        if not self._started:
+            raise RuntimeError(
+                "Box not started. Use 'async with SimpleBox(...) as box:' "
+                "or call 'await box.start()' first."
+            )
+
+        arg_list = list(args) if args else None
+        # Convert env dict to list of tuples if provided
+        env_list = list(env.items()) if env else None
+
+        # Execute via Rust (returns PyExecution)
+        execution = await self._box.exec(
+            cmd, arg_list, env_list, user=user, timeout_secs=timeout, cwd=cwd
+        )
+
+        # Get streams from Rust execution
+        try:
+            stdout = execution.stdout()
+        except Exception as e:  # noqa: BLE001 - native binding call; fall back to no stdout stream
+            logger.error(f"take stdout err: {e}")
+            stdout = None
+
+        try:
+            stderr = execution.stderr()
+        except Exception as e:  # noqa: BLE001 - native binding call; fall back to no stderr stream
+            logger.error(f"take stderr err: {e}")
+            stderr = None
+
+        # Collect stdout and stderr concurrently to avoid deadlock.
+        # Sequential reads can deadlock when a process fills one pipe buffer
+        # while the SDK is blocked reading the other.
+        stdout_lines = []
+        stderr_lines = []
+
+        async def collect_stdout():
+            if not stdout:
+                return
+            logger.debug("collecting stdout")
+            try:
+                async for line in stdout:
+                    if isinstance(line, bytes):
+                        stdout_lines.append(line.decode("utf-8", errors="replace"))
+                    else:
+                        stdout_lines.append(line)
+            except Exception as e:  # noqa: BLE001 - stream collection must not crash exec(); partial output is acceptable
+                logger.error(f"collecting stdout err: {e}")
+
+        async def collect_stderr():
+            if not stderr:
+                return
+            logger.debug("collecting stderr")
+            try:
+                async for line in stderr:
+                    if isinstance(line, bytes):
+                        stderr_lines.append(line.decode("utf-8", errors="replace"))
+                    else:
+                        stderr_lines.append(line)
+            except Exception as e:  # noqa: BLE001 - stream collection must not crash exec(); partial output is acceptable
+                logger.error(f"collecting stderr err: {e}")
+
+        await asyncio.gather(collect_stdout(), collect_stderr())
+
+        stdout = "".join(stdout_lines)
+        stderr = "".join(stderr_lines)
+
+        error_message = None
+        try:
+            exec_result = await execution.wait()
+            exit_code = exec_result.exit_code
+            error_message = exec_result.error_message
+        except Exception as e:  # noqa: BLE001 - native binding call; report failure via exit_code instead of raising
+            logger.error(f"failed to wait execution: {e}")
+            exit_code = -1
+
+        logger.debug(f"exec finish, exit_code: {exit_code}")
+
+        return ExecResult(
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+            error_message=error_message,
+        )
+
+    async def tunnel(
+        self,
+        target: "tuple[str, int] | tuple[str, int, int, int]",
+        options: "TunnelOptions | None" = None,
+    ) -> BoxTunnel:
+        """Prepare a one-shot tunnel to a TCP service inside this box."""
+        return await self.network.tunnel(target, options)
+
+    async def metrics(self):
+        """Get box metrics (CPU, memory usage)."""
+        if not self._started:
+            raise RuntimeError(
+                "Box not started. Use 'async with SimpleBox(...) as box:' "
+                "or call 'await box.start()' first."
+            )
+        return await self._box.metrics()
+
+    async def stop(self):
+        """
+        Stop the box and release resources.
+
+        Note: Usually not needed as context manager handles cleanup.
+        """
+        if not self._started:
+            raise RuntimeError(
+                "Box not started. Use 'async with SimpleBox(...) as box:' "
+                "or call 'await box.start()' first."
+            )
+        await self._box.stop()
+        self._started = False
+
+    async def shutdown(self):
+        """
+        Shutdown the box and release resources.
+
+        Alias for stop(). Usually not needed as context manager handles cleanup.
+        """
+        await self.stop()
+
+    async def copy_in(
+        self,
+        host_path: str,
+        container_dest: str,
+        *,
+        overwrite: bool = True,
+        follow_symlinks: bool = False,
+    ) -> None:
+        """
+        Copy files/directories from host into the container.
+
+        Args:
+            host_path: Path on the host filesystem (file or directory)
+            container_dest: Destination path inside the container
+            overwrite: If True, overwrite existing files (default: True)
+            follow_symlinks: If True, follow symlinks when copying (default: False)
+
+        Note:
+            copy_in extracts files into the container rootfs layer. Destinations
+            under a mount inside the guest (e.g. /tmp, /dev/shm, volumes) are
+            **refused** with an error naming the mount, because files written
+            there would land behind it and be invisible to running processes.
+            ``docker cp`` has the same blind spot but answers from the shadowed
+            layer silently (see https://github.com/moby/moby/issues/22020).
+
+            Files land owned by the box's exec user, so the workload can read
+            them without any chmod/chown of its own.
+
+            Workaround: use the low-level exec API to pipe a tar archive
+            into the container (like ``docker exec -i CONTAINER tar xf -``)::
+
+                execution = await box._box.exec("tar", args=["xf", "-", "-C", "/tmp"])
+                stdin = execution.stdin()
+                await stdin.send_input(tar_bytes)
+                await stdin.close()
+                result = await execution.wait()
+
+        Examples:
+            Copy a single file::
+
+                await box.copy_in("/local/config.json", "/app/config.json")
+
+            Copy a directory, landing it as ``docker cp`` does: it becomes
+            ``/app/data`` if that does not exist, else ``/app/data/data``::
+
+                await box.copy_in("/local/data", "/app/data")
+
+            Copy a directory's contents either way — end the source with
+            ``/.`` (build it as a string; ``pathlib.Path`` drops the trailing
+            ``.``)::
+
+                await box.copy_in("/local/data/.", "/app/data")
+        """
+        if not self._started:
+            raise RuntimeError(
+                "Box not started. Use 'async with SimpleBox(...) as box:' "
+                "or call 'await box.start()' first."
+            )
+
+        from .acrylmicrovm import CopyOptions
+
+        opts = CopyOptions(
+            recursive=True,
+            overwrite=overwrite,
+            follow_symlinks=follow_symlinks,
+        )
+        await self._box.copy_in(host_path, container_dest, opts)
+
+    async def copy_out(
+        self,
+        container_src: str,
+        host_dest: str,
+        *,
+        overwrite: bool = True,
+        follow_symlinks: bool = False,
+    ) -> None:
+        """
+        Copy files/directories from container to host.
+
+        Args:
+            container_src: Source path inside the container (file or directory)
+            host_dest: Destination path on the host filesystem
+            overwrite: If True, overwrite existing files (default: True)
+            follow_symlinks: If True, follow symlinks when copying (default: False)
+
+        Note:
+            copy_out reads the container rootfs layer. A source at or under a
+            mount inside the guest (e.g. /tmp, /dev/shm, volumes), or a
+            directory containing one, is **refused** with an error naming the
+            mount, because the archive would carry the files underneath it
+            rather than the ones running processes see.
+
+            Workaround: use the low-level exec API to pipe a tar archive out
+            of the container (``tar cf - -C /tmp .``).
+
+        Examples:
+            Copy a single file::
+
+                await box.copy_out("/app/output.log", "/local/output.log")
+
+            Copy a directory, landing it as ``docker cp`` does: it becomes
+            ``/local/results`` if that does not exist, else
+            ``/local/results/results``::
+
+                await box.copy_out("/app/results", "/local/results")
+
+            Copy a directory's contents either way::
+
+                await box.copy_out("/app/results/.", "/local/results")
+        """
+        if not self._started:
+            raise RuntimeError(
+                "Box not started. Use 'async with SimpleBox(...) as box:' "
+                "or call 'await box.start()' first."
+            )
+
+        from .acrylmicrovm import CopyOptions
+
+        opts = CopyOptions(
+            recursive=True,
+            overwrite=overwrite,
+            follow_symlinks=follow_symlinks,
+        )
+        await self._box.copy_out(container_src, host_dest, opts)

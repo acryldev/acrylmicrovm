@@ -1,0 +1,350 @@
+# Modified by ACRYL, 2026
+# Build ACRYL microVMs core runtime + CLI, upload artifacts, and publish to crates.io.
+#
+# This workflow builds the Rust runtime and the `acrylmicrovm` CLI binary, then
+# populates the shared sccache cache.
+#
+# Triggers:
+# - weekly: validates distribution builds and refreshes compiler caches.
+# - release: published: builds and uploads
+#     - acrylmicrovm-runtime-v<version>-<target>.tar.gz   (for `cargo install` consumers)
+#     - acrylmicrovm-cli-v<version>-<target>.tar.gz       (self-contained CLI binary;
+#                                                     runtime embedded via include_bytes!)
+#     - per-file <artifact>.sha256 sidecars
+#     - SHA256SUMS                                   (combined integrity manifest)
+#   to the GitHub Release, then publishes Rust crates to crates.io
+#   (requires CARGO_REGISTRY_TOKEN).
+# - workflow_dispatch: manual build, no publish.
+#
+# Note: SDK workflows (build-wheels, build-node, build-c) also gate on
+# `release: published`. To ship a release, push the tag and then create
+# the release (e.g. `gh release create v0.9.4 --generate-notes
+# --verify-tag`); the user-token-created release.published event fans out
+# to every workflow. Tag-only pushes do NOT publish — see the deferred
+# RELEASE_PAT alternative if that UX is wanted.
+#
+# Platform-specific considerations:
+# - Linux: Uses manylinux_2_28 container for glibc compatibility
+#   - Guest binary built on host first (Ubuntu has musl-tools, manylinux doesn't)
+#   - Shim/libkrun built in container (needs glibc 2.28)
+# - macOS: Builds directly on runner (ARM64 only)
+name: Build Runtime
+
+on:
+  schedule:
+    - cron: '0 1 * * 1'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+concurrency:
+  group: build-runtime-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+  SKIP_INSTALL_NODEJS: '1'
+
+jobs:
+  config:
+    uses: ./.github/workflows/config.yml
+
+  build:
+    name: Build Runtime (${{ matrix.target }})
+    needs: config
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.config.outputs.platforms) }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ needs.config.outputs.rust-toolchain }}
+          cache: ${{ runner.os != 'Linux' }}
+
+      - uses: ./.github/actions/sccache
+        with:
+          tolerate-failure: ${{ github.event_name != 'schedule' }}
+
+      - uses: ./.github/actions/build-guest
+        if: runner.os == 'Linux'
+        with:
+          show-sccache-stats: ${{ github.event_name == 'schedule' }}
+
+      - name: Build runtime (Linux)
+        if: runner.os == 'Linux'
+        uses: ./.github/actions/run-in-manylinux
+        with:
+          target: ${{ matrix.target }}
+          script: |
+            # Build CLI binary (reuses compiled acrylmicrovm crate artifacts)
+            cargo build -p acrylmicrovm-cli --release
+
+      - name: Build runtime (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          make setup:build runtime
+          cargo build -p acrylmicrovm-cli --release
+          command -v sccache &>/dev/null && sccache --show-stats || true
+
+      - name: Package runtime
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          RUNTIME_DIR=$(ls -dt target/release/build/acrylmicrovm-*/out/runtime 2>/dev/null | head -1)
+          [ -n "$RUNTIME_DIR" ] || { echo "ERROR: Runtime directory not found under target/"; exit 1; }
+          cp -a "$RUNTIME_DIR" acrylmicrovm-runtime
+          tar czf "acrylmicrovm-runtime-v${VERSION}-${{ matrix.target }}.tar.gz" acrylmicrovm-runtime/
+          rm -rf acrylmicrovm-runtime
+
+      - name: Upload runtime artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-${{ matrix.target }}
+          path: acrylmicrovm-runtime-v*-${{ matrix.target }}.tar.gz
+          retention-days: 7
+
+      - name: Package CLI binary
+        run: |
+          VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          CLI_BIN="target/release/acrylmicrovm"
+          [ -f "$CLI_BIN" ] || { echo "ERROR: CLI binary not found at $CLI_BIN"; exit 1; }
+          tar czf "acrylmicrovm-cli-v${VERSION}-${{ matrix.rust_target }}.tar.gz" -C target/release acrylmicrovm
+
+      - name: Upload CLI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: acrylmicrovm-cli-v*-${{ matrix.rust_target }}.tar.gz
+          retention-days: 7
+
+  upload_to_release:
+    name: Upload to GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+
+    steps:
+      - name: Checkout (for scripts/release/install.sh.template)
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      # Per-tarball sidecars come first so the install.sh render step can read
+      # them to embed checksums for the fast path.
+      - name: Generate per-tarball .sha256 sidecars
+        working-directory: dist
+        run: |
+          for f in acrylmicrovm-runtime-*.tar.gz acrylmicrovm-cli-*.tar.gz; do
+            sha256sum "$f" > "$f.sha256"
+          done
+          ls -1 *.sha256
+
+      - name: Render install.sh for this release
+        working-directory: dist
+        env:
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          # github.ref_name on a tag push is the bare tag (e.g. "v0.9.4");
+          # on a release event, the release's tag_name is exposed the same way.
+          VERSION="$REF_NAME"
+          case "$VERSION" in
+            v*) ;;
+            *)  VERSION="v$VERSION" ;;  # normalize for safety
+          esac
+
+          sha_for() {
+            awk '{print $1}' < "acrylmicrovm-cli-${VERSION}-$1.tar.gz.sha256"
+          }
+          DARWIN_ARM64=$(sha_for aarch64-apple-darwin)
+          LINUX_X64=$(sha_for x86_64-unknown-linux-gnu)
+          LINUX_ARM64=$(sha_for aarch64-unknown-linux-gnu)
+
+          sed \
+            -e "s|__VERSION__|${VERSION}|g" \
+            -e "s|__SHA_AARCH64_APPLE_DARWIN__|${DARWIN_ARM64}|g" \
+            -e "s|__SHA_X86_64_UNKNOWN_LINUX_GNU__|${LINUX_X64}|g" \
+            -e "s|__SHA_AARCH64_UNKNOWN_LINUX_GNU__|${LINUX_ARM64}|g" \
+            ../scripts/release/install.sh.template > install.sh
+          chmod +x install.sh
+
+          # Sanity-check substitution succeeded.
+          if grep -q '__VERSION__\|__SHA_' install.sh; then
+            echo "ERROR: install.sh still contains placeholders" >&2
+            exit 1
+          fi
+          # Gate the release on a rendered-script syntax check; a broken
+          # installer would otherwise only surface on user machines.
+          sh -n install.sh
+          head -25 install.sh
+
+      # install.sh sidecar lives in the same integrity envelope as the
+      # tarballs: users who pipe `curl ... install.sh | sh` are running this
+      # script as their own user, so the wrapper itself must be verifiable
+      # (sha256 + sigstore attestation), not just its tarball payload.
+      - name: Generate install.sh.sha256 sidecar
+        working-directory: dist
+        run: |
+          sha256sum install.sh > install.sh.sha256
+          cat install.sh.sha256
+
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: |
+          sha256sum acrylmicrovm-runtime-*.tar.gz acrylmicrovm-cli-*.tar.gz install.sh > SHA256SUMS
+          cat SHA256SUMS
+
+      # Final gate against installer regressions before the release goes
+      # public. The lint workflow also runs this on PRs touching the
+      # template; this re-run validates the actually-rendered dist/install.sh
+      # (placeholders substituted, real digests embedded).
+      - name: Validate rendered installer
+        env:
+          ACRYLMICROVM_INSTALL_TEMPLATE: dist/install.sh
+        run: bash scripts/release/test_install.sh
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/acrylmicrovm-runtime-*.tar.gz
+            dist/acrylmicrovm-cli-*.tar.gz
+            dist/install.sh
+
+      # Step name retained: scripts/release/test_install.sh locates this block by
+      # `- name: Upload to release` to assert dist/install.sh.sha256 ships with the release.
+      - name: Upload to release
+        uses: ./.github/actions/upload-to-release
+        with:
+          files: |
+            dist/acrylmicrovm-runtime-*.tar.gz
+            dist/acrylmicrovm-cli-*.tar.gz
+            dist/*.sha256
+            dist/SHA256SUMS
+            dist/install.sh
+            dist/install.sh.sha256
+
+  # Publish Rust crates to crates.io after runtime tarballs are on GitHub Release.
+  # Runtime tarballs must exist first because crates.io consumers download them
+  # via acrylmicrovm/build.rs (auto_detect_registry -> download_prebuilt_runtime).
+  #
+  # Publish order matters: leaf crates (Tier 1: acrylmicrovm-shared, the -sys crates
+  # and the VMM crates) before acrylmicrovm (Tier 2).
+  # ACRYLMICROVM_DEPS_STUB=1 skips native builds during cargo publish verification.
+  publish_crates:
+    name: Publish to crates.io
+    needs: upload_to_release
+    runs-on: ubuntu-latest
+    if: github.event_name == 'release'
+    env:
+      ACRYLMICROVM_DEPS_STUB: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/setup-rust
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Publish leaf crates (Tier 1)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          publish_crate() {
+            local crate="$1"
+            shift
+            local extra_args="$*"
+            echo "::group::Publishing $crate"
+            if cargo publish -p "$crate" $extra_args 2>&1 | tee /tmp/publish-"$crate".log; then
+              echo "$crate published successfully"
+            else
+              if grep -q "already uploaded" /tmp/publish-"$crate".log; then
+                echo "$crate already on crates.io, skipping"
+              else
+                echo "::error::Failed to publish $crate"
+                exit 1
+              fi
+            fi
+            echo "::endgroup::"
+          }
+
+          # Pure-Rust crate verifies normally
+          publish_crate acrylmicrovm-shared
+
+          # -sys crates skip verification: vendor sources excluded from package,
+          # real build already succeeded in the build job above
+          publish_crate libkrun-sys --no-verify
+          publish_crate e2fsprogs-sys --no-verify
+          publish_crate libgvproxy-sys --no-verify
+          publish_crate bubblewrap-sys --no-verify
+
+          # acrylmicrovm-vmm resolves acrylmicrovm-hypervisor from crates.io. Give the
+          # index time before publishing the dependent crate.
+          publish_crate acrylmicrovm-hypervisor
+          sleep 60
+          publish_crate acrylmicrovm-vmm
+
+      - name: Wait for crates.io indexing
+        run: sleep 60
+
+      # acrylmicrovm uses --no-verify because the acrylmicrovm-shim binary links libkrun,
+      # which isn't available in stub mode. The real build already succeeded in the
+      # build job, so skipping verification is safe.
+      - name: Publish acrylmicrovm (Tier 2)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "::group::Publishing acrylmicrovm"
+          if cargo publish -p acrylmicrovm --no-verify 2>&1 | tee /tmp/publish-acrylmicrovm.log; then
+            echo "acrylmicrovm published successfully"
+          else
+            if grep -q "already uploaded" /tmp/publish-acrylmicrovm.log; then
+              echo "acrylmicrovm already on crates.io, skipping"
+            else
+              echo "::error::Failed to publish acrylmicrovm"
+              exit 1
+            fi
+          fi
+          echo "::endgroup::"
+
+      - name: Wait for acrylmicrovm indexing
+        run: sleep 60
+
+      # acrylmicrovm-cli uses --no-verify because verification would download the
+      # prebuilt runtime from GitHub Releases (slow and unnecessary since the
+      # real build already succeeded in the build job above).
+      - name: Publish acrylmicrovm-cli (Tier 3)
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          echo "::group::Publishing acrylmicrovm-cli"
+          if cargo publish -p acrylmicrovm-cli --no-verify 2>&1 | tee /tmp/publish-acrylmicrovm-cli.log; then
+            echo "acrylmicrovm-cli published successfully"
+          else
+            if grep -q "already uploaded" /tmp/publish-acrylmicrovm-cli.log; then
+              echo "acrylmicrovm-cli already on crates.io, skipping"
+            else
+              echo "::error::Failed to publish acrylmicrovm-cli"
+              exit 1
+            fi
+          fi
+          echo "::endgroup::"

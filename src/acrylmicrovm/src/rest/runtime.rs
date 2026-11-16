@@ -1,0 +1,2404 @@
+// Modified by ACRYL, 2026
+//! RestRuntime — implements RuntimeBackend for the REST API.
+
+use std::sync::Arc;
+
+use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
+
+use crate::metrics::RuntimeMetrics;
+use crate::runtime::advanced_options::SecurityOptions;
+use crate::runtime::backend::RuntimeBackend;
+use crate::runtime::options::{BoxArchive, BoxOptions};
+use crate::{BoxInfo, LiteBox};
+
+use super::client::ApiClient;
+use super::litebox::RestBox;
+use super::options::AcrylMicrovmRestOptions;
+use super::types::{
+    BoxResponse, CreateAliasRequest, CreateBoxRequest, CreateRegistryRequest, CreateVolumeRequest,
+    ImageDetailResponse, ImageInfoResponse, ImageUsageResponse, ListBoxesResponse,
+    ListImagesResponse, ListRegistriesResponse, ListVolumesResponse, RegistryCredentialResponse,
+    RuntimeMetricsResponse, VolumeResponse,
+};
+use crate::images::ImageObject;
+use crate::runtime::auth::{AuthBackend, Principal};
+use crate::runtime::domains::{Domain, DomainBackend, DomainList, DomainTarget};
+use crate::runtime::images::ImageBackend;
+use crate::runtime::registries::{NewRegistryCredential, RegistryBackend, RegistryCredential};
+use crate::runtime::types::{ImageDetail, ImageInfo, ImageUsage};
+use crate::runtime::volumes::VolumeBackend;
+use crate::volumes::VolumeInfo;
+
+pub(crate) struct RestRuntime {
+    client: ApiClient,
+}
+
+impl RestRuntime {
+    pub fn new(config: &AcrylMicrovmRestOptions) -> AcrylMicrovmResult<Self> {
+        let client = ApiClient::new(config)?;
+        Ok(Self { client })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::runtime::checkpoints::CheckpointBackend for RestRuntime {
+    async fn create(
+        &self,
+        source: &str,
+        name: Option<String>,
+    ) -> AcrylMicrovmResult<crate::CheckpointInfo> {
+        #[derive(serde::Serialize)]
+        struct Capture<'a> {
+            source_box_id: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            name: Option<String>,
+        }
+        self.client
+            .post(
+                "/checkpoints",
+                &Capture {
+                    source_box_id: source,
+                    name,
+                },
+            )
+            .await
+    }
+
+    async fn list(&self) -> AcrylMicrovmResult<Vec<crate::CheckpointInfo>> {
+        #[derive(serde::Deserialize)]
+        struct Page {
+            checkpoints: Vec<crate::CheckpointInfo>,
+            #[serde(default)]
+            next_page_token: Option<String>,
+        }
+        let mut result = Vec::new();
+        let mut token = None::<String>;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let query = token
+                .as_deref()
+                .map(|value| vec![("page_token", value)])
+                .unwrap_or_default();
+            let page: Page = self.client.get_with_query("/checkpoints", &query).await?;
+            result.extend(page.checkpoints);
+            match page.next_page_token.filter(|value| !value.is_empty()) {
+                Some(value) if seen.insert(value.clone()) => token = Some(value),
+                Some(_) => {
+                    return Err(AcrylMicrovmError::Internal(
+                        "checkpoint server repeated a pagination token".into(),
+                    ));
+                }
+                None => return Ok(result),
+            }
+        }
+    }
+
+    async fn get(&self, key: &str) -> AcrylMicrovmResult<crate::CheckpointInfo> {
+        self.client.get(&format!("/checkpoints/{key}")).await
+    }
+
+    async fn remove(&self, key: &str, force: bool) -> AcrylMicrovmResult<()> {
+        let path = format!("/checkpoints/{key}");
+        let result = if force {
+            self.client
+                .delete_with_query(&path, &[("force", "true")])
+                .await
+        } else {
+            self.client.delete(&path).await
+        };
+        match result {
+            Err(AcrylMicrovmError::NotFound(_)) if force => Ok(()),
+            result => result,
+        }
+    }
+}
+
+impl RestRuntime {
+    /// Create a box from a managed checkpoint. The server restores the saved
+    /// settings and refuses every other create field, so the body is minimal.
+    async fn create_from_checkpoint(
+        &self,
+        checkpoint: &str,
+        name: Option<&str>,
+    ) -> AcrylMicrovmResult<LiteBox> {
+        #[derive(serde::Serialize)]
+        struct Request<'a> {
+            checkpoint_id: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            name: Option<&'a str>,
+        }
+        use crate::runtime::checkpoints::checked_name;
+        let request = Request {
+            checkpoint_id: checked_name(checkpoint)?,
+            name: name.map(checked_name).transpose()?,
+        };
+        let response: BoxResponse = self.client.post("/boxes", &request).await?;
+        Ok(litebox_from_rest(Arc::new(RestBox::new(
+            self.client.clone(),
+            response.to_box_info()?,
+        ))))
+    }
+}
+
+#[async_trait::async_trait]
+impl AuthBackend for RestRuntime {
+    async fn whoami(&self) -> AcrylMicrovmResult<Principal> {
+        self.client.get_me().await
+    }
+}
+
+#[async_trait::async_trait]
+impl VolumeBackend for RestRuntime {
+    async fn create_volume(&self, name: Option<&str>) -> AcrylMicrovmResult<VolumeInfo> {
+        let request = CreateVolumeRequest {
+            name: name.map(str::to_string),
+        };
+        let resp: VolumeResponse = self.client.post("/volumes", &request).await?;
+        Ok(resp.to_volume_info())
+    }
+
+    async fn list_volumes(&self) -> AcrylMicrovmResult<Vec<VolumeInfo>> {
+        let resp: ListVolumesResponse = self.client.get("/volumes").await?;
+        Ok(resp.volumes.iter().map(|v| v.to_volume_info()).collect())
+    }
+
+    async fn get_volume(&self, id: &str) -> AcrylMicrovmResult<VolumeInfo> {
+        let path = format!("/volumes/{}", id);
+        let resp: VolumeResponse = self.client.get(&path).await?;
+        Ok(resp.to_volume_info())
+    }
+
+    async fn remove_volume(&self, id: &str, force: bool) -> AcrylMicrovmResult<()> {
+        let path = format!("/volumes/{}", id);
+        if force {
+            self.client
+                .delete_with_query(&path, &[("force", "true")])
+                .await
+        } else {
+            self.client.delete(&path).await
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl DomainBackend for RestRuntime {
+    async fn list_domains(&self) -> AcrylMicrovmResult<DomainList> {
+        self.client.get("/domains").await
+    }
+
+    async fn bind_domain(&self, domain: &str, target: &DomainTarget) -> AcrylMicrovmResult<Domain> {
+        self.client
+            .put(&format!("/domains/{domain}/target"), target)
+            .await
+    }
+
+    async fn unbind_domain(&self, domain: &str) -> AcrylMicrovmResult<()> {
+        self.client
+            .delete(&format!("/domains/{domain}/target"))
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl ImageBackend for RestRuntime {
+    async fn pull_image(&self, image_ref: &str) -> AcrylMicrovmResult<ImageObject> {
+        Err(AcrylMicrovmError::Unsupported(format!(
+            "a REST runtime pulls an image when a box is created from it; \
+             create the box with '{image_ref}' instead of pulling it first"
+        )))
+    }
+
+    async fn list_images(&self) -> AcrylMicrovmResult<Vec<ImageInfo>> {
+        let resp: ListImagesResponse = self.client.get("/images").await?;
+        Ok(resp
+            .images
+            .into_iter()
+            .map(ImageInfoResponse::into_image_info)
+            .collect())
+    }
+
+    async fn get_image(&self, name: &str) -> AcrylMicrovmResult<ImageDetail> {
+        let resp: ImageDetailResponse = self.client.get(&image_path(name)).await?;
+        Ok(resp.into_image_detail())
+    }
+
+    async fn remove_image(&self, name: &str) -> AcrylMicrovmResult<()> {
+        self.client.delete(&image_path(name)).await
+    }
+
+    async fn image_usage(&self) -> AcrylMicrovmResult<ImageUsage> {
+        let resp: ImageUsageResponse = self.client.get("/images/usage").await?;
+        Ok(ImageUsage {
+            count: resp.count,
+            limit: resp.limit,
+            known_bytes: resp.known_bytes,
+        })
+    }
+
+    async fn create_alias(
+        &self,
+        name: &str,
+        alias: &str,
+        digest: &str,
+    ) -> AcrylMicrovmResult<ImageDetail> {
+        let path = format!("{}/aliases", image_path(name));
+        let resp: ImageDetailResponse = self
+            .client
+            .post(&path, &CreateAliasRequest { alias, digest })
+            .await?;
+        Ok(resp.into_image_detail())
+    }
+
+    async fn delete_alias(&self, name: &str, alias: &str) -> AcrylMicrovmResult<()> {
+        self.client
+            .delete(&format!(
+                "{}/aliases/{}",
+                image_path(name),
+                urlencoding::encode(alias)
+            ))
+            .await
+    }
+}
+
+#[async_trait::async_trait]
+impl RegistryBackend for RestRuntime {
+    async fn list_registries(&self) -> AcrylMicrovmResult<Vec<RegistryCredential>> {
+        let resp: ListRegistriesResponse = self.client.get("/images/registries").await?;
+        Ok(resp
+            .registries
+            .into_iter()
+            .map(RegistryCredentialResponse::into_registry_credential)
+            .collect())
+    }
+
+    async fn create_registry(
+        &self,
+        credential: &NewRegistryCredential,
+    ) -> AcrylMicrovmResult<RegistryCredential> {
+        let request = CreateRegistryRequest::from_credential(credential);
+        let resp: RegistryCredentialResponse =
+            self.client.post("/images/registries", &request).await?;
+        Ok(resp.into_registry_credential())
+    }
+
+    async fn remove_registry(&self, id: &str) -> AcrylMicrovmResult<()> {
+        self.client
+            .delete(&format!("/images/registries/{id}"))
+            .await
+    }
+}
+
+/// The route for one image. A name has slashes in it, so it is encoded as a
+/// single segment: `quay.io/acme/app` is one path element, not three.
+fn image_path(name: &str) -> String {
+    format!("/images/{}", urlencoding::encode(name))
+}
+
+fn litebox_from_rest(rest_box: Arc<RestBox>) -> LiteBox {
+    let box_backend: Arc<dyn crate::runtime::backend::BoxBackend> = rest_box.clone();
+    let network_backend: Arc<dyn crate::runtime::backend::BoxNetworkBackend> = rest_box.clone();
+    let snapshot_backend: Arc<dyn crate::runtime::backend::SnapshotBackend> = rest_box;
+    LiteBox::new(box_backend, network_backend, snapshot_backend)
+}
+
+impl BoxOptions {
+    /// The remote sibling of [`BoxOptions::sanitize`]: check these options
+    /// against what a REST server accepts from a client, before any network I/O.
+    ///
+    /// Separate from `sanitize` rather than folded into it because these rules
+    /// are not about validity — a local box may legitimately set every option
+    /// refused here. They configure the server's own host: its hardware, its
+    /// filesystem, its sandbox policy. The caller gets a typed
+    /// [`AcrylMicrovmError::Unsupported`] naming the specific knob instead of
+    /// whatever status an individual server happens to return.
+    ///
+    /// Rejects rather than strips, deliberately: quietly dropping these would
+    /// hand back a box that ignored the request, which is the failure this whole
+    /// admission path exists to prevent.
+    ///
+    /// Sandbox security is the load-bearing one: a client that could hand the
+    /// server a [`SecurityOptions`](crate::runtime::advanced_options::SecurityOptions)
+    /// would be choosing its own isolation level, and `SecurityOptions::disabled()`
+    /// turns jailer and seccomp off. The same refusal is spelled out on the wire
+    /// types (`CreateBoxRequest::from_options`), in `acrylmicrovm serve`
+    /// (`src/cli/src/commands/serve/types.rs`), and in the spec.
+    fn sanitize_remote(&self) -> AcrylMicrovmResult<()> {
+        // The server validates CPU quota support on its execution host.
+        self.cpu_count()?;
+        self.advanced.validate_privileged_capability_conflict()?;
+        if !self.ports.is_empty() {
+            return Err(AcrylMicrovmError::Unsupported(
+                "Host port publication (-p/ports) is local-only for remote runtimes. \
+                 Use box.network.tunnel(target, options) or `acrylmicrovm network tunnel BOX PORT` instead."
+                    .to_string(),
+            ));
+        }
+
+        if !self.advanced.network_rate_limit.is_unlimited() {
+            return Err(AcrylMicrovmError::Unsupported(
+                "network rate limits (advanced.network_rate_limit) are enforced by the \
+                 local gvproxy bridge and are local-only for remote runtimes; the remote \
+                 server owns its own network policy."
+                    .to_string(),
+            ));
+        }
+
+        if self.advanced.security != SecurityOptions::default() {
+            return Err(AcrylMicrovmError::Unsupported(
+                "sandbox security (advanced.security) is the remote server's own policy \
+                 and is only configurable by the local runtime"
+                    .to_string(),
+            ));
+        }
+
+        if self.advanced.isolate_mounts {
+            return Err(AcrylMicrovmError::Unsupported(
+                "mount isolation (advanced.isolate_mounts) is only supported by the local runtime"
+                    .to_string(),
+            ));
+        }
+
+        if self.advanced.health_check.is_some() {
+            return Err(AcrylMicrovmError::Unsupported(
+                "health checks (advanced.health_check) are only supported by the local runtime"
+                    .to_string(),
+            ));
+        }
+
+        if self.advanced.kernel.is_some() {
+            return Err(AcrylMicrovmError::Unsupported(
+                "custom kernels are only supported by the local runtime".to_string(),
+            ));
+        }
+
+        if self.advanced.nested_virtualization {
+            return Err(AcrylMicrovmError::Unsupported(
+                "nested virtualization is only supported by the local runtime".to_string(),
+            ));
+        }
+
+        if self.advanced.engine.is_some() {
+            return Err(AcrylMicrovmError::Unsupported(
+                "engine selection (advanced.engine) is only supported by the local runtime"
+                    .to_string(),
+            ));
+        }
+
+        // Mounts. `BoxOptions::sanitize` is local-only, so
+        // `VolumeSpec::validate` — the "exactly one origin" invariant that C and
+        // Go callers can violate by setting the fields directly — has no other
+        // chance to run before the request goes out.
+        //
+        // A host bind has no meaning against a REST runtime either: the path
+        // names the *server's* filesystem, not the caller's. The rejected path
+        // is deliberately not quoted back — the caller already knows what they
+        // asked for, and echoing a server-side path into a client error is a
+        // leak, not a diagnostic.
+
+        for volume in &self.volumes {
+            volume.validate()?;
+        }
+
+        if self
+            .volumes
+            .iter()
+            .any(|volume| volume.managed_volume.is_none())
+        {
+            return Err(AcrylMicrovmError::Unsupported(
+                "host bind mounts are only supported by the local runtime; mount a managed volume \
+                 by id or name instead"
+                    .to_string(),
+            ));
+        }
+
+        // The server rejects `read_only: true` on a managed mount. Refusing here
+        // says so plainly instead of surfacing a field-level 400, and — more to the
+        // point — never lets a caller believe a writable mount is protected.
+        if let Some(volume) = self
+            .volumes
+            .iter()
+            .find(|volume| volume.read_only)
+            .and_then(|volume| volume.managed_volume.as_deref())
+        {
+            return Err(AcrylMicrovmError::Unsupported(format!(
+                "read-only managed volumes are not supported yet; mount {volume:?} read-write"
+            )));
+        }
+
+        // REST runtimes send no typed mounts yet(TODO): refused here, before
+        // any request, rather than left out of it.
+        if !self.mounts.is_empty() {
+            return Err(AcrylMicrovmError::Unsupported(
+                "typed mounts are not supported by REST runtimes yet".to_string(),
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl RuntimeBackend for RestRuntime {
+    async fn create(&self, options: BoxOptions, name: Option<String>) -> AcrylMicrovmResult<LiteBox> {
+        // A checkpoint source carries no other option: the server restores
+        // the saved box, so this never builds a `CreateBoxRequest`.
+        if let Some(checkpoint) = options.checkpoint_source()? {
+            return self
+                .create_from_checkpoint(checkpoint, name.as_deref())
+                .await;
+        }
+        options.sanitize_remote()?;
+        options.validate_secrets()?;
+
+        // Validate only the caller's requested policy. An unset auto_stop means
+        // "no auto-stop", so it must not borrow the server's default here —
+        // otherwise a plain remove-on-stop box (`--rm` → auto_delete=1) is
+        // wrongly rejected by the ordering check before the request is even sent.
+        crate::runtime::types::BoxLifecyclePolicy {
+            auto_stop: options.auto_stop.unwrap_or(0),
+            auto_delete: options.auto_delete.unwrap_or(0),
+            auto_resume: options.auto_resume.unwrap_or(true),
+        }
+        .validate()?;
+
+        // A server that does not advertise the capability policy would accept
+        // the request and drop the field, silently granting default privileges.
+        // `Some` alone is the trigger, even an explicitly empty policy: the
+        // caller configured something, and a server that can't represent the
+        // concept at all can't be trusted to preserve that from a no-op value.
+        if options.advanced.capabilities().is_some() {
+            self.client.require_linux_capabilities_enabled().await?;
+        }
+        if options.advanced.privileged {
+            self.client.require_privileged_enabled().await?;
+        }
+
+        let req = CreateBoxRequest::from_options(&options, name);
+        let resp = self.client.create_box(&req).await?;
+        let info = resp.to_box_info()?;
+        let rest_box = Arc::new(RestBox::new(self.client.clone(), info));
+        Ok(litebox_from_rest(rest_box))
+    }
+
+    async fn get_or_create(
+        &self,
+        options: BoxOptions,
+        name: Option<String>,
+    ) -> AcrylMicrovmResult<(LiteBox, bool)> {
+        if matches!(options.rootfs, crate::RootfsSpec::Checkpoint(_)) {
+            return Err(AcrylMicrovmError::Unsupported(
+                "get_or_create cannot use a checkpoint source; a checkpoint box \
+                 cannot be matched against an existing one, so call create"
+                    .into(),
+            ));
+        }
+        options.sanitize_remote()?;
+
+        if let Some(ref box_name) = name {
+            let path = format!("/boxes/{box_name}");
+            match self.client.get::<BoxResponse>(&path).await {
+                Ok(response) => {
+                    let actual = response.privileged.ok_or_else(|| {
+                        AcrylMicrovmError::Unsupported(format!(
+                            "cannot reuse box {box_name:?}: the server did not report its \
+                             privileged mode; upgrade the server to expose privilege metadata"
+                        ))
+                    })?;
+                    if actual != options.advanced.privileged {
+                        return Err(AcrylMicrovmError::Unsupported(format!(
+                            "cannot reuse box {box_name:?}: requested privileged={}, but the \
+                             existing box has privileged={actual}; use a different name or recreate it",
+                            options.advanced.privileged
+                        )));
+                    }
+                    let info = response.to_box_info()?;
+                    let rest_box = Arc::new(RestBox::new(self.client.clone(), info));
+                    return Ok((litebox_from_rest(rest_box), false));
+                }
+                Err(AcrylMicrovmError::NotFound(_)) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        // Create new box
+        let litebox = self.create(options, name).await?;
+        Ok((litebox, true))
+    }
+
+    async fn get(&self, id_or_name: &str) -> AcrylMicrovmResult<Option<LiteBox>> {
+        let path = format!("/boxes/{id_or_name}");
+        match self.client.get::<BoxResponse>(&path).await {
+            Ok(resp) => {
+                let info = resp.to_box_info()?;
+                let rest_box = Arc::new(RestBox::new(self.client.clone(), info));
+                Ok(Some(litebox_from_rest(rest_box)))
+            }
+            Err(AcrylMicrovmError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn get_info(&self, id_or_name: &str) -> AcrylMicrovmResult<Option<BoxInfo>> {
+        let path = format!("/boxes/{id_or_name}");
+        match self.client.get::<BoxResponse>(&path).await {
+            Ok(resp) => Ok(Some(resp.to_box_info()?)),
+            Err(AcrylMicrovmError::NotFound(_)) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    async fn list_info(&self) -> AcrylMicrovmResult<Vec<BoxInfo>> {
+        let mut result = Vec::new();
+        let mut token = None::<String>;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let query = token
+                .as_deref()
+                .map(|value| vec![("pageToken", value)])
+                .unwrap_or_default();
+            let page: ListBoxesResponse = self.client.get_with_query("/boxes", &query).await?;
+            for box_response in page.boxes {
+                result.push(box_response.to_box_info()?);
+            }
+            match page.next_page_token.filter(|value| !value.is_empty()) {
+                Some(value) if seen.insert(value.clone()) => token = Some(value),
+                Some(_) => {
+                    return Err(AcrylMicrovmError::Internal(
+                        "box server repeated a pagination token".into(),
+                    ));
+                }
+                None => return Ok(result),
+            }
+        }
+    }
+
+    async fn exists(&self, id_or_name: &str) -> AcrylMicrovmResult<bool> {
+        let path = format!("/boxes/{}", id_or_name);
+        self.client.head_exists(&path).await
+    }
+
+    async fn metrics(&self) -> AcrylMicrovmResult<RuntimeMetrics> {
+        let resp: RuntimeMetricsResponse = self.client.get("/metrics").await?;
+        Ok(runtime_metrics_from_response(&resp))
+    }
+
+    async fn remove(&self, id_or_name: &str, force: bool) -> AcrylMicrovmResult<()> {
+        let path = format!("/boxes/{}", id_or_name);
+        if force {
+            self.client
+                .delete_with_query(&path, &[("force", "true")])
+                .await
+        } else {
+            self.client.delete(&path).await
+        }
+    }
+
+    async fn shutdown(&self, _timeout: Option<i32>) -> AcrylMicrovmResult<()> {
+        // REST client doesn't own the server — shutdown is a no-op.
+        // The server manages its own lifecycle.
+        Ok(())
+    }
+
+    async fn import_box(
+        &self,
+        archive: BoxArchive,
+        name: Option<String>,
+    ) -> AcrylMicrovmResult<LiteBox> {
+        self.client.require_import_enabled().await?;
+
+        let archive_bytes = std::fs::read(archive.path()).map_err(|e| {
+            AcrylMicrovmError::Storage(format!(
+                "Failed to read archive {}: {}",
+                archive.path().display(),
+                e
+            ))
+        })?;
+
+        let query: Vec<(&str, &str)> = name
+            .as_deref()
+            .map(|n| vec![("name", n)])
+            .unwrap_or_default();
+
+        let resp: BoxResponse = self
+            .client
+            .post_bytes_for_json("/boxes/import", archive_bytes, &query)
+            .await?;
+
+        let info = resp.to_box_info()?;
+        let rest_box = Arc::new(RestBox::new(self.client.clone(), info));
+        Ok(litebox_from_rest(rest_box))
+    }
+}
+
+/// Convert REST metrics response to core RuntimeMetrics.
+fn runtime_metrics_from_response(resp: &RuntimeMetricsResponse) -> RuntimeMetrics {
+    use crate::metrics::RuntimeMetricsStorage;
+    use std::sync::atomic::Ordering;
+
+    let storage = RuntimeMetricsStorage::new();
+    storage
+        .boxes_created
+        .store(resp.boxes_created_total, Ordering::Relaxed);
+    storage
+        .boxes_failed
+        .store(resp.boxes_failed_total, Ordering::Relaxed);
+    storage
+        .boxes_stopped
+        .store(resp.boxes_stopped_total, Ordering::Relaxed);
+    storage
+        .total_commands
+        .store(resp.total_commands_executed, Ordering::Relaxed);
+    storage
+        .total_exec_errors
+        .store(resp.total_exec_errors, Ordering::Relaxed);
+
+    RuntimeMetrics::new(storage)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runtime::options::{PortProtocol, PortSpec};
+
+    #[test]
+    fn remote_runtime_rejects_host_port_publication_with_tunnel_guidance() {
+        let options = BoxOptions {
+            ports: vec![PortSpec {
+                host_port: None,
+                guest_port: 3000,
+                protocol: PortProtocol::Tcp,
+                host_ip: None,
+            }],
+            ..Default::default()
+        };
+
+        let err = options.sanitize_remote().unwrap_err();
+        assert!(err.to_string().contains("-p/ports"));
+        assert!(err.to_string().contains("network.tunnel"));
+        assert!(err.to_string().contains("acrylmicrovm network tunnel"));
+    }
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    const BOX_RESPONSE: &str = r#"{"box_id":"01HJK4TNRPQSXYZ8WM6NCVT9R5","name":"named","status":"configured","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","pid":null,"image":"alpine:latest","cpus":2,"memory_mib":512,"labels":{}}"#;
+
+    fn capability_options() -> BoxOptions {
+        let mut advanced = crate::AdvancedBoxOptions::default();
+        advanced
+            .set_capabilities(Some(crate::ContainerCapabilities {
+                drop: vec!["NET_RAW".into()],
+                ..Default::default()
+            }))
+            .unwrap();
+        BoxOptions {
+            advanced,
+            ..Default::default()
+        }
+    }
+
+    async fn json_server(bodies: Vec<&'static str>) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
+        http_server(bodies.into_iter().map(|body| (200, body)).collect()).await
+    }
+
+    /// Answers one connection per `(status, body)`, in order, and returns the
+    /// request line of each.
+    async fn http_server(
+        replies: Vec<(u16, &'static str)>,
+    ) -> (u16, tokio::task::JoinHandle<Vec<String>>) {
+        let (port, server) = exchange_server(replies).await;
+        let lines = tokio::spawn(async move {
+            let requests = server.await.unwrap();
+            requests.into_iter().map(|(line, _)| line).collect()
+        });
+        (port, lines)
+    }
+
+    /// Like [`http_server`], but returns each request line with its body.
+    async fn exchange_server(
+        replies: Vec<(u16, &'static str)>,
+    ) -> (u16, tokio::task::JoinHandle<Vec<(String, String)>>) {
+        let (port, server) = capture_server(replies).await;
+        let requests = tokio::spawn(async move {
+            server
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|(headers, body)| (headers.lines().next().unwrap().to_string(), body))
+                .collect()
+        });
+        (port, requests)
+    }
+
+    /// Capture headers and bodies emitted by the production HTTP client.
+    async fn capture_server(
+        replies: Vec<(u16, &'static str)>,
+    ) -> (u16, tokio::task::JoinHandle<Vec<(String, String)>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (status, body) in replies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut headers = Vec::new();
+                while !headers.ends_with(b"\r\n\r\n") {
+                    headers.push(socket.read_u8().await.unwrap());
+                }
+                let request = String::from_utf8(headers).unwrap();
+                let length = request
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                let mut request_body = vec![0; length];
+                socket.read_exact(&mut request_body).await.unwrap();
+                requests.push((request, String::from_utf8(request_body).unwrap()));
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(),
+                            body
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            requests
+        });
+        (port, server)
+    }
+
+    const BOXES_PAGE: &str = r#"{"boxes":[{"box_id":"01HJK4TNRPQSXYZ8WM6NCVT9R5","name":"first","status":"configured","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","image":"alpine:latest","cpus":2,"memory_mib":512}],"next_page_token":"cursor+/="}"#;
+    const BOXES_LAST_PAGE: &str = r#"{"boxes":[{"box_id":"01HJK4TNRPQSXYZ8WM6NCVT9R6","name":"last","status":"configured","created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z","image":"alpine:latest","cpus":2,"memory_mib":512}],"next_page_token":""}"#;
+
+    #[tokio::test]
+    async fn boxes_pagination_collects_pages_and_encodes_camel_case_token() {
+        let (port, server) = json_server(vec![BOXES_PAGE, BOXES_LAST_PAGE]).await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+
+        let boxes = runtime.list_info().await.unwrap();
+        assert_eq!(boxes.len(), 2, "list_info must include every server page");
+        assert_eq!(boxes[0].name.as_deref(), Some("first"));
+        assert_eq!(boxes[1].name.as_deref(), Some("last"));
+        assert_eq!(
+            server.await.unwrap(),
+            [
+                "GET /v1/boxes HTTP/1.1",
+                "GET /v1/boxes?pageToken=cursor%2B%2F%3D HTTP/1.1"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn boxes_pagination_accepts_terminal_tokens_and_empty_pages() {
+        for body in [
+            r#"{"boxes":[]}"#,
+            r#"{"boxes":[],"next_page_token":null}"#,
+            r#"{"boxes":[],"next_page_token":""}"#,
+        ] {
+            let (port, server) = json_server(vec![body]).await;
+            let runtime =
+                RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
+                    .unwrap();
+            assert!(runtime.list_info().await.unwrap().is_empty());
+            assert_eq!(server.await.unwrap(), ["GET /v1/boxes HTTP/1.1"]);
+        }
+
+        let (port, server) = json_server(vec![
+            r#"{"boxes":[],"next_page_token":"cursor+/="}"#,
+            BOXES_LAST_PAGE,
+        ])
+        .await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let boxes = runtime.list_info().await.unwrap();
+        assert_eq!(boxes.len(), 1, "an empty page can still have a next page");
+        assert_eq!(boxes[0].name.as_deref(), Some("last"));
+        assert_eq!(server.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn boxes_pagination_rejects_token_cycles() {
+        for replies in [
+            vec![BOXES_PAGE, BOXES_PAGE],
+            vec![
+                BOXES_PAGE,
+                r#"{"boxes":[],"next_page_token":"other"}"#,
+                BOXES_PAGE,
+            ],
+        ] {
+            let count = replies.len();
+            let (port, server) = json_server(replies).await;
+            let runtime =
+                RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
+                    .unwrap();
+            let error = runtime.list_info().await.unwrap_err();
+            assert!(matches!(error, AcrylMicrovmError::Internal(_)));
+            assert!(error.to_string().contains("repeated a pagination token"));
+            assert_eq!(server.await.unwrap().len(), count);
+        }
+    }
+
+    #[tokio::test]
+    async fn boxes_pagination_propagates_later_page_errors() {
+        let (port, server) = http_server(vec![
+            (200, BOXES_PAGE),
+            (403, r#"{"error":{"code":"FORBIDDEN","message":"denied"}}"#),
+        ])
+        .await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        assert!(
+            runtime.list_info().await.is_err(),
+            "never return a partial list"
+        );
+        assert_eq!(server.await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn test_import_box_requires_capability() {
+        // Without a running server, import_box should fail with a connection error
+        // (it tries to check capabilities first). This verifies the code path is wired up.
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1"); // unreachable port
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+
+        let result = RuntimeBackend::import_box(
+            &runtime,
+            BoxArchive::new("/tmp/ignored.acrylmicrovm"),
+            Some("x".to_string()),
+        )
+        .await;
+
+        // Should fail trying to reach the server for capability check
+        assert!(result.is_err(), "Expected error when server is unreachable");
+    }
+
+    #[tokio::test]
+    async fn create_allows_remove_on_stop_without_autostop() {
+        // `run --rm` maps to auto_delete=1 with no auto_stop. The client must
+        // validate only the caller's requested policy — not the server's auto_stop
+        // default — so a remove-on-stop box is not rejected before the request is
+        // sent. With the server unreachable, a passing validation surfaces as a
+        // connection error, never the lifecycle-ordering error.
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1"); // unreachable port
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+
+        let opts = BoxOptions {
+            auto_delete: Some(1),
+            ..Default::default()
+        };
+        let err = RuntimeBackend::create(&runtime, opts, None)
+            .await
+            .err()
+            .expect("unreachable server must yield an error");
+
+        assert!(
+            !err.to_string()
+                .contains("auto_delete must be greater than auto_stop"),
+            "remove-on-stop without auto_stop must pass client validation; got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_capabilities_require_server_advertisement_before_create() {
+        // A server that does not advertise the feature would accept the create
+        // request and drop `advanced`, silently granting default privileges.
+        let (port, server) = json_server(vec![r#"{"capabilities":{}}"#]).await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+
+        let error = match RuntimeBackend::create(&runtime, capability_options(), None).await {
+            Err(error) => error,
+            Ok(_) => panic!("an old server must not silently ignore a capability policy"),
+        };
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)));
+        assert_eq!(server.await.unwrap(), ["GET /v1/config HTTP/1.1"]);
+    }
+
+    /// An explicitly empty policy is still explicit — the caller configured
+    /// something, even if it happens to be a no-op value. A server that
+    /// can't advertise the capability feature at all can't be trusted to
+    /// honor that distinction either, so this must still be probed for.
+    #[tokio::test]
+    async fn explicit_empty_capabilities_still_require_server_advertisement() {
+        let (port, server) = json_server(vec![r#"{"capabilities":{}}"#]).await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+
+        let mut advanced = crate::AdvancedBoxOptions::default();
+        advanced
+            .set_capabilities(Some(crate::ContainerCapabilities::default()))
+            .unwrap();
+        let opts = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let error = match RuntimeBackend::create(&runtime, opts, None).await {
+            Err(error) => error,
+            Ok(_) => panic!("an explicit, even empty, capability policy must still be probed for"),
+        };
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)));
+        assert_eq!(server.await.unwrap(), ["GET /v1/config HTTP/1.1"]);
+    }
+
+    #[tokio::test]
+    async fn advertised_capability_support_creates_on_the_shared_route() {
+        let (port, server) = json_server(vec![
+            r#"{"capabilities":{"linux_capabilities_enabled":true}}"#,
+            BOX_RESPONSE,
+        ])
+        .await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+
+        RuntimeBackend::create(&runtime, capability_options(), None)
+            .await
+            .expect("create with a capability policy");
+
+        assert_eq!(
+            server.await.unwrap(),
+            ["GET /v1/config HTTP/1.1", "POST /v1/boxes HTTP/1.1"]
+        );
+    }
+
+    #[tokio::test]
+    async fn ordinary_create_does_not_probe_server_capabilities() {
+        let (port, server) = exchange_server(vec![(200, BOX_RESPONSE)]).await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+
+        RuntimeBackend::create(&runtime, BoxOptions::default(), None)
+            .await
+            .expect("create without a capability policy");
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "POST /v1/boxes HTTP/1.1");
+        // An image create never mentions a checkpoint.
+        assert!(json_body(&requests[0].1).get("checkpoint_id").is_none());
+    }
+
+    fn checkpoint_options(checkpoint: &str) -> BoxOptions {
+        BoxOptions {
+            rootfs: crate::RootfsSpec::Checkpoint(checkpoint.into()),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn checkpoint_create_failure_preserves_admitted_identity() {
+        for (status, code) in [(408, "timeout"), (400, "invalid_argument")] {
+            let body = if status == 408 {
+                r#"{"message":"Still importing","code":"timeout","boxId":"admitted-box"}"#
+            } else {
+                r#"{"message":"Import failed","code":"invalid_argument","boxId":"admitted-box"}"#
+            };
+            let (port, server) = exchange_server(vec![(status, body)]).await;
+            let runtime =
+                RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
+                    .unwrap();
+            let error = RuntimeBackend::create(&runtime, checkpoint_options("base"), None)
+                .await
+                .err()
+                .unwrap();
+            assert!(error.to_string().contains("admitted-box"), "{error}");
+            if code == "invalid_argument" {
+                assert!(matches!(error, AcrylMicrovmError::InvalidArgument(_)));
+            }
+            assert_eq!(server.await.unwrap().len(), 1);
+        }
+    }
+
+    fn json_body(body: &str) -> serde_json::Value {
+        serde_json::from_str(body).unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_from_a_checkpoint_sends_only_the_checkpoint_and_name() {
+        let (port, server) = exchange_server(vec![(201, BOX_RESPONSE)]).await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+
+        let created =
+            RuntimeBackend::create(&runtime, checkpoint_options("base"), Some("worker".into()))
+                .await
+                .expect("create from a checkpoint");
+
+        assert_eq!(created.id().as_str(), "01HJK4TNRPQSXYZ8WM6NCVT9R5");
+        let requests = server.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].0, "POST /v1/boxes HTTP/1.1");
+        assert_eq!(
+            json_body(&requests[0].1),
+            serde_json::json!({"checkpoint_id": "base", "name": "worker"})
+        );
+    }
+
+    #[tokio::test]
+    async fn create_from_a_checkpoint_without_a_name_sends_only_the_checkpoint() {
+        let (port, server) = exchange_server(vec![(201, BOX_RESPONSE)]).await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+
+        RuntimeBackend::create(&runtime, checkpoint_options("base"), None)
+            .await
+            .expect("unnamed create from a checkpoint");
+
+        let requests = server.await.unwrap();
+        assert_eq!(requests[0].0, "POST /v1/boxes HTTP/1.1");
+        assert_eq!(
+            json_body(&requests[0].1),
+            serde_json::json!({"checkpoint_id": "base"})
+        );
+    }
+
+    /// The server inherits the saved settings and accepts no overrides, so the
+    /// client must refuse them rather than send a request that drops them. No
+    /// server listens here: a sent request would surface as a transport error.
+    #[tokio::test]
+    async fn create_from_a_checkpoint_refuses_overrides_and_bad_names_before_any_request() {
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new("http://127.0.0.1:1")).unwrap();
+        let overridden = [
+            BoxOptions {
+                cpus: Some(2.0),
+                ..checkpoint_options("base")
+            },
+            BoxOptions {
+                env: vec![("A".into(), "B".into())],
+                ..checkpoint_options("base")
+            },
+            BoxOptions {
+                detach: true,
+                ..checkpoint_options("base")
+            },
+        ];
+        for options in overridden {
+            let error = RuntimeBackend::create(&runtime, options, None)
+                .await
+                .err()
+                .expect("overrides must be refused");
+            assert!(matches!(error, AcrylMicrovmError::InvalidArgument(_)), "{error}");
+            assert!(error.to_string().contains("inherits"), "{error}");
+        }
+        for (checkpoint, name) in [("bad/key", None), ("base", Some("bad/name".to_owned()))] {
+            assert!(matches!(
+                RuntimeBackend::create(&runtime, checkpoint_options(checkpoint), name).await,
+                Err(AcrylMicrovmError::InvalidArgument(_))
+            ));
+        }
+        assert!(matches!(
+            RuntimeBackend::get_or_create(&runtime, checkpoint_options("base"), None).await,
+            Err(AcrylMicrovmError::Unsupported(_))
+        ));
+    }
+
+    /// A server that does not honor `ExecRequest.user` would run the command
+    /// as the box default user, so the client must refuse before sending it.
+    #[tokio::test]
+    async fn exec_user_requires_server_advertisement() {
+        let (port, server) = json_server(vec![BOX_RESPONSE, r#"{"capabilities":{}}"#]).await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let sandbox = RuntimeBackend::get(&runtime, "named")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = sandbox
+            .exec(crate::BoxCommand::new("id").user("1000:1000"))
+            .await;
+
+        assert!(matches!(result, Err(AcrylMicrovmError::Unsupported(_))));
+        assert_eq!(
+            server.await.unwrap(),
+            ["GET /v1/boxes/named HTTP/1.1", "GET /v1/config HTTP/1.1"]
+        );
+    }
+
+    /// A config without a capabilities object advertises nothing at all; the
+    /// gate must refuse rather than assume support.
+    #[tokio::test]
+    async fn exec_user_requires_capabilities_object() {
+        let (port, server) = json_server(vec![BOX_RESPONSE, "{}"]).await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let sandbox = RuntimeBackend::get(&runtime, "named")
+            .await
+            .unwrap()
+            .unwrap();
+
+        let result = sandbox
+            .exec(crate::BoxCommand::new("id").user("1000:1000"))
+            .await;
+
+        assert!(matches!(result, Err(AcrylMicrovmError::Unsupported(_))));
+        assert_eq!(
+            server.await.unwrap(),
+            ["GET /v1/boxes/named HTTP/1.1", "GET /v1/config HTTP/1.1"]
+        );
+    }
+
+    /// A cached "yes" would let later execs reach a server that has since
+    /// dropped the flag, where they would run as the box default user (#2116),
+    /// so the gate must re-read the live endpoint before every user exec.
+    #[tokio::test]
+    async fn exec_user_gate_rechecks_uncached_server_config() {
+        const EXEC_RESPONSE: &str = r#"{"execution_id":"exec-1"}"#;
+        let (port, server) = exchange_server(vec![
+            (200, BOX_RESPONSE),
+            (200, r#"{"capabilities":{"exec_user_enabled":true}}"#),
+            (201, EXEC_RESPONSE),
+            (200, r#"{"capabilities":{}}"#),
+        ])
+        .await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let sandbox = RuntimeBackend::get(&runtime, "named")
+            .await
+            .unwrap()
+            .unwrap();
+
+        sandbox
+            .exec(crate::BoxCommand::new("id").user("1000:1000"))
+            .await
+            .expect("first exec with advertised capability");
+        let second = sandbox
+            .exec(crate::BoxCommand::new("id").user("1000:1000"))
+            .await;
+
+        assert!(matches!(second, Err(AcrylMicrovmError::Unsupported(_))));
+        let requests: Vec<String> = server
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(line, _)| line)
+            .collect();
+        assert_eq!(
+            requests,
+            [
+                "GET /v1/boxes/named HTTP/1.1",
+                "GET /v1/config HTTP/1.1",
+                "POST /v1/boxes/01HJK4TNRPQSXYZ8WM6NCVT9R5/exec HTTP/1.1",
+                "GET /v1/config HTTP/1.1",
+            ]
+        );
+    }
+
+    /// The exec body carries `user` exactly when the command sets one, and
+    /// only a command with a user probes the server's capabilities.
+    #[tokio::test]
+    async fn exec_request_body_carries_user_only_when_set() {
+        const EXEC_RESPONSE: &str = r#"{"execution_id":"exec-1"}"#;
+        type ExecUserCase = (Option<&'static str>, &'static [(u16, &'static str)]);
+        let cases: [ExecUserCase; 2] = [
+            (None, &[(200, BOX_RESPONSE), (201, EXEC_RESPONSE)]),
+            (
+                Some("1000:1000"),
+                &[
+                    (200, BOX_RESPONSE),
+                    (200, r#"{"capabilities":{"exec_user_enabled":true}}"#),
+                    (201, EXEC_RESPONSE),
+                ],
+            ),
+        ];
+
+        for (user, replies) in cases {
+            let (port, server) = exchange_server(replies.to_vec()).await;
+            let runtime =
+                RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
+                    .unwrap();
+            let sandbox = RuntimeBackend::get(&runtime, "named")
+                .await
+                .unwrap()
+                .unwrap();
+            let mut command = crate::BoxCommand::new("id");
+            if let Some(user) = user {
+                command = command.user(user);
+            }
+
+            sandbox.exec(command).await.expect("exec");
+
+            let requests = server.await.unwrap();
+            let (line, body) = requests.last().unwrap();
+            assert_eq!(
+                line,
+                "POST /v1/boxes/01HJK4TNRPQSXYZ8WM6NCVT9R5/exec HTTP/1.1"
+            );
+            let body: serde_json::Value = serde_json::from_str(body).unwrap();
+            // `None` must mean the field is absent, not `null`: `ExecRequest`
+            // carries `skip_serializing_if = "Option::is_none"`, and reading
+            // the value alone cannot tell a missing field from an explicit
+            // null, so the "only when set" half of this test would go blind.
+            match user {
+                Some(user) => assert_eq!(
+                    body.get("user").and_then(|value| value.as_str()),
+                    Some(user),
+                    "{body}"
+                ),
+                None => assert!(body.get("user").is_none(), "{body}"),
+            }
+            assert_eq!(requests.len(), replies.len(), "{user:?}: {requests:?}");
+        }
+    }
+
+    /// Inspection reads the shared routes. Addressing a versioned variant here
+    /// would 404, and `get` maps NotFound to `Ok(None)` — so an existing box
+    /// would silently report as missing rather than failing loudly.
+    #[tokio::test]
+    async fn inspection_uses_the_shared_box_routes() {
+        let (port, server) = json_server(vec![BOX_RESPONSE, BOX_RESPONSE]).await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+
+        let found = RuntimeBackend::get(&runtime, "named").await.expect("get");
+        let info = RuntimeBackend::get_info(&runtime, "named")
+            .await
+            .expect("get_info");
+
+        assert!(found.is_some(), "an existing box must not read as missing");
+        assert!(info.is_some(), "an existing box must expose its info");
+        assert_eq!(
+            server.await.unwrap(),
+            [
+                "GET /v1/boxes/named HTTP/1.1",
+                "GET /v1/boxes/named HTTP/1.1"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn create_rejects_custom_kernel_for_rest_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let kernel = temp.path().join("vmlinux");
+        std::fs::write(&kernel, b"custom kernel").unwrap();
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced.kernel = Some(crate::experimental::custom_kernel::KernelOptions::new(
+            kernel,
+        ));
+        let opts = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let error = RuntimeBackend::create(&runtime, opts, None)
+            .await
+            .err()
+            .expect("REST runtime must reject a host-local custom kernel path");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)));
+        assert!(error.to_string().contains("local runtime"));
+    }
+
+    #[tokio::test]
+    async fn create_rejects_nested_virtualization_in_rest_mode() {
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced.nested_virtualization = true;
+        let box_options = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let error = RuntimeBackend::create(&runtime, box_options, None)
+            .await
+            .err()
+            .expect("REST nested virtualization must be rejected before network I/O");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)));
+        assert!(error.to_string().contains("local runtime"));
+    }
+
+    #[tokio::test]
+    async fn create_rejects_engine_selection_in_rest_mode() {
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced.engine = Some(crate::vmm::VmmKind::Native);
+        let box_options = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let error = RuntimeBackend::create(&runtime, box_options, None)
+            .await
+            .err()
+            .expect("REST engine selection must be rejected before network I/O");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)));
+        assert!(error.to_string().contains("local runtime"));
+    }
+
+    /// A host path has no meaning against a REST runtime — the server's
+    /// filesystem is not the caller's. The path must not leave the client at
+    /// all: it is the caller's own business, and a server-side "not found"
+    /// naming it would leak it into logs on the way back.
+    #[tokio::test]
+    async fn create_rejects_host_bind_mount_in_rest_mode() {
+        use crate::runtime::options::VolumeSpec;
+
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+        let box_options = BoxOptions {
+            volumes: vec![VolumeSpec::bind_mount("/tmp/secrets", "/mnt/ro")],
+            ..Default::default()
+        };
+
+        let error = RuntimeBackend::create(&runtime, box_options, None)
+            .await
+            .err()
+            .expect("REST host bind mounts must be rejected before network I/O");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(error.to_string().contains("host bind mounts"));
+        assert!(
+            !error.to_string().contains("/tmp/secrets"),
+            "the rejected host path must not be echoed back: {error}"
+        );
+    }
+
+    /// Until REST runtimes send typed mounts, create refuses them before any
+    /// network I/O rather than leaving them out of the request.
+    #[tokio::test]
+    async fn create_refuses_typed_mounts_until_rest_sends_them() {
+        use crate::runtime::options::MountSpec;
+
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+        let box_options = BoxOptions {
+            mounts: vec![MountSpec::volume_mount("run42", "/workspace")],
+            ..Default::default()
+        };
+
+        let error = RuntimeBackend::create(&runtime, box_options, None)
+            .await
+            .err()
+            .expect("typed mounts must be refused before network I/O");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(error.to_string().contains("typed mounts"), "{error}");
+    }
+
+    /// The server rejects `read_only: true` on a managed mount. Refusing it
+    /// here keeps a caller from believing a writable mount is protected — the
+    /// failure mode that matters is the silent downgrade, not the 400.
+    #[tokio::test]
+    async fn create_rejects_read_only_managed_volume() {
+        use crate::runtime::options::VolumeSpec;
+
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+        let box_options = BoxOptions {
+            volumes: vec![VolumeSpec {
+                read_only: true,
+                ..VolumeSpec::managed_volume("my-data", "/data")
+            }],
+            ..Default::default()
+        };
+
+        let error = RuntimeBackend::create(&runtime, box_options, None)
+            .await
+            .err()
+            .expect("read-only managed volumes must be rejected before network I/O");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(error.to_string().contains("read-only"), "{error}");
+    }
+
+    /// The guard is about host paths, not about mounts: a managed volume gets
+    /// past it and on to the request, addressed by id or by name alike.
+    #[tokio::test]
+    async fn create_accepts_managed_volume_by_id_or_name() {
+        use crate::runtime::options::VolumeSpec;
+
+        for reference in ["vol_01K2EXAMPLE", "my-data"] {
+            let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+            let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+            let box_options = BoxOptions {
+                volumes: vec![VolumeSpec::managed_volume(reference, "/data")],
+                ..Default::default()
+            };
+
+            // localhost:1 refuses the connection, so reaching *any* transport
+            // error is the proof that the mount cleared client-side validation.
+            let error = RuntimeBackend::create(&runtime, box_options, None)
+                .await
+                .err()
+                .expect("no server is listening on localhost:1");
+
+            assert!(
+                !matches!(error, AcrylMicrovmError::Unsupported(_)),
+                "managed volume {reference:?} must not be refused client-side: {error:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn create_rejects_client_supplied_sandbox_security() {
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let runtime = crate::AcrylMicrovmRuntime::rest(options).expect("failed to create REST runtime");
+        for cpus in [None, Some(2.0), Some(0.125)] {
+            let mut box_options = BoxOptions {
+                cpus,
+                ..Default::default()
+            };
+            box_options.advanced.security = SecurityOptions::disabled();
+
+            for result in [
+                runtime.create(box_options.clone(), None).await,
+                runtime
+                    .get_or_create(box_options, Some("named".into()))
+                    .await
+                    .map(|(litebox, _)| litebox),
+            ] {
+                let error = result
+                    .err()
+                    .expect("a client must not choose the remote server's sandbox policy");
+                assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error}");
+                assert!(error.to_string().contains("sandbox security"), "{error}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn create_leaves_the_default_sandbox_security_alone() {
+        // The guard compares against the default, so an untouched BoxOptions
+        // must reach the wire. Without this the check would reject every
+        // remote create, and the test above would still pass.
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+
+        let error = RuntimeBackend::create(&runtime, BoxOptions::default(), None)
+            .await
+            .err()
+            .expect("no server is listening on port 1, so this must still fail");
+
+        assert!(
+            !matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "a default box must fail on transport, not on the sandbox guard: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn privileged_requires_server_advertisement() {
+        let (port, server) = json_server(vec![r#"{"capabilities":{}}"#]).await;
+        let options = AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"));
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced.privileged = true;
+        let box_options = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let error = RuntimeBackend::create(&runtime, box_options, None)
+            .await
+            .err()
+            .expect("unadvertised guest privilege must be rejected");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)));
+        assert!(error.to_string().contains("guest privileged"));
+        assert_eq!(server.await.unwrap(), ["GET /v1/config HTTP/1.1"]);
+    }
+
+    #[tokio::test]
+    async fn privileged_omitted_and_false_keep_the_existing_create_request() {
+        let (port, server) = capture_server(vec![(200, BOX_RESPONSE), (200, BOX_RESPONSE)]).await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let mut options = BoxOptions {
+            rootfs: crate::RootfsSpec::Image("alpine:3.21".into()),
+            detach: true,
+            ..Default::default()
+        };
+        for explicit_default in [false, true] {
+            if explicit_default {
+                options.advanced.set_privileged(false);
+            }
+            RuntimeBackend::create(&runtime, options.clone(), Some("privilege-contract".into()))
+                .await
+                .unwrap();
+        }
+        for (headers, body) in server.await.unwrap() {
+            assert_eq!(headers.lines().next(), Some("POST /v1/boxes HTTP/1.1"));
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains("content-type: application/json\r\n")
+            );
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(&body).unwrap(),
+                serde_json::json!({
+                    "name": "privilege-contract",
+                    "image": "alpine:3.21",
+                    "network": {"mode": "enabled"},
+                    "detach": true
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn secret_headers_preserve_explicit_templates_on_create() {
+        let (port, server) = capture_server(vec![(200, BOX_RESPONSE), (200, BOX_RESPONSE)]).await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let mut options = BoxOptions {
+            rootfs: crate::RootfsSpec::Image("alpine:3.21".into()),
+            secrets: vec![crate::Secret {
+                name: "gemini".into(),
+                value: "test-value".into(),
+                hosts: vec!["api.example.com".into()],
+                placeholder: "<ACRYLMICROVM_SECRET:gemini>".into(),
+                headers: Some(std::collections::BTreeMap::from([(
+                    "Authorization".into(),
+                    "Bearer {value}".into(),
+                )])),
+            }],
+            ..Default::default()
+        };
+        RuntimeBackend::create(&runtime, options.clone(), None)
+            .await
+            .unwrap();
+        options.secrets[0].headers = Some(std::collections::BTreeMap::from([(
+            "x-goog-api-key".into(),
+            "{value}".into(),
+        )]));
+        RuntimeBackend::create(&runtime, options, None)
+            .await
+            .unwrap();
+
+        let requests = server.await.unwrap();
+        let bodies = requests
+            .iter()
+            .map(|(headers, body)| {
+                assert_eq!(headers.lines().next(), Some("POST /v1/boxes HTTP/1.1"));
+                assert!(
+                    headers
+                        .to_ascii_lowercase()
+                        .contains("content-type: application/json\r\n")
+                );
+                serde_json::from_str::<serde_json::Value>(body).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            bodies[0]["secrets"][0]["headers"]["Authorization"],
+            "Bearer {value}"
+        );
+        assert_eq!(
+            bodies[1]["secrets"][0]["headers"]["x-goog-api-key"],
+            "{value}"
+        );
+        let mut before = bodies[0].clone();
+        before["secrets"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("headers");
+        let mut with_header = bodies[1].clone();
+        with_header["secrets"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("headers");
+        assert_eq!(before, with_header);
+    }
+
+    #[tokio::test]
+    async fn advertised_privileged_creates_guest_box_and_rechecks_support() {
+        let (port, server) = capture_server(vec![
+            (200, r#"{"capabilities":{"privileged_enabled":true}}"#),
+            (200, BOX_RESPONSE),
+            (200, r#"{"capabilities":{"privileged_enabled":false}}"#),
+        ])
+        .await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let mut opts = BoxOptions::default();
+        opts.advanced.set_privileged(true);
+        RuntimeBackend::create(&runtime, opts.clone(), None)
+            .await
+            .unwrap();
+        let error = RuntimeBackend::create(&runtime, opts, None)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)));
+        let requests = server.await.unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .map(|(headers, _)| headers.lines().next().unwrap())
+                .collect::<Vec<_>>(),
+            [
+                "GET /v1/config HTTP/1.1",
+                "POST /v1/boxes HTTP/1.1",
+                "GET /v1/config HTTP/1.1",
+            ]
+        );
+        assert!(
+            requests[1]
+                .0
+                .to_ascii_lowercase()
+                .contains("content-type: application/json\r\n")
+        );
+        let body: serde_json::Value = serde_json::from_str(&requests[1].1).unwrap();
+        assert_eq!(body["advanced"], serde_json::json!({"privileged": true}));
+    }
+
+    #[tokio::test]
+    async fn privileged_reuse_requires_matching_reported_mode() {
+        let mut failures = Vec::new();
+        for reported in [false, true] {
+            for requested in [false, true] {
+                let mut body: serde_json::Value = serde_json::from_str(BOX_RESPONSE).unwrap();
+                body["privileged"] = reported.into();
+                let response = Box::leak(body.to_string().into_boxed_str());
+                let (port, server) = json_server(vec![response]).await;
+                let runtime =
+                    RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
+                        .unwrap();
+                let mut options = BoxOptions::default();
+                options.advanced.set_privileged(requested);
+                let result =
+                    RuntimeBackend::get_or_create(&runtime, options, Some("named".into())).await;
+                let correct = match result {
+                    Ok((litebox, created)) => {
+                        reported == requested
+                            && !created
+                            && litebox.id().as_str() == "01HJK4TNRPQSXYZ8WM6NCVT9R5"
+                    }
+                    Err(AcrylMicrovmError::Unsupported(message)) => {
+                        reported != requested && message.contains("privileged")
+                    }
+                    Err(_) => false,
+                };
+                if !correct {
+                    failures.push((reported, requested));
+                }
+                assert_eq!(server.await.unwrap(), ["GET /v1/boxes/named HTTP/1.1"]);
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "incorrect reuse for (reported, requested): {failures:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn privileged_reuse_rejects_unknown_mode_but_get_still_reads_it() {
+        for requested in [false, true] {
+            let (port, server) = json_server(vec![BOX_RESPONSE, BOX_RESPONSE]).await;
+            let runtime =
+                RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
+                    .unwrap();
+            assert!(
+                RuntimeBackend::get(&runtime, "named")
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            let mut options = BoxOptions::default();
+            options.advanced.set_privileged(requested);
+            let error = RuntimeBackend::get_or_create(&runtime, options, Some("named".into()))
+                .await
+                .err()
+                .expect("unknown privilege must not be reused");
+            assert!(matches!(error, AcrylMicrovmError::Unsupported(_)));
+            assert!(error.to_string().contains("privileged"));
+            assert_eq!(server.await.unwrap(), ["GET /v1/boxes/named HTTP/1.1"; 2]);
+        }
+    }
+
+    #[tokio::test]
+    async fn privileged_reuse_preserves_reported_metadata_in_info() {
+        for reported in [None, Some(false), Some(true)] {
+            let mut body: serde_json::Value = serde_json::from_str(BOX_RESPONSE).unwrap();
+            if let Some(value) = reported {
+                body["privileged"] = value.into();
+            }
+            let response = Box::leak(body.to_string().into_boxed_str());
+            let (port, server) = json_server(vec![response]).await;
+            let runtime =
+                RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
+                    .unwrap();
+            let info = RuntimeBackend::get_info(&runtime, "named")
+                .await
+                .unwrap()
+                .unwrap();
+            let metadata = serde_json::to_value(info).unwrap();
+            assert_eq!(metadata["privileged"].as_bool(), reported);
+            assert_eq!(server.await.unwrap(), ["GET /v1/boxes/named HTTP/1.1"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn privileged_reuse_creates_when_the_name_is_absent() {
+        let (port, server) = http_server(vec![
+            (
+                404,
+                r#"{"error":{"message":"missing","type":"NotFoundError","code":"not_found"}}"#,
+            ),
+            (200, r#"{"capabilities":{"privileged_enabled":true}}"#),
+            (200, BOX_RESPONSE),
+        ])
+        .await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let mut options = BoxOptions::default();
+        options.advanced.set_privileged(true);
+        let (_, created) = RuntimeBackend::get_or_create(&runtime, options, Some("named".into()))
+            .await
+            .unwrap();
+        assert!(created);
+        assert_eq!(
+            server.await.unwrap(),
+            [
+                "GET /v1/boxes/named HTTP/1.1",
+                "GET /v1/config HTTP/1.1",
+                "POST /v1/boxes HTTP/1.1"
+            ]
+        );
+    }
+
+    #[test]
+    fn privileged_rejects_conflicting_remote_capabilities() {
+        let mut options = capability_options();
+        options.advanced.set_privileged(true);
+        assert!(matches!(
+            options.sanitize_remote(),
+            Err(AcrylMicrovmError::InvalidArgument(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_rejects_network_rate_limit_in_rest_mode() {
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced.network_rate_limit = crate::runtime::advanced_options::NetworkRateLimit {
+            tx_kbps: Some(10_000),
+            rx_kbps: None,
+        };
+        let box_options = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let error = RuntimeBackend::create(&runtime, box_options, None)
+            .await
+            .err()
+            .expect("REST network rate limits must be rejected before network I/O");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)));
+        assert!(error.to_string().contains("local-only"));
+    }
+
+    /// A zero is the documented way to spell "no cap", so it must reach the same
+    /// point an absent cap does instead of tripping the remote refusal.
+    ///
+    /// The create still fails — nothing is listening on port 1 — but it has to
+    /// fail on the transport, not on `sanitize_remote`, which is what
+    /// distinguishes a zero from a real limit.
+    #[tokio::test]
+    async fn zero_network_rate_limit_passes_the_remote_refusal() {
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced.network_rate_limit = crate::runtime::advanced_options::NetworkRateLimit {
+            tx_kbps: Some(0),
+            rx_kbps: Some(0),
+        };
+        let box_options = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let error = RuntimeBackend::create(&runtime, box_options, None)
+            .await
+            .err()
+            .expect("nothing is listening, so the create cannot succeed");
+
+        assert!(
+            !matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "a zero cap must not be refused as a rate limit, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_rejects_mount_isolation_in_rest_mode() {
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced.isolate_mounts = true;
+        let box_options = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let error = RuntimeBackend::create(&runtime, box_options, None)
+            .await
+            .err()
+            .expect("REST mount isolation must be rejected before network I/O");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)));
+        assert!(error.to_string().contains("local runtime"));
+    }
+
+    #[tokio::test]
+    async fn create_rejects_health_check_in_rest_mode() {
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced.health_check =
+            Some(crate::runtime::advanced_options::HealthCheckOptions::default());
+        let box_options = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let error = RuntimeBackend::create(&runtime, box_options, None)
+            .await
+            .err()
+            .expect("REST health checks must be rejected before network I/O");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)));
+        assert!(error.to_string().contains("local runtime"));
+    }
+
+    #[tokio::test]
+    async fn get_or_create_rejects_custom_kernel_for_rest_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let kernel = temp.path().join("vmlinux");
+        std::fs::write(&kernel, b"custom kernel").unwrap();
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced.kernel = Some(crate::experimental::custom_kernel::KernelOptions::new(
+            kernel,
+        ));
+        let opts = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let error = RuntimeBackend::get_or_create(&runtime, opts, Some("custom".to_string()))
+            .await
+            .err()
+            .expect("REST runtime must reject a custom kernel before lookup");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)));
+        assert!(error.to_string().contains("local runtime"));
+    }
+
+    #[tokio::test]
+    async fn get_or_create_rejects_nested_virtualization_in_rest_mode() {
+        let options = AcrylMicrovmRestOptions::new("http://localhost:1");
+        let runtime = RestRuntime::new(&options).expect("failed to create REST runtime");
+        let mut advanced = crate::runtime::advanced_options::AdvancedBoxOptions::default();
+        advanced.nested_virtualization = true;
+        let box_options = BoxOptions {
+            advanced,
+            ..Default::default()
+        };
+
+        let error =
+            RuntimeBackend::get_or_create(&runtime, box_options, Some("nested".to_string()))
+                .await
+                .err()
+                .expect("REST nested virtualization must be rejected before network I/O");
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)));
+        assert!(error.to_string().contains("local runtime"));
+    }
+
+    fn images_on(port: u16) -> crate::runtime::ImageHandle {
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        crate::runtime::ImageHandle::new(Arc::new(runtime), None)
+    }
+
+    #[tokio::test]
+    async fn images_list_reads_one_row_per_reference() {
+        let (port, server) = json_server(vec![
+            r#"{"images":[{"reference":"quay.io/acme/app:v1","repository":"quay.io/acme/app","tag":"v1","id":"sha256:aa","cached_at":"2026-01-02T03:04:05Z","size_bytes":42}]}"#,
+        ])
+        .await;
+
+        let images = images_on(port).list().await.unwrap();
+
+        assert_eq!(server.await.unwrap(), ["GET /v1/images HTTP/1.1"]);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].reference, "quay.io/acme/app:v1");
+        assert_eq!(images[0].id, "sha256:aa");
+        assert_eq!(images[0].size.map(|size| size.0), Some(42));
+        assert_eq!(
+            images[0].cached_at.to_rfc3339(),
+            "2026-01-02T03:04:05+00:00"
+        );
+    }
+
+    /// A name has slashes; sent unencoded it would be three path segments
+    /// and reach no route.
+    #[tokio::test]
+    async fn images_get_sends_the_name_as_one_segment() {
+        let (port, server) = json_server(vec![
+            r#"{"name":"quay.io/acme/app","aliases":["v1"],"curated":false,"versions":[{"digest":"sha256:aa","size_bytes":42,"source_ref":"quay.io/acme/app:v1","recorded_at":"2026-01-02T03:04:05Z"}]}"#,
+        ])
+        .await;
+
+        let detail = images_on(port).get("quay.io/acme/app").await.unwrap();
+
+        assert_eq!(
+            server.await.unwrap(),
+            ["GET /v1/images/quay.io%2Facme%2Fapp HTTP/1.1"]
+        );
+        assert_eq!(detail.name, "quay.io/acme/app");
+        assert_eq!(detail.aliases, ["v1"]);
+        assert_eq!(detail.versions[0].digest, "sha256:aa");
+        assert_eq!(detail.versions[0].size_bytes, Some(42));
+        assert_eq!(detail.versions[0].source_ref, "quay.io/acme/app:v1");
+    }
+
+    #[tokio::test]
+    async fn images_remove_deletes_the_name() {
+        let (port, server) = http_server(vec![(204, "")]).await;
+
+        images_on(port).remove("quay.io/acme/app").await.unwrap();
+
+        assert_eq!(
+            server.await.unwrap(),
+            ["DELETE /v1/images/quay.io%2Facme%2Fapp HTTP/1.1"]
+        );
+    }
+
+    /// The server refuses while a box can still boot from the image, naming it.
+    #[tokio::test]
+    async fn images_remove_of_an_image_in_use_is_invalid_state() {
+        let (port, _server) = http_server(vec![(
+            409,
+            r#"{"error":{"message":"in use by box b1","type":"InvalidStateError","code":"invalid_state"}}"#,
+        )])
+        .await;
+
+        let error = images_on(port)
+            .remove("quay.io/acme/app")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AcrylMicrovmError::InvalidState(_)), "{error}");
+        assert!(error.to_string().contains("b1"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn images_usage_reads_count_limit_and_bytes() {
+        let (port, server) =
+            json_server(vec![r#"{"count":3,"limit":20,"known_bytes":4096}"#]).await;
+
+        let usage = images_on(port).usage().await.unwrap();
+
+        assert_eq!(server.await.unwrap(), ["GET /v1/images/usage HTTP/1.1"]);
+        assert_eq!((usage.count, usage.limit, usage.known_bytes), (3, 20, 4096));
+    }
+
+    const MOVED_DETAIL: &str = r#"{"name":"quay.io/acme/app","aliases":["stable"],"curated":false,"versions":[{"digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","size_bytes":42,"source_ref":"quay.io/acme/app:v2","recorded_at":"2026-01-02T03:04:05Z","aliases":["stable"],"last_used_at":"2026-01-03T00:00:00Z","upstream_missing_at":null}],"history":[{"alias":"stable","from_digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","to_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","actor":"auth0|alice","recorded_at":"2026-01-04T00:00:00Z"}]}"#;
+
+    /// The image name is one URL segment; alias and digest go in the body.
+    /// The response carries the image and its retained history.
+    #[tokio::test]
+    async fn images_create_alias_posts_the_binding_and_reads_the_image() {
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let (port, server) = recording_server(201, MOVED_DETAIL).await;
+
+        let detail = images_on(port)
+            .create_alias("quay.io/acme/app", "stable", &digest)
+            .await
+            .unwrap();
+
+        let (request_line, request_body) = server.await.unwrap();
+        assert_eq!(
+            request_line,
+            "POST /v1/images/quay.io%2Facme%2Fapp/aliases HTTP/1.1"
+        );
+        let sent: serde_json::Value = serde_json::from_str(&request_body).unwrap();
+        assert_eq!(
+            sent,
+            serde_json::json!({ "alias": "stable", "digest": digest })
+        );
+        assert_eq!(detail.versions[0].aliases, ["stable"]);
+        assert_eq!(
+            detail.versions[0]
+                .last_used_at
+                .map(|time| time.to_rfc3339()),
+            Some("2026-01-03T00:00:00+00:00".to_string())
+        );
+        assert!(detail.versions[0].upstream_missing_at.is_none());
+        let moved = &detail.history[0];
+        assert_eq!(moved.alias, "stable");
+        assert_eq!(
+            moved.from_digest.as_deref(),
+            Some(&*format!("sha256:{}", "a".repeat(64)))
+        );
+        assert_eq!(moved.to_digest, digest);
+        assert_eq!(moved.actor.as_deref(), Some("auth0|alice"));
+        assert_eq!(moved.recorded_at.to_rfc3339(), "2026-01-04T00:00:00+00:00");
+    }
+
+    /// A digest the image has no version for, or a curated image, is the
+    /// server's 400.
+    #[tokio::test]
+    async fn images_create_alias_the_server_refuses_is_invalid_argument() {
+        let (port, _server) = http_server(vec![(
+            400,
+            r#"{"error":{"message":"Digest 'sha256:...' is not a version of image 'quay.io/acme/app'","type":"InvalidArgumentError","code":"invalid_argument"}}"#,
+        )])
+        .await;
+
+        let error = images_on(port)
+            .create_alias(
+                "quay.io/acme/app",
+                "stable",
+                &format!("sha256:{}", "c".repeat(64)),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AcrylMicrovmError::InvalidArgument(_)), "{error}");
+        assert!(error.to_string().contains("not a version"), "{error}");
+    }
+
+    /// Checked before anything is sent: the runtime points at a port nothing
+    /// listens on, so a request would surface as a connection error instead.
+    #[tokio::test]
+    async fn images_create_alias_refuses_a_bad_name_tag_or_digest_without_a_request() {
+        let digest = format!("sha256:{}", "b".repeat(64));
+        for (name, tag, digest) in [
+            ("quay.io/acme/app:v1", "stable", digest.as_str()),
+            ("quay.io/acme/app", "-stable", digest.as_str()),
+            ("quay.io/acme/app", "stable", "latest"),
+        ] {
+            let error = images_on(1)
+                .create_alias(name, tag, digest)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, AcrylMicrovmError::InvalidArgument(_)),
+                "{name} {tag} {digest}: {error}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn images_create_alias_duplicate_is_already_exists() {
+        let (port, _server) = http_server(vec![(
+            409,
+            r#"{"statusCode":409,"message":"alias exists","code":"already_exists"}"#,
+        )])
+        .await;
+        let error = images_on(port)
+            .create_alias(
+                "quay.io/acme/app",
+                "stable",
+                &format!("sha256:{}", "b".repeat(64)),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(error, AcrylMicrovmError::AlreadyExists(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn images_delete_alias_removes_only_the_named_binding() {
+        let (port, server) = http_server(vec![(204, "")]).await;
+        images_on(port)
+            .delete_alias("quay.io/acme/app", "stable")
+            .await
+            .unwrap();
+        assert_eq!(
+            server.await.unwrap(),
+            ["DELETE /v1/images/quay.io%2Facme%2Fapp/aliases/stable HTTP/1.1"]
+        );
+    }
+
+    /// A server from before alias history answers a detail without history or the
+    /// newer version fields; it still reads, with them empty.
+    #[tokio::test]
+    async fn images_get_from_a_server_without_history_reads_it_empty() {
+        let (port, _server) = json_server(vec![
+            r#"{"name":"quay.io/acme/app","aliases":["v1"],"curated":false,"versions":[{"digest":"sha256:aa","size_bytes":42,"source_ref":"quay.io/acme/app:v1","recorded_at":"2026-01-02T03:04:05Z"}]}"#,
+        ])
+        .await;
+
+        let detail = images_on(port).get("quay.io/acme/app").await.unwrap();
+
+        assert!(detail.history.is_empty());
+        assert!(detail.versions[0].aliases.is_empty());
+        assert!(detail.versions[0].last_used_at.is_none());
+        assert!(detail.versions[0].upstream_missing_at.is_none());
+    }
+
+    /// A REST runtime pulls when a box is created; pull answers without a
+    /// request, so an unreachable server cannot turn it into a connection error.
+    #[tokio::test]
+    async fn images_pull_is_unsupported_without_a_request() {
+        let error = images_on(1).pull("alpine:latest").await.unwrap_err();
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error}");
+    }
+
+    /// A tagged reference is refused before a request is sent, so the server
+    /// never deletes every tag of a name the caller meant one tag of.
+    #[tokio::test]
+    async fn images_remove_refuses_a_tagged_reference_without_a_request() {
+        let error = images_on(1)
+            .remove("quay.io/acme/app:v1")
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, AcrylMicrovmError::InvalidArgument(_)), "{error}");
+    }
+
+    const LOGIN_ID: &str = "0aaa0000-0000-4000-8000-000000000001";
+    const LOGINS: &str = r#"{"registries":[{"id":"0aaa0000-0000-4000-8000-000000000001","registry_host":"ghcr.io","repository_prefix":"acme/","username":"acme-bot","created_by":null,"created_at":"2026-01-02T03:04:05.000Z"}]}"#;
+    /// A login as a broken server might answer a create: with the password.
+    const LOGIN_WITH_PASSWORD: &str = r#"{"password":"echoed-by-a-broken-server","id":"0aaa0000-0000-4000-8000-000000000001","registry_host":"ghcr.io","repository_prefix":"acme/","username":"acme-bot","created_by":null,"created_at":"2026-01-02T03:04:05.000Z"}"#;
+
+    fn registries_on(port: u16) -> crate::runtime::RegistryHandle {
+        crate::AcrylMicrovmRuntime::rest(AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
+            .unwrap()
+            .images()
+            .unwrap()
+            .registries()
+            .unwrap()
+    }
+
+    fn new_login() -> crate::runtime::NewRegistryCredential {
+        crate::runtime::NewRegistryCredential {
+            registry_host: "ghcr.io".into(),
+            repository_prefix: Some("acme/".into()),
+            username: "acme-bot".into(),
+            password: "ghp_not-a-real-token".into(),
+        }
+    }
+
+    /// Answers one request with `(status, body)` and returns its request line
+    /// and body.
+    async fn recording_server(
+        status: u16,
+        body: &'static str,
+    ) -> (u16, tokio::task::JoinHandle<(String, String)>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            while !head.ends_with(b"\r\n\r\n") {
+                head.push(socket.read_u8().await.unwrap());
+            }
+            let head = String::from_utf8(head).unwrap();
+            let length = head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap_or(0);
+            let mut request_body = vec![0; length];
+            socket.read_exact(&mut request_body).await.unwrap();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            (
+                head.lines().next().unwrap().to_string(),
+                String::from_utf8(request_body).unwrap(),
+            )
+        });
+        (port, server)
+    }
+
+    #[tokio::test]
+    async fn registries_list_reads_each_login() {
+        let (port, server) = json_server(vec![LOGINS]).await;
+
+        let logins = registries_on(port).list().await.unwrap();
+
+        assert_eq!(
+            server.await.unwrap(),
+            ["GET /v1/images/registries HTTP/1.1"]
+        );
+        assert_eq!(logins.len(), 1);
+        assert_eq!(logins[0].id, LOGIN_ID);
+        assert_eq!(logins[0].registry_host, "ghcr.io");
+        assert_eq!(logins[0].repository_prefix, "acme/");
+        assert_eq!(logins[0].username, "acme-bot");
+        assert_eq!(logins[0].created_by, None);
+        assert_eq!(
+            logins[0].created_at.to_rfc3339(),
+            "2026-01-02T03:04:05+00:00"
+        );
+    }
+
+    /// The password goes up in the body, and a server that sent it back would
+    /// still not have it handed on: the login's type has no field for it.
+    #[tokio::test]
+    async fn registries_create_sends_the_login_and_reads_it_back_without_its_password() {
+        let (port, server) = recording_server(201, LOGIN_WITH_PASSWORD).await;
+
+        let created = registries_on(port).create(&new_login()).await.unwrap();
+
+        let (request_line, request_body) = server.await.unwrap();
+        assert_eq!(request_line, "POST /v1/images/registries HTTP/1.1");
+        let sent: serde_json::Value = serde_json::from_str(&request_body).unwrap();
+        assert_eq!(
+            sent,
+            serde_json::json!({"registry_host": "ghcr.io", "repository_prefix": "acme/",
+                               "username": "acme-bot", "password": "ghp_not-a-real-token"})
+        );
+        assert_eq!(created.id, LOGIN_ID);
+        let handed_on = serde_json::to_string(&created).unwrap();
+        assert!(!handed_on.contains("password"), "{handed_on}");
+        assert!(!format!("{created:?}").contains("echoed-by-a-broken-server"));
+    }
+
+    #[tokio::test]
+    async fn registries_create_for_a_held_prefix_is_already_exists() {
+        let (port, _server) = http_server(vec![(
+            409,
+            r#"{"statusCode":409,"message":"A credential for ghcr.io/acme/ already exists","code":"already_exists"}"#,
+        )])
+        .await;
+
+        let error = registries_on(port).create(&new_login()).await.unwrap_err();
+
+        assert!(matches!(error, AcrylMicrovmError::AlreadyExists(_)), "{error}");
+    }
+
+    /// A deployment without private registries answers 501 with a code, so the
+    /// caller reads a feature this server lacks, not a server fault.
+    #[tokio::test]
+    async fn registries_create_where_private_registries_are_off_is_unsupported() {
+        let (port, _server) = http_server(vec![(
+            501,
+            r#"{"statusCode":501,"message":"Private registries are not enabled in this deployment","code":"unsupported"}"#,
+        )])
+        .await;
+
+        let error = registries_on(port).create(&new_login()).await.unwrap_err();
+
+        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error}");
+    }
+
+    #[tokio::test]
+    async fn registries_remove_deletes_the_login_by_id() {
+        let (port, server) = http_server(vec![(204, "")]).await;
+
+        registries_on(port).remove(LOGIN_ID).await.unwrap();
+
+        assert_eq!(
+            server.await.unwrap(),
+            [format!("DELETE /v1/images/registries/{LOGIN_ID} HTTP/1.1")]
+        );
+    }
+
+    /// The server refuses while a box still pulls through the login, naming it.
+    #[tokio::test]
+    async fn registries_remove_of_a_login_in_use_is_invalid_state() {
+        let (port, _server) = http_server(vec![(
+            409,
+            r#"{"statusCode":409,"message":"Registry credential cannot be removed while 1 box(es) pull through it: box-1"}"#,
+        )])
+        .await;
+
+        let error = registries_on(port).remove(LOGIN_ID).await.unwrap_err();
+
+        assert!(matches!(error, AcrylMicrovmError::InvalidState(_)), "{error}");
+        assert!(error.to_string().contains("box-1"), "{error}");
+    }
+
+    /// An id becomes a URL segment, so one that is not a UUID is refused
+    /// before a request could reach another route.
+    #[tokio::test]
+    async fn registries_remove_refuses_an_id_that_is_not_a_uuid_without_a_request() {
+        let error = registries_on(1).remove("../images").await.unwrap_err();
+
+        assert!(matches!(error, AcrylMicrovmError::InvalidArgument(_)), "{error}");
+    }
+
+    /// Domains are organization routes: listed at `/domains`, bound and
+    /// unbound on the domain's `target`.
+    #[tokio::test]
+    async fn domains_use_the_organization_routes() {
+        const DOMAIN: &str = r#"{"hostname":"demo1.app.test","url":"https://demo1.app.test","target":{"type":"box","box":"box-id","port":3000}}"#;
+        let (port, server) = http_server(vec![
+            (
+                200,
+                r#"{"domains":[],"limit":1,"used":0,"remaining":1,"min_length":5}"#,
+            ),
+            (200, DOMAIN),
+            (204, ""),
+        ])
+        .await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let target = DomainTarget::Box {
+            box_ref: "web-a".into(),
+            port: 3000,
+        };
+
+        assert_eq!(runtime.list_domains().await.unwrap().remaining, 1);
+        let bound = runtime
+            .bind_domain("demo1.app.test", &target)
+            .await
+            .unwrap();
+        runtime.unbind_domain("demo1.app.test").await.unwrap();
+
+        assert_eq!(bound.hostname, "demo1.app.test");
+        assert_eq!(
+            server.await.unwrap(),
+            [
+                "GET /v1/domains HTTP/1.1",
+                "PUT /v1/domains/demo1.app.test/target HTTP/1.1",
+                "DELETE /v1/domains/demo1.app.test/target HTTP/1.1",
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn domains_list_full_hostnames_and_typed_app_targets() {
+        let (port, server) = http_server(vec![(200, r#"{
+            "domains": [
+              {"hostname":"demo.apps.example","url":"https://demo.apps.example","target":null},
+              {"hostname":"shop.apps.example","url":"https://shop.apps.example","target":{"type":"app","app":"shop-id"}}
+            ], "limit":2,"used":2,"remaining":0,"min_length":5
+        }"#)]).await;
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let held = runtime.list_domains().await.unwrap();
+        assert_eq!(held.domains[0].hostname, "demo.apps.example");
+        assert_eq!(
+            serde_json::to_value(held.domains[1].target.as_ref().unwrap()).unwrap(),
+            serde_json::json!({"type":"app", "app":"shop-id"})
+        );
+        assert_eq!(server.await.unwrap(), ["GET /v1/domains HTTP/1.1"]);
+    }
+}
+
+#[cfg(test)]
+#[path = "tests/fractional_cpus.rs"]
+mod fractional_cpus_tests;

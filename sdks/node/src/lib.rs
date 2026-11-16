@@ -1,0 +1,59 @@
+#![deny(clippy::all)]
+// Modified by ACRYL, 2026
+
+//! ACRYL microVMs Node.js bindings.
+//!
+//! This crate provides napi-rs bindings for ACRYL microVMs, allowing JavaScript/TypeScript
+//! applications to create and manage isolated VM-based containers.
+
+mod advanced_options;
+mod agents;
+mod box_handle;
+mod checkpoints;
+mod copy;
+mod domains;
+mod exec;
+mod executions;
+mod images;
+mod info;
+mod metrics;
+mod network;
+mod options;
+mod registries;
+mod runtime;
+mod snapshot_options;
+mod snapshots;
+mod ssh;
+mod util;
+mod volumes;
+
+// Re-export all public types
+pub use advanced_options::{JsAdvancedBoxOptions, JsContainerCapabilities, JsSecurityOptions};
+pub use box_handle::JsBox;
+pub use checkpoints::{JsCheckpointHandle, JsCheckpointInfo};
+pub use copy::JsCopyOptions;
+pub use domains::{JsDomain, JsDomainHandle, JsDomainList, JsDomainTarget};
+pub use exec::{
+    JsExecResult, JsExecStderr, JsExecStdin, JsExecStdout, JsExecution, JsExecutionInfo,
+};
+pub use executions::JsExecutions;
+pub use images::{
+    JsImageDetail, JsImageHandle, JsImageInfo, JsImagePullResult, JsImageUsage, JsImageVersion,
+};
+pub use info::{
+    JsBoxInfo, JsBoxStateInfo, JsHealthState, JsHealthStatus, JsNetworkInfo, JsPublishedPort,
+};
+pub use metrics::{JsBoxMetrics, JsRuntimeMetrics};
+pub use network::{
+    JsBoxConnection, JsBoxTunnel, JsNetworkHandle, JsSocketAddress, JsTunnelForwarder,
+};
+pub use options::{
+    ApiKeyCredential, JsAccessToken, JsBoxOptions, JsEnvVar, JsHealthCheckOptions, JsImageRegistry,
+    JsImageRegistryAuth, JsNetworkSpec, JsOptions, JsPortSpec, JsSecret, JsVolumeSpec,
+};
+pub use registries::{JsNewRegistryCredential, JsRegistryCredential, JsRegistryHandle};
+pub use runtime::JsAcrylMicrovm; // re-export for dist bundling
+pub use snapshot_options::{JsCloneOptions, JsExportOptions, JsSnapshotOptions};
+pub use snapshots::{JsSnapshotHandle, JsSnapshotInfo};
+pub use ssh::{JsSshAccount, JsSshCaConfig, JsSshConfig, JsSshHandle, JsSshStatus};
+pub use volumes::{JsVolumeHandle, JsVolumeInfo};

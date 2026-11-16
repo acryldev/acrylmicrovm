@@ -1,0 +1,127 @@
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"net"
+	"net/http"
+	"net/http/httputil"
+	"time"
+
+	logrus "github.com/sirupsen/logrus"
+	"golang.org/x/net/http2"
+)
+
+// upstreamDialTimeout bounds one upstream connection attempt end to end. A var
+// rather than a const only so tests can shorten it.
+var upstreamDialTimeout = 30 * time.Second
+
+// mitmAndForward handles a MITM'd connection: TLS termination, reverse proxy, secret header injection.
+// dial opens each upstream transport connection; the forwarder binds it to
+// the peeked hostname, so the credential travels to the host the name resolves
+// to, never to an address the guest picked.
+// upstreamTLSConfig overrides the TLS config for upstream connections (nil = system defaults).
+func mitmAndForward(guestConn net.Conn, hostname string, dial upstreamDial, ca *BoxCA, secrets []SecretConfig, upstreamTLSConfig ...*tls.Config) {
+	cert, err := ca.GenerateHostCert(hostname)
+	if err != nil {
+		logrus.WithError(err).WithField("hostname", hostname).Error("MITM: cert generation failed")
+		guestConn.Close()
+		return
+	}
+
+	tlsGuest := tls.Server(guestConn, &tls.Config{
+		GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+			return cert, nil
+		},
+		NextProtos: []string{"h2", "http/1.1"},
+	})
+
+	upstreamTransport := &http.Transport{
+		ForceAttemptHTTP2: true,
+		TLSClientConfig:   resolveUpstreamTLS(hostname, upstreamTLSConfig...),
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return dial(ctx)
+		},
+	}
+
+	proxy := &httputil.ReverseProxy{
+		// Rewrite runs after hop-by-hop headers are stripped, so a guest's
+		// `Connection: Authorization` cannot remove an injected header.
+		Rewrite: func(pr *httputil.ProxyRequest) {
+			pr.Out.URL.Scheme = "https"
+			pr.Out.URL.Host = hostname
+			pr.Out.Host = hostname // HTTP/1.1 Host header must match
+			pr.Out.URL.RawQuery = pr.In.URL.RawQuery
+			// Check the incoming headers: Rewrite has already stripped hop-by-hop
+			// headers from Out, but In retains the guest's authentication intent.
+			injectSecretHeaders(pr.Out, pr.In.Header, secrets)
+		},
+		Transport:     upstreamTransport,
+		FlushInterval: -1,
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			logrus.WithFields(logrus.Fields{
+				"hostname": hostname,
+				"path":     r.URL.Path,
+				"error":    err,
+			}).Warn("MITM: upstream error")
+			w.WriteHeader(http.StatusBadGateway)
+		},
+	}
+
+	if err := tlsGuest.Handshake(); err != nil {
+		logrus.WithError(err).WithField("hostname", hostname).Debug("MITM: TLS handshake failed")
+		guestConn.Close()
+		return
+	}
+
+	if tlsGuest.ConnectionState().NegotiatedProtocol == "h2" {
+		h2srv := &http2.Server{}
+		h2srv.ServeConn(tlsGuest, &http2.ServeConnOpts{Handler: proxy})
+	} else {
+		// HTTP/1.1: use http.Server with a proper shutdown mechanism.
+		// After the single connection closes, shut down the server to avoid
+		// leaking a goroutine blocked in Accept().
+		listener := newSingleConnListener(tlsGuest)
+		srv := &http.Server{Handler: proxy}
+		srv.Serve(listener) //nolint:errcheck
+		// Serve returns when the connection closes — shut down to release resources
+		srv.Close()
+	}
+}
+
+// singleConnListener serves exactly one pre-accepted connection as a net.Listener.
+type singleConnListener struct {
+	ch     chan net.Conn
+	addr   net.Addr
+	closed chan struct{}
+}
+
+func newSingleConnListener(conn net.Conn) *singleConnListener {
+	l := &singleConnListener{
+		ch:     make(chan net.Conn, 1),
+		addr:   conn.LocalAddr(),
+		closed: make(chan struct{}),
+	}
+	l.ch <- conn
+	return l
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.ch:
+		return conn, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *singleConnListener) Close() error {
+	select {
+	case <-l.closed:
+	default:
+		close(l.closed)
+	}
+	return nil
+}
+
+func (l *singleConnListener) Addr() net.Addr { return l.addr }

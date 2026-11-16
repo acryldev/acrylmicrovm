@@ -1,0 +1,1644 @@
+# Rust API reference
+
+Complete API reference for the ACRYL microVMs Rust SDK.
+
+## Overview
+
+The Rust SDK is the core implementation of ACRYL microVMs. It provides async-first APIs built on Tokio for creating and managing isolated VM environments.
+
+**Crate**: `acrylmicrovm`
+**Repository**: [github.com/acryldev/acrylmicrovm](https://github.com/acryldev/acrylmicrovm)
+
+---
+
+## Table of contents
+
+- [Runtime Management](#runtime-management)
+  - [AcrylMicrovmRuntime](#acrylmicrovmruntime)
+  - [ImageHandle](#imagehandle)
+  - [RegistryHandle](#registryhandle)
+  - [AcrylMicrovmOptions](#acrylmicrovmoptions)
+- [Box Handle](#box-handle)
+  - [LiteBox](#litebox)
+  - [BoxInfo](#boxinfo)
+  - [BoxStatus](#boxstatus)
+  - [BoxState](#boxstate)
+- [Network Tunnels](#network-tunnels)
+- [Agent API](../agents.md) — Box-owned agents, turns, events and interaction.
+- [Command Execution](#command-execution)
+  - [BoxCommand](#boxcommand)
+  - [Execution](#execution)
+  - [ExecStdin](#execstdin)
+  - [ExecStdout / ExecStderr](#execstdout--execstderr)
+  - [ExecResult](#execresult)
+- [Box Configuration](#box-configuration)
+  - [BoxOptions](#boxoptions)
+  - [AdvancedBoxOptions](#advancedboxoptions)
+  - [RootfsSpec](#rootfsspec)
+  - [VolumeSpec](#volumespec)
+  - [MountSpec](#mountspec)
+  - [NetworkSpec](#networkspec)
+  - [NetworkRateLimit](#networkratelimit)
+  - [PortSpec](#portspec)
+- [Security](#security)
+  - [SecurityOptions](#securityoptions)
+  - [SecurityOptionsBuilder](#securityoptionsbuilder)
+  - [ResourceLimits](#resourcelimits)
+- [Metrics](#metrics)
+  - [RuntimeMetrics](#runtimemetrics)
+  - [BoxMetrics](#boxmetrics)
+- [Type Utilities](#type-utilities)
+  - [Bytes](#bytes)
+  - [Seconds](#seconds)
+  - [BoxID](#boxid)
+  - [ContainerID](#containerid)
+- [Error Types](#error-types)
+  - [AcrylMicrovmError](#acrylmicrovmerror)
+  - [AcrylMicrovmResult](#acrylmicrovmresult)
+
+---
+
+## Runtime management
+
+### AcrylMicrovmRuntime
+
+Main entry point for creating and managing boxes.
+
+```rust
+use acrylmicrovm::runtime::{AcrylMicrovmRuntime, AcrylMicrovmOptions, BoxOptions};
+use acrylmicrovm::ImageRegistry;
+
+// Create with default options
+let runtime = AcrylMicrovmRuntime::with_defaults()?;
+
+// Create with custom options
+let options = AcrylMicrovmOptions {
+    home_dir: PathBuf::from("/custom/acrylmicrovm"),
+    image_registries: vec![
+        ImageRegistry::https("ghcr.io/myorg").with_search(true),
+        ImageRegistry::https("registry.example.com").with_basic_auth("user", "password"),
+    ],
+    ..Default::default()
+};
+let runtime = AcrylMicrovmRuntime::new(options)?;
+
+// Use global default runtime
+let runtime = AcrylMicrovmRuntime::default_runtime();
+```
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `new` | `fn new(options: AcrylMicrovmOptions) -> AcrylMicrovmResult<Self>` | Create runtime with options |
+| `with_defaults` | `fn with_defaults() -> AcrylMicrovmResult<Self>` | Create with default options |
+| `default_runtime` | `fn default_runtime() -> &'static Self` | Get/create global singleton |
+| `try_default_runtime` | `fn try_default_runtime() -> Option<&'static Self>` | Get global if initialized |
+| `init_default_runtime` | `fn init_default_runtime(options: AcrylMicrovmOptions) -> AcrylMicrovmResult<()>` | Initialize global with options |
+| `create` | `async fn create(&self, options: BoxOptions, name: Option<String>) -> AcrylMicrovmResult<LiteBox>` | Create a new box |
+| `get` | `async fn get(&self, id_or_name: &str) -> AcrylMicrovmResult<Option<LiteBox>>` | Get box by ID or name |
+| `get_info` | `async fn get_info(&self, id_or_name: &str) -> AcrylMicrovmResult<Option<BoxInfo>>` | Get box info without handle |
+| `list_info` | `async fn list_info(&self) -> AcrylMicrovmResult<Vec<BoxInfo>>` | List all boxes |
+| `exists` | `async fn exists(&self, id_or_name: &str) -> AcrylMicrovmResult<bool>` | Check if box exists |
+| `metrics` | `async fn metrics(&self) -> RuntimeMetrics` | Get runtime-wide metrics |
+| `remove` | `async fn remove(&self, id_or_name: &str, force: bool) -> AcrylMicrovmResult<()>` | Remove box completely |
+| `images` | `fn images(&self) -> AcrylMicrovmResult<ImageHandle>` | The images this runtime can boot from; never fails |
+
+On a REST runtime, `list_info()` follows every continuation page and returns the
+combined boxes in server order. It sends each `next_page_token` as the next
+request's `pageToken`; an absent, null, or empty token ends the list. A repeated
+token or a failed page returns an error instead of a partial list. Servers that
+return all boxes in one response remain supported.
+
+#### Example
+
+```rust
+use acrylmicrovm::runtime::{AcrylMicrovmRuntime, BoxOptions};
+use acrylmicrovm::BoxCommand;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = AcrylMicrovmRuntime::with_defaults()?;
+
+    // Create a box
+    let options = BoxOptions::default();
+    let litebox = runtime.create(options, Some("my-box".to_string())).await?;
+
+    // Run a command
+    let mut run = litebox.run(BoxCommand::new("echo").arg("Hello")).await?;
+    let result = run.wait().await?;
+
+    println!("Exit code: {}", result.exit_code);
+
+    // Stop the box
+    litebox.stop().await?;
+
+    Ok(())
+}
+```
+
+### ImageHandle
+
+The images a runtime can boot from: the local cache on an embedded runtime,
+the server catalog on a REST runtime. Registry credentials are accessed through
+`runtime.images()?.registries()?`.
+
+| Operation | Embedded runtime | REST runtime |
+|-----------|------------------|--------------|
+| `pull` | Pulls into the cache | Unsupported; creating a box pulls |
+| `list` | One row per cached reference | Catalog alias and digest references |
+| `get` | Cached versions under the name | Catalog versions, aliases and history |
+| `remove` | Forgets the name; layers stay | Removes the entry; refused while a box can boot from it |
+| `usage` | Unsupported | Image count, allowance and known bytes |
+| `create_alias` | Unsupported | Creates a new alias for a ready digest; existing names conflict |
+| `delete_alias` | Unsupported | Removes only the named alias; absent names return NotFound |
+
+`get` and `remove` take an image name, without a tag or digest, such as
+`quay.io/acme/app`. Alias names use OCI tag syntax; creation takes the
+`sha256:` digest of a ready version recorded for that image.
+
+A registry tag belongs to the upstream registry. A ACRYL microVMs alias belongs to
+the runtime catalog and selects a recorded digest independently. A successful
+pull seeds an alias from the registry tag; it never overwrites an existing
+binding. Creating an alias never pushes a registry tag or pulls image bytes.
+
+Alias creation refuses every existing name, even for the same digest, with
+`AlreadyExists`. Delete the alias explicitly before creating it again. Deletion
+removes only the binding: versions and existing boxes keep their digests.
+Creation history remains available; deletion is recorded by the server audit log.
+
+Image details and versions expose `aliases`. Their `history` contains
+`ImageAliasEvent` records with `alias`, optional `from_digest`, `to_digest`,
+optional `actor` and `recorded_at`. A local cache mirrors its cached registry
+tags in `aliases`, leaves history empty and refuses alias writes.
+
+```rust
+let images = runtime.images()?;
+let detail = images.get("quay.io/acme/app").await?;
+images.create_alias(&detail.name, "verified", &detail.versions[0].digest).await?;
+images.delete_alias(&detail.name, "verified").await?;
+let logins = images.registries()?.list().await?;
+```
+
+### RegistryHandle
+
+The logins a REST server presents when it pulls a private image for a box.
+Obtained with `runtime.images()?.registries()?`, which an embedded runtime refuses with
+`Unsupported`: it pulls with the logins in `AcrylMicrovmOptions::image_registries`.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `list` | `async fn list(&self) -> AcrylMicrovmResult<Vec<RegistryCredential>>` | Every login the organization holds, oldest first |
+| `create` | `async fn create(&self, credential: &NewRegistryCredential) -> AcrylMicrovmResult<RegistryCredential>` | Add a login; `AlreadyExists` while one is held for the same registry and prefix |
+| `remove` | `async fn remove(&self, id: &str) -> AcrylMicrovmResult<()>` | Remove a login; `InvalidState`, naming the boxes, while a box still pulls through it; `NotFound` for an unknown id |
+
+The password goes up once, in the create. `RegistryCredential` has no
+password field, and `NewRegistryCredential`'s `Debug` prints it as
+`[redacted]`. A prefix is whole path segments ending in `/`: pass `None` in
+`NewRegistryCredential::repository_prefix` for the whole registry, which a
+returned `RegistryCredential` reports as an empty string. `remove` refuses an
+id that is not a UUID with `InvalidArgument` before sending a request.
+
+```rust
+use acrylmicrovm::runtime::NewRegistryCredential;
+
+let registries = runtime.images()?.registries()?;
+let login = registries
+    .create(&NewRegistryCredential {
+        registry_host: "ghcr.io".into(),
+        repository_prefix: Some("acme/".into()),
+        username: "acme-bot".into(),
+        password: std::env::var("GHCR_TOKEN")?,
+    })
+    .await?;
+for login in registries.list().await? {
+    println!("{}/{} as {}", login.registry_host, login.repository_prefix, login.username);
+}
+registries.remove(&login.id).await?;
+```
+
+### AcrylMicrovmOptions
+
+Runtime configuration options.
+
+```rust
+pub struct AcrylMicrovmOptions {
+    /// Home directory for runtime data (~/.acryl/microvm by default)
+    pub home_dir: PathBuf,
+
+    /// Registry transport, TLS, search, and auth configuration
+    pub image_registries: Vec<ImageRegistry>,
+
+    /// Proxy for image pulls; `None` reads the proxy environment variables
+    pub image_registry_proxy: Option<ImageRegistryProxy>,
+}
+
+pub struct ImageRegistryProxy {
+    /// Proxy URL for `RegistryTransport::Http` registries.
+    pub http_proxy: Option<String>,
+    /// Proxy URL for `RegistryTransport::Https` registries.
+    pub https_proxy: Option<String>,
+    /// Comma-separated hosts, domains, IPs, or CIDRs that bypass the proxy.
+    pub no_proxy: Option<String>,
+}
+
+pub struct ImageRegistry {
+    /// Registry host name, optionally including a port. Do not include a URL scheme.
+    pub host: String,
+    /// `Https` by default; use `Http` for plain HTTP registries.
+    pub transport: RegistryTransport,
+    /// Disable TLS certificate and hostname verification for HTTPS registries.
+    pub skip_verify: bool,
+    /// Include this host when resolving unqualified image references.
+    pub search: bool,
+    /// Anonymous, basic, or bearer token authentication.
+    pub auth: ImageRegistryAuth,
+}
+```
+
+#### Example
+
+```rust
+use acrylmicrovm::{AcrylMicrovmOptions, ImageRegistry, ImageRegistryProxy};
+use std::path::PathBuf;
+
+let options = AcrylMicrovmOptions {
+    home_dir: PathBuf::from("/var/lib/acrylmicrovm"),
+    image_registries: vec![
+        ImageRegistry::https("ghcr.io/myorg").with_search(true),
+        ImageRegistry::https("docker.io").with_search(true),
+        ImageRegistry::http("registry.local:5000").with_search(true),
+        ImageRegistry::https("registry.example.com")
+            .with_skip_verify(true)
+            .with_basic_auth("user", "password"),
+    ],
+    image_registry_proxy: Some(ImageRegistryProxy {
+        https_proxy: Some("http://proxy.corp.example:3128".into()),
+        ..Default::default()
+    }),
+};
+// "alpine" tries ghcr.io/myorg/alpine, then docker.io/alpine,
+// then registry.local:5000/library/alpine.
+```
+
+---
+
+## Box handle
+
+### LiteBox
+
+Handle to a box instance. Thin wrapper providing access to box operations.
+
+```rust
+pub struct LiteBox {
+    // ... internal fields
+}
+```
+
+#### SSH control
+
+`LiteBox::ssh()` returns an owned, cloneable `SshHandle` without starting the box.
+It works for local boxes and for REST-backed boxes whose server implements SSH
+control, as the local `acrylmicrovm serve` does. `enable()` sends a bodyless
+`POST /ssh/enable` on REST-backed handles. `configure()` uses the
+implicit-start guard of exec, metrics, and file copying. `Configured` and
+`Stopped` boxes using image defaults can start implicitly. With an explicit
+`BoxOptions.cmd` or `entrypoint`, configuration returns `InvalidState` in these
+states; call `start()` first; on a REST server a stopped box with
+`auto_resume=false` is refused instead of resumed. `status()`, `enable()` and
+`disable()` never start the VM or main command. On valid `Configured` and
+`Stopped` local handles, status returns generation zero and empty address and
+host identity fields; enable/disable return `InvalidState` without changing saved
+state. Running handles use the existing guest, including after attach before
+start or runtime recovery. Other lifecycle states return `InvalidState`. These
+observations do not prevent concurrent configuration. Deployments without SSH
+control answer `NotFound` or `Unsupported`; there is no capability negotiation.
+
+| Method | Signature |
+|--------|-----------|
+| Configure | `async fn configure(&self, config: SshConfig) -> AcrylMicrovmResult<SshStatus>` |
+| Enable | `async fn enable(&self) -> AcrylMicrovmResult<SshStatus>` |
+| Query | `async fn status(&self) -> AcrylMicrovmResult<SshStatus>` |
+| Disable | `async fn disable(&self) -> AcrylMicrovmResult<SshStatus>` |
+
+These types are exported directly from `acrylmicrovm`, independently of protobuf:
+
+| Type | Public fields |
+|------|---------------|
+| `SshConfig` | `listen_address: String`, `host_private_key: String`, `accounts: Vec<SshAccount>` |
+| `SshAccount` | `login: String`, `authorized_keys: Vec<String>`, `ca: Option<SshCaConfig>` |
+| `SshCaConfig` | `public_key: String`, `principal: String` |
+| `SshStatus` | `enabled: bool`, `generation: u64`, `listen_address: String`, `host_public_key: String`, `host_key_fingerprint: String` |
+
+Complete configuration fields are explicit. Configure enables SSH and disconnects
+existing clients. Enable uses saved credentials, errors when none exist, and
+preserves healthy connections. Automatic key generation is a CLI-only convenience;
+the Rust SDK has no setup method.
+The guest persists credentials on the container disk; port forwarding is separate. All types are
+`Clone + Debug + Send + Sync`;
+configuration Debug output redacts credentials, and status supports `PartialEq + Eq`.
+The configuration types implement `Deserialize` but not `Serialize`;
+`SshStatus` implements `Serialize` + `Deserialize`. Unknown fields are refused in
+the configuration, account, and CA objects (not in `SshStatus`), and the
+[OpenAPI schema](../../../openapi/box.openapi.yaml) owns the wire shape.
+
+For a local box, after VM and container startup each operation has a total
+15-second budget: the guest's 10-second cleanup limit plus 5 seconds for
+communication and scheduling. Obtaining the SSH interface, connection setup,
+queueing, and the RPC consume this same budget, so delays can leave less than
+10 seconds for guest cleanup. Local runtime shutdown rejects new operations
+and cancels interface acquisition and RPCs. In-progress VM initialization
+finishes before cancellation is returned, preserving recovery of detached
+boxes; container startup retains its own cancellation.
+Operations are not retried. Cancellation/timeout cannot guarantee
+rollback. Invalidated handles return `Stopped`; drop all references to the old box
+and use `runtime.get()` to obtain a fresh handle for restart. Recovered stopped
+boxes with an explicit main command still require `start()` before `configure()`. Guest
+`InvalidArgument`, `FailedPrecondition`, and `Unimplemented` map to `InvalidArgument`, `InvalidState`, and `Unsupported`; other RPC failures,
+including guest `DeadlineExceeded`, map to `AcrylMicrovmError::Rpc` and retain operation
+and gRPC status context. Missing response status is `Internal`.
+
+A REST-backed `SshHandle` sends `POST`, `GET`, and `DELETE` to
+`/v1/boxes/{box_id}/ssh` (`/{prefix}/boxes/{box_id}/ssh` with a path prefix
+set), plus a bodyless `POST` to the corresponding `/ssh/enable` route.
+Each call is one request — every accepted configure restarts the guest
+listener, so neither layer retries it — and errors cross the standard
+`AcrylMicrovmError::http()` envelope (for example an upstream guest failure comes
+back as `503 upstream_unavailable`, which the client reports as `Portal`).
+
+See the [SSH guide](../../guides/ssh.md) for an implicit-start example, the
+HTTP contract, reconfiguration, disable, and generation semantics.
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `id` | `fn id(&self) -> &BoxID` | Get box ID |
+| `name` | `fn name(&self) -> Option<&str>` | Get optional box name |
+| `info` | `async fn info(&self) -> Result<BoxInfo>` | Get box info (no VM init) |
+| `ssh` | `fn ssh(&self) -> SshHandle` | Control SSH (local or REST-backed); only configure may implicitly start or resume the box |
+| `network` | `fn network(&self) -> NetworkHandle` | Get box-scoped policy and tunnel operations |
+| `start` | `async fn start(&self) -> AcrylMicrovmResult<()>` | Start the box |
+| `run` | `async fn run(&self, command: BoxCommand) -> AcrylMicrovmResult<Execution>` | Run command |
+| `metrics` | `async fn metrics(&self) -> AcrylMicrovmResult<BoxMetrics>` | Get box metrics |
+| `stop` | `async fn stop(&self) -> AcrylMicrovmResult<()>` | Stop the box |
+| `executions` | `fn executions(&self) -> ExecutionsHandle` | Live session inventory and control recovery; never boots a box |
+| `attach` | `async fn attach(&self, options: AttachOptions) -> AcrylMicrovmResult<Execution>` | Attach to init or a named live session; only one output reader is allowed |
+
+#### ExecutionsHandle
+
+`LiteBox::executions()` returns an owned, cloneable `ExecutionsHandle` without
+starting the box.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `list` | `async fn list(&self) -> AcrylMicrovmResult<Vec<ExecutionInfo>>` | Snapshot live guest sessions, including init; never boots a box |
+| `get` | `async fn get(&self, execution_id: &str) -> AcrylMicrovmResult<Execution>` | Recover control and wait for a known session without taking its output reader |
+
+`executions().list()` is a live-process inventory, not history: sessions disappear
+once the guest reaper records their exit, before registry cleanup. Existing wait
+status/output may remain available in bounded guest retention after a session
+disappears from the list. Calling it on a created or stopped box returns an
+empty vector and does not start or restart the box. A paused box returns an
+invalid-state error instead of claiming its sessions disappeared.
+`ExecutionInfo` carries the canonical guest execution ID, argv, Unix-millisecond
+spawn time, PTY flag, and `is_main_session`.
+
+`executions().get(id)` returns a control-only handle (no stdin/stdout/stderr).
+The local runtime verifies the ID against the live guest inventory; a
+REST-backed runtime asks the server's by-id endpoint, so a retained terminal
+session can still be recovered after it leaves the inventory. Its `wait`,
+`kill`, `signal`, and PTY resize methods remain usable while another handle
+owns output.
+To recover streams after a client process exits, call
+`attach(AttachOptions::execution(id))`; an existing reader is reported as a
+conflict rather than silently returning no output.
+
+#### Lifecycle
+
+- `start()` initializes VM for `Configured` or `Stopped` boxes
+- Idempotent: calling on `Running` box is a no-op
+- `run()` implicitly calls `start()` if needed
+- `stop()` terminates the VM. With default options a local runtime then removes the box;
+  `auto_delete: Some(0)` keeps it
+
+#### Example
+
+```rust
+let litebox = runtime.create(BoxOptions::default(), None).await?;
+
+// Start explicitly (optional, run does this automatically)
+litebox.start().await?;
+
+// Check metrics
+let metrics = litebox.metrics().await?;
+println!("CPU: {:?}%", metrics.cpu_percent());
+
+// Stop when done
+litebox.stop().await?;
+```
+
+### BoxInfo
+
+Public metadata about a box (returned by list operations).
+
+```rust
+pub struct BoxInfo {
+    /// Unique box identifier (ULID)
+    pub id: BoxID,
+
+    /// User-defined name (optional)
+    pub name: Option<String>,
+
+    /// Current lifecycle status
+    pub status: BoxStatus,
+
+    /// Creation timestamp (UTC)
+    pub created_at: DateTime<Utc>,
+
+    /// Last state change timestamp (UTC)
+    pub last_updated: DateTime<Utc>,
+
+    /// Process ID of VMM subprocess (None if not running)
+    pub pid: Option<u32>,
+
+    /// Image reference or rootfs path
+    pub image: String,
+
+    /// Allocated CPU count
+    pub cpus: f64,
+
+    /// Allocated memory in MiB
+    pub memory_mib: u32,
+
+    /// Current network configuration and resolved local publications
+    pub network: Option<NetworkInfo>,
+
+    /// User-defined labels
+    pub labels: HashMap<String, String>,
+}
+
+pub struct OutboundNetworkInfo {
+// (InboundNetworkInfo has the same shape)
+    pub mode: NetworkMode,
+    pub allow_net: Vec<String>,
+}
+
+pub struct NetworkInfo {
+    pub outbound: OutboundNetworkInfo,
+    pub inbound: InboundNetworkInfo,
+    pub published_ports: Option<Vec<PublishedPort>>,
+    // Deprecated mirrors of `outbound`, kept so pre-split readers keep
+    // compiling. Build with `NetworkInfo::new` so they cannot disagree.
+    pub mode: NetworkMode,
+    pub allow_net: Vec<String>,
+}
+
+pub struct PublishedPort {
+    pub guest_port: u16,
+    pub host_ip: String,
+    pub host_port: u16,
+    pub protocol: PortProtocol,
+}
+```
+
+`network: None` means network information is unavailable, such as metadata from
+a REST server that predates the `network` field. A current server reports both
+directions for a remote box, so `info().network` carries the cloud box's
+outbound and inbound policy. Within `NetworkInfo`, `published_ports: None`
+means the current handle does not know the lifecycle's publications, which is
+always the case over REST: host bindings never travel on the wire.
+`Some(vec![])` means there are no active publications, and a populated vector
+contains concrete active local bindings. `PortSpec` remains the request type;
+resolved output uses `PublishedPort` so every reported host port is concrete.
+
+`LiteBox::info()` has no synchronous snapshot variant. Local metadata reads report
+bindings captured when this handle started or reattached the box; REST metadata
+reads fetch the current server record. A newly loaded local running box has no
+live binding data yet, so `info()`, `get_info()`, or `list_info()` may report
+`published_ports: None` until an operation requiring live state reattaches it.
+
+### BoxStatus
+
+Lifecycle status of a box.
+
+```rust
+pub enum BoxStatus {
+    /// Cannot determine state (error recovery)
+    Unknown,
+
+    /// Created and persisted, VM not started
+    Configured,
+
+    /// Running and accepting commands
+    Running,
+
+    /// Shutting down gracefully (transient)
+    Stopping,
+
+    /// Not running, can be restarted
+    Stopped,
+}
+```
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `is_active` | `fn is_active(&self) -> bool` | True if VM process running |
+| `is_running` | `fn is_running(&self) -> bool` | True if Running |
+| `is_configured` | `fn is_configured(&self) -> bool` | True if Configured |
+| `is_stopped` | `fn is_stopped(&self) -> bool` | True if Stopped |
+| `is_transient` | `fn is_transient(&self) -> bool` | True if Stopping |
+| `can_start` | `fn can_start(&self) -> bool` | True if Configured or Stopped |
+| `can_stop` | `fn can_stop(&self) -> bool` | True if Running |
+| `can_remove` | `fn can_remove(&self) -> bool` | True if Configured, Stopped, or Unknown |
+| `can_run` | `fn can_run(&self) -> bool` | True if Configured, Running, or Stopped |
+
+#### State machine
+
+```text
+create() → Configured (persisted to DB, no VM)
+start()  → Running (VM initialized)
+stop()   → Stopped (VM terminated); a local runtime removes it unless auto_delete is Some(0)
+```
+
+### BoxState
+
+Dynamic box state (changes during lifecycle).
+
+```rust
+pub struct BoxState {
+    /// Current lifecycle status
+    pub status: BoxStatus,
+
+    /// Process ID (None if not running)
+    pub pid: Option<u32>,
+
+    /// Container ID (64-char hex)
+    pub container_id: Option<ContainerID>,
+
+    /// Last state change timestamp (UTC)
+    pub last_updated: DateTime<Utc>,
+
+    /// Lock ID for multiprocess-safe locking
+    pub lock_id: Option<LockId>,
+}
+```
+
+---
+
+## Network tunnels
+
+| Operation | Signature | Description |
+|-----------|-----------|-------------|
+| Get handle | `LiteBox::network(&self) -> NetworkHandle` | Get box-scoped network operations |
+| Update inbound | `NetworkHandle::update_inbound(InboundNetworkConfig).await -> AcrylMicrovmResult<()>` | Replace inbound mode; cloud only |
+| Update outbound | `NetworkHandle::update_outbound(OutboundNetworkConfig).await -> AcrylMicrovmResult<()>` | Replace outbound mode and allowlist |
+| Tunnel | `async fn tunnel(&self, target: SocketAddr, options: TunnelOptions) -> AcrylMicrovmResult<BoxTunnel>` | Prepare a one-shot tunnel to a TCP service; `target` must be localhost (`127.0.0.1:3000`) or the guest IP for now. `TunnelOptions::default()` is public, `TunnelOptions { is_public: false }` requests a private cloud tunnel |
+| Token | `BoxTunnel::token(&self) -> Option<&str>` | Full on creation, masked on later preparations; `is_public()` reports the mode |
+| Revoke | `async fn revoke_tunnel(&self, port: u16) -> AcrylMicrovmResult<()>` | Withdraw the port's tunnel; a no-op on a local box |
+| Domains | `AcrylMicrovmRuntime::domains(&self) -> AcrylMicrovmResult<DomainHandle>` | `list().await -> DomainList` returns full `hostname` values, no short `name`, and quota fields (`limit`/`used`/`remaining`/`min_length`). `target` is `None` while unbound. `bind(domain, &DomainTarget::Box { box_ref, port }).await` requires an owned full hostname; request new names in Dashboard > Domains first; `unbind(hostname).await` requires the full hostname and retains ownership. `DomainTarget::App { app_ref }` is reserved; App binding is rejected. REST only; see [Domains](../../concepts/networking.md#domains). |
+| Forward | `async fn BoxTunnel::forward(self, listen: SocketAddress) -> AcrylMicrovmResult<TunnelForwarder>` | Consume the tunnel into a TCP or Unix listener |
+| Inspect | `BoxTunnel::uri(&self) -> Option<&str>` | Read the prepared public URL; `None` for a local box |
+| Descriptor | `BoxConnection::raw_fd(&self) -> Option<RawFd>` | Borrowed fd; `None` for a remotely served connection |
+| Take fd | `BoxConnection::into_fd(self) -> AcrylMicrovmResult<OwnedFd>` | Consume the connection and own its descriptor |
+| Connect | `async fn BoxTunnel::connect(self) -> AcrylMicrovmResult<BoxConnection>` | Consume the prepared tunnel into its byte stream |
+| Split | `BoxConnection::into_split(self) -> (BoxReader, BoxWriter)` | Halves that read and write concurrently |
+| Half-close | `BoxWriter::shutdown(&mut self) -> AcrylMicrovmResult<()>` | Signal EOF; a peer that already hung up is success, not an error |
+
+`BoxTunnel` remains one-shot: choose either `connect()` or `forward()`. A
+forwarder opens fresh connections against the prepared declaration and never
+prepares again, so connecting cannot reopen a revoked tunnel.
+This differs from `BoxOptions.ports`, which publishes a local port for
+the lifetime of the box.
+
+`TunnelForwarder::local_addr()` reports the canonical bound address, while
+repeatable `wait()` and `close()` share the listener's cached terminal result.
+Dropping the final handle requests cancellation.
+
+---
+
+## Command execution
+
+### BoxCommand
+
+Command builder for running programs in a box.
+
+```rust
+use acrylmicrovm::BoxCommand;
+use std::time::Duration;
+
+let cmd = BoxCommand::new("python3")
+    .args(["-c", "print('hello')"])
+    .env("PYTHONPATH", "/app")
+    .timeout(Duration::from_secs(30))
+    .working_dir("/workspace")
+    .user("nobody")
+    .tty(true);
+```
+
+#### Builder methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `new` | `fn new(command: impl Into<String>) -> Self` | Create command |
+| `arg` | `fn arg(self, arg: impl Into<String>) -> Self` | Add single argument |
+| `args` | `fn args<I, S>(self, args: I) -> Self` | Add multiple arguments |
+| `env` | `fn env(self, key: impl Into<String>, val: impl Into<String>) -> Self` | Set env var |
+| `timeout` | `fn timeout(self, timeout: Duration) -> Self` | Set run timeout |
+| `working_dir` | `fn working_dir(self, dir: impl Into<String>) -> Self` | Set working directory |
+| `user` | `fn user(self, user: impl Into<String>) -> Self` | Set execution user (e.g., `"nobody"`, `"1000:1000"`) |
+| `tty` | `fn tty(self, enable: bool) -> Self` | Enable pseudo-terminal |
+
+An unknown user or group fails the exec with `AcrylMicrovmError::InvalidArgument`
+(HTTP 400 over REST) and the command does not run. Over REST, a command with a
+`user` first re-reads `exec_user_enabled` from `GET /v1/config` (uncached); a
+server that does not advertise it gets `AcrylMicrovmError::Unsupported` and no exec
+request, because it would otherwise run the command as the box default user.
+
+### Execution
+
+Handle to a running command.
+
+```rust
+use acrylmicrovm::BoxCommand;
+use futures::StreamExt;
+
+let mut run_handle = litebox.run(BoxCommand::new("ls").arg("-la")).await?;
+
+// Read stdout as stream
+let mut stdout = run_handle.stdout().unwrap();
+while let Some(line) = stdout.next().await {
+    println!("{}", line);
+}
+
+// Wait for completion
+let status = run_handle.wait().await?;
+println!("Exit code: {}", status.exit_code);
+```
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `id` | `fn id(&self) -> &ExecutionId` | Get run ID |
+| `stdin` | `fn stdin(&mut self) -> Option<ExecStdin>` | Take stdin stream (once) |
+| `stdout` | `fn stdout(&mut self) -> Option<ExecStdout>` | Take stdout stream (once) |
+| `stderr` | `fn stderr(&mut self) -> Option<ExecStderr>` | Take stderr stream (once) |
+| `wait` | `async fn wait(&mut self) -> AcrylMicrovmResult<ExecResult>` | Wait for completion |
+| `kill` | `async fn kill(&mut self) -> AcrylMicrovmResult<()>` | Send SIGKILL |
+| `signal` | `async fn signal(&self, signal: i32) -> AcrylMicrovmResult<()>` | Send signal |
+| `resize_tty` | `async fn resize_tty(&self, rows: u32, cols: u32) -> AcrylMicrovmResult<()>` | Resize PTY |
+
+### ExecStdin
+
+Standard input stream (write-only).
+
+```rust
+pub struct ExecStdin {
+    // ...
+}
+
+impl ExecStdin {
+    /// Write data to stdin
+    pub async fn write(&mut self, data: &[u8]) -> AcrylMicrovmResult<()>;
+
+    /// Write all data to stdin
+    pub async fn write_all(&mut self, data: &[u8]) -> AcrylMicrovmResult<()>;
+}
+```
+
+#### Example
+
+```rust
+let mut run_handle = litebox.run(BoxCommand::new("cat")).await?;
+
+// Get stdin handle
+let mut stdin = run_handle.stdin().unwrap();
+
+// Write data
+stdin.write(b"Hello from stdin!\n").await?;
+stdin.write_all(b"More data\n").await?;
+
+// Drop stdin to close (signals EOF to process)
+drop(stdin);
+
+let result = run_handle.wait().await?;
+```
+
+### ExecStdout / ExecStderr
+
+Standard output/error streams (read-only). Implements `futures::Stream<Item = String>`.
+
+```rust
+use futures::StreamExt;
+
+let mut run_handle = litebox.run(BoxCommand::new("ls")).await?;
+
+// Read stdout
+let mut stdout = run_handle.stdout().unwrap();
+while let Some(line) = stdout.next().await {
+    println!("stdout: {}", line);
+}
+
+// Read stderr
+let mut stderr = run_handle.stderr().unwrap();
+while let Some(line) = stderr.next().await {
+    eprintln!("stderr: {}", line);
+}
+```
+
+#### Concurrent reading
+
+```rust
+use futures::StreamExt;
+use tokio::select;
+
+let mut run_handle = litebox.run(BoxCommand::new("my-command")).await?;
+let mut stdout = run_handle.stdout().unwrap();
+let mut stderr = run_handle.stderr().unwrap();
+
+loop {
+    select! {
+        Some(line) = stdout.next() => println!("stdout: {}", line),
+        Some(line) = stderr.next() => eprintln!("stderr: {}", line),
+        else => break,
+    }
+}
+```
+
+### ExecResult
+
+Exit status of a process.
+
+```rust
+pub struct ExecResult {
+    /// Exit code (0 = success, negative = signal number)
+    pub exit_code: i32,
+}
+
+impl ExecResult {
+    /// Returns true if exit code was 0
+    pub fn success(&self) -> bool;
+
+    /// Get exit code
+    pub fn code(&self) -> i32;
+}
+```
+
+---
+
+## Box configuration
+
+### BoxOptions
+
+Options for constructing a box.
+
+```rust
+pub struct BoxOptions {
+    /// CPU allocation (default: 1); fractions require a Linux execution host
+    pub cpus: Option<f64>,
+
+    /// Memory in MiB (default: 512)
+    pub memory_mib: Option<u32>,
+
+    /// Disk size in GB for rootfs (sparse, grows as needed)
+    pub disk_size_gb: Option<u64>,
+
+    /// Working directory inside box
+    pub working_dir: Option<String>,
+
+    /// Environment variables
+    pub env: Vec<(String, String)>,
+
+    /// Root filesystem source
+    pub rootfs: RootfsSpec,
+
+    /// Volume mounts
+    pub volumes: Vec<VolumeSpec>,
+
+    /// Typed mounts, beside `volumes`
+    pub mounts: Vec<MountSpec>,
+
+    /// Network policy, per direction
+    pub network: NetworkSpec,
+
+    /// Inbound reachability of exposed services
+    pub inbound_network: NetworkSpec,
+
+    /// Secrets injected into a request header on outbound HTTPS requests
+    pub secrets: Vec<Secret>,
+
+    /// Port mappings
+    pub ports: Vec<PortSpec>,
+
+    /// Seconds after stop before the box is deleted: `Some(0)` keeps it, and a
+    /// local runtime deletes at stop for any other value. `None` (default) falls
+    /// back to `auto_remove` locally and to the server's policy on REST.
+    pub auto_delete: Option<u32>,
+
+    /// Deprecated: use `auto_delete`. Remove the box when it stops (default: true)
+    pub auto_remove: bool,
+
+    /// Run independently of parent process (default: false)
+    pub detach: bool,
+
+    /// Advanced options for expert users (capabilities, security, mount isolation).
+    pub advanced: AdvancedBoxOptions,
+}
+```
+
+#### Example
+
+```rust
+use acrylmicrovm::{AdvancedBoxOptions, ContainerCapabilities};
+use acrylmicrovm::runtime::options::{BoxOptions, RootfsSpec, VolumeSpec, PortSpec};
+
+let options = BoxOptions {
+    cpus: Some(4.0),
+    memory_mib: Some(2048),
+    rootfs: RootfsSpec::Image("python:3.11".to_string()),
+    env: vec![
+        ("PYTHONPATH".to_string(), "/app".to_string()),
+    ],
+    volumes: vec![
+        VolumeSpec::bind_mount("/home/user/project", "/app"),
+    ],
+    ports: vec![
+        PortSpec {
+            host_port: Some(8080),
+            guest_port: 80,
+            ..Default::default()
+        },
+    ],
+    advanced: AdvancedBoxOptions {
+        capabilities: ContainerCapabilities {
+            add: vec!["SYS_ADMIN".to_string()],
+            drop: vec!["NET_RAW".to_string()],
+        },
+        ..Default::default()
+    },
+    auto_delete: Some(0),  // Keep box after stop
+    detach: true,          // Run independently
+    ..Default::default()
+};
+```
+
+### AdvancedBoxOptions
+
+Advanced options for expert users. Most users can ignore this — defaults enable
+the isolation protections supported by the host platform.
+
+```rust
+pub struct AdvancedBoxOptions {
+    pub capabilities: ContainerCapabilities,
+    pub security: SecurityOptions,
+    pub isolate_mounts: bool,
+    pub health_check: Option<HealthCheckOptions>,
+    pub network_rate_limit: NetworkRateLimit,
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `capabilities` | `ContainerCapabilities` | Empty add/drop lists | Linux capability delta policy for init and exec processes |
+| `security` | `SecurityOptions` | `SecurityOptions::default()` (fully enabled profile; jailer enabled) | Security isolation options (jailer, seccomp, namespaces) |
+| `isolate_mounts` | `bool` | `false` | Enable bind mount isolation (requires CAP_SYS_ADMIN on Linux) |
+| `health_check` | `Option<HealthCheckOptions>` | `None` | Optional guest-agent health monitoring |
+| `network_rate_limit` | `NetworkRateLimit` | Unlimited | Per-direction rate limit for the box's interface, in kilobits/sec. Local runtime only; see [NetworkRateLimit](#networkratelimit) |
+
+### RootfsSpec
+
+How to populate the box root filesystem.
+
+```rust
+pub enum RootfsSpec {
+    /// Pull/resolve this registry image reference
+    Image(String),
+
+    /// Use already prepared rootfs at host path
+    RootfsPath(String),
+}
+
+impl Default for RootfsSpec {
+    fn default() -> Self {
+        Self::Image("alpine:latest".into())
+    }
+}
+```
+
+### VolumeSpec
+
+Filesystem mount specification. A mount has exactly one origin: a managed
+volume, or a host bind path.
+
+```rust
+pub struct VolumeSpec {
+    /// Managed volume, by server-assigned id or by name.
+    pub managed_volume: Option<String>,
+
+    /// Path on host. Empty when `managed_volume` is set.
+    pub host_path: String,
+
+    /// Path inside guest
+    pub guest_path: String,
+
+    /// Mount as read-only
+    pub read_only: bool,
+}
+```
+
+The constructor names the operation; the `host_path` field names what it holds.
+The field keeps its name because it is persisted box config: boxes on disk carry
+a `host_path` key, so renaming the field would strand every box written before
+such a rename. Renaming the constructor, as here, does not touch what is stored.
+
+Build one with a constructor rather than by hand:
+
+```rust
+use acrylmicrovm::runtime::options::VolumeSpec;
+
+// Managed volume, addressed by name — `"vol_01K2EXAMPLE"` works the same way.
+let by_name = VolumeSpec::managed_volume("my-data", "/data");
+
+// Host bind mount, read-only.
+let bind = VolumeSpec {
+    read_only: true,
+    ..VolumeSpec::bind_mount("/tmp/data", "/data")
+};
+```
+
+The reference is taken verbatim and reaches the wire unchanged — nothing
+decorates or narrows it.
+
+The two origins are not interchangeable across runtimes:
+
+| Origin | Local runtime | REST runtime |
+| --- | --- | --- |
+| `VolumeSpec::managed_volume` | rejected — no volume backend | mounted |
+| `VolumeSpec::bind_mount` | mounted | rejected — the path is the server's, not yours |
+
+### MountSpec
+
+A typed mount for `BoxOptions::mounts`. Where a `VolumeSpec` infers its origin
+from which field is set, a `MountSpec` states it in `mount_type`.
+
+```rust
+pub struct MountSpec {
+    /// `MountType::Volume` or `MountType::Bind`; serialized as `"type"`.
+    pub mount_type: MountType,
+
+    /// A volume id or name for `Volume`, a host path for `Bind`; required by both.
+    pub source: Option<String>,
+
+    /// Mount point inside the box; an absolute path.
+    pub target: String,
+
+    /// Mount as read-only
+    pub read_only: bool,
+
+    /// `Volume` only: a prefix to mount instead of the whole volume.
+    pub sub_path: Option<String>,
+}
+```
+
+```rust
+use acrylmicrovm::runtime::options::MountSpec;
+
+let prefix = MountSpec {
+    read_only: true,
+    sub_path: Some("foo/bar".to_string()),
+    ..MountSpec::volume_mount("run42", "/workspace")
+};
+let bind = MountSpec::bind_mount("/tmp/data", "/data");
+```
+
+`MountType` parses from and displays as `"volume"` and `"bind"` exactly. Only
+the Rust `BoxOptions` carries a `MountSpec`; no CLI flag, other SDK or REST
+request does yet.
+`MountSpec::validate` refuses a relative `target`, a missing `source`,
+`sub_path` on a `Bind`, and an empty `sub_path`; create runs it for every mount.
+A runtime refuses the mounts it does not take rather than dropping them; use
+`volumes` where it takes none:
+
+- REST runtimes take no typed mounts yet.
+
+- The local runtime takes no typed mounts yet.
+
+- Importing an archive that carries mounts is not supported yet.
+
+### NetworkSpec
+
+Guest egress policy — unchanged by the outbound/inbound split.
+
+```rust
+pub enum NetworkSpec {
+    Enabled {
+        allow_net: Vec<String>, // empty = full access
+    },
+    Disabled,                   // no guest network interface at all
+}
+```
+
+`allow_net` supports exact hosts, wildcard hosts, IPv4 addresses, and IPv4 CIDRs; create and `update_outbound` reject anything else. It restricts both TCP and UDP egress. Hostname rules rely on TLS SNI / HTTP Host inspection, which only TCP carries, so an `allow_net` holding only hostnames denies all UDP egress — add the IP or CIDR to keep UDP open. A host matched by a configured `Secret` is additionally reachable on port 443 without a rule of its own, so `allow_net` is not the only egress gate. The connection is dialed by name, and under a non-empty allowlist an answer in a private, loopback or CGNAT range is refused unless an IP or CIDR rule covers it. `Disabled` removes the guest network interface entirely.
+
+The inbound direction — whether services the box exposes are reachable from
+outside it — is the sibling field `BoxOptions::inbound_network`, which reuses
+this same type: `Enabled` = reachable, `Disabled` = unreachable (the default,
+`NetworkSpec::disabled()`). The two directions are independent, so a
+box may refuse egress while the services it exposes stay reachable, or the
+reverse.
+
+```rust
+let opts = BoxOptions {
+    network: NetworkSpec::Disabled,                                  // no egress
+    inbound_network: NetworkSpec::Enabled { allow_net: vec![] },     // reachable
+    ..Default::default()
+};
+```
+
+`inbound_network`'s `allow_net` must be empty — no layer enforces an inbound
+allowlist yet, so a non-empty value is rejected at create. Inbound is
+controlled by enabled/disabled alone.
+
+Pre-split code needs no change: `network` keeps its name, type and meaning,
+and box configs persisted without `inbound_network` load with it `Disabled`.
+
+### NetworkRateLimit
+
+Per-direction rate limit for the box's network interface, in kilobits per
+second. Set through `BoxOptions::advanced`.
+
+```rust
+pub struct NetworkRateLimit {
+    pub tx_kbps: Option<u64>,   // guest -> internet
+    pub rx_kbps: Option<u64>,   // internet -> guest
+}
+```
+
+Directions are named from the box's point of view, matching Firecracker's net
+device: `tx` is what the box sends, `rx` is what reaches it. Which side opened
+the connection does not matter — traffic arriving over an inbound port forward
+is charged to `rx` exactly like a reply to an outbound request. The cap is on
+the interface, not on a connection's direction.
+
+Shaping happens below IP in the gvproxy bridge, so one budget per direction
+covers TCP, UDP, ICMP and ARP together; there is no per-protocol split.
+
+`None` or `0` in a direction leaves that direction uncapped, the convention
+Firecracker, Kata and Cloud Hypervisor share.
+
+```rust
+use acrylmicrovm::{AdvancedBoxOptions, BoxOptions, NetworkRateLimit};
+
+let mut advanced = AdvancedBoxOptions::default();
+advanced.network_rate_limit = NetworkRateLimit {
+    tx_kbps: Some(10_000),   // 10 Mbit/s up
+    rx_kbps: Some(100_000),  // 100 Mbit/s down
+};
+let opts = BoxOptions {
+    advanced,
+    ..Default::default()
+};
+```
+
+Local runtime only. A remote server owns its own network policy, so the REST
+wire types carry no field for this and a remote create rejects it. Setting a cap
+while `network` is `Disabled` is also rejected — there is no interface to shape.
+
+**Platform support.** The cap is verified on Linux, where the guest link is a
+SOCK_STREAM socket and declining to read it applies backpressure all the way to
+the guest's virtio queue. macOS uses a SOCK_DGRAM link whose sender behaviour
+under a full receive buffer is not yet verified, so `tx_kbps` there may drop
+frames rather than slow the guest down. `rx_kbps` is paced the same way on both.
+
+### Secret
+
+Secret rendered into configured headers on outbound HTTPS requests to `hosts`.
+
+```rust
+pub struct Secret {
+    pub name: String,
+    pub hosts: Vec<String>,
+    pub placeholder: String, // dummy guest value; default: <ACRYLMICROVM_SECRET:{name}>
+    pub value: String,
+    pub headers: Option<std::collections::BTreeMap<String, String>>,
+}
+```
+
+Creation requires `Some` with a non-empty map. `None` is retained only to decode legacy metadata; activation rejects it.
+Each template contains exactly one `{value}`; only headers already present in
+the original request are replaced. See the [validation rules](../configuration.md#secrets).
+
+### PortSpec
+
+Port mapping specification (host → guest).
+
+```rust
+pub struct PortSpec {
+    /// Host port (None/0 = dynamically assigned)
+    pub host_port: Option<u16>,
+
+    /// Guest port to expose
+    pub guest_port: u16,
+
+    /// Protocol (TCP; UDP is currently rejected)
+    pub protocol: PortProtocol,
+
+    /// Bind IP (None = 0.0.0.0)
+    pub host_ip: Option<String>,
+}
+
+pub enum PortProtocol {
+    Tcp,  // default
+    Udp,
+}
+```
+
+---
+
+## Security
+
+### SecurityOptions
+
+Security isolation options for a box.
+
+```rust
+pub struct SecurityOptions {
+    /// Enable jailer isolation (Linux: seccomp/namespaces, macOS: sandbox-exec)
+    pub jailer_enabled: bool,
+
+    /// Enable seccomp syscall filtering (Linux only)
+    pub seccomp_enabled: bool,
+
+    /// UID to drop to (Linux only). None = auto-allocate
+    pub uid: Option<u32>,
+
+    /// GID to drop to (Linux only). None = auto-allocate
+    pub gid: Option<u32>,
+
+    /// Create new PID namespace (Linux only)
+    pub new_pid_ns: bool,
+
+    /// Create new network namespace (Linux only)
+    pub new_net_ns: bool,
+
+    /// Base directory for chroot jails (Linux)
+    pub chroot_base: PathBuf,
+
+    /// Enable chroot isolation (Linux only)
+    pub chroot_enabled: bool,
+
+    /// Close inherited file descriptors
+    pub close_fds: bool,
+
+    /// Sanitize environment variables
+    pub sanitize_env: bool,
+
+    /// Environment variables to preserve
+    pub env_allowlist: Vec<String>,
+
+    /// Resource limits
+    pub resource_limits: ResourceLimits,
+
+    /// Custom sandbox profile (macOS only)
+    pub sandbox_profile: Option<PathBuf>,
+
+    /// Network grants of the host-side sandbox (seatbelt on macOS, Landlock on Linux);
+    /// does not disable guest networking
+    pub network_enabled: bool,
+}
+```
+
+#### Settings
+
+Security is a two-state switch — **enable** (the default) or **disable**.
+
+```rust
+// Enabled (the default): full host isolation.
+let on = SecurityOptions::enabled(); // == SecurityOptions::default()
+// - jailer_enabled: true
+// - seccomp_enabled, new_pid_ns, chroot_enabled: true (Linux)
+// - uid/gid: 65534 (nobody/nogroup)
+// - close_fds, sanitize_env: true; resource limits applied
+
+// Disabled: master switch off, every sub-protection off (debugging / unsandboxable envs).
+let off = SecurityOptions::disabled();
+// - jailer_enabled: false
+// - all sub-protections off
+```
+
+### SecurityOptionsBuilder
+
+Fluent builder for security options.
+
+```rust
+use acrylmicrovm::runtime::options::{SecurityOptions, SecurityOptionsBuilder};
+
+let security = SecurityOptionsBuilder::enabled()
+    .max_open_files(2048)
+    .max_file_size_bytes(1024 * 1024 * 512)  // 512 MiB
+    .max_processes(100)
+    .allow_env("MY_VAR")
+    .build();
+
+// Or via SecurityOptions::builder()
+let security = SecurityOptions::builder()
+    .seccomp_enabled(false)
+    .build();
+```
+
+#### Builder methods
+
+| Method | Description |
+|--------|-------------|
+| `new()` | Start from defaults |
+| `development()` | Start from dev preset |
+| `standard()` | Start from standard preset |
+| `maximum()` | Start from max preset |
+| `jailer_enabled(bool)` | Enable/disable jailer |
+| `seccomp_enabled(bool)` | Enable/disable seccomp |
+| `uid(u32)` | Set drop-to UID |
+| `gid(u32)` | Set drop-to GID |
+| `new_pid_ns(bool)` | Enable PID namespace |
+| `new_net_ns(bool)` | Enable network namespace |
+| `chroot_base(path)` | Set chroot base dir |
+| `chroot_enabled(bool)` | Enable chroot |
+| `close_fds(bool)` | Close inherited FDs |
+| `sanitize_env(bool)` | Sanitize environment |
+| `env_allowlist(vec)` | Set env allowlist |
+| `allow_env(var)` | Add to env allowlist |
+| `resource_limits(limits)` | Set all limits |
+| `max_open_files(n)` | RLIMIT_NOFILE |
+| `max_file_size_bytes(n)` | RLIMIT_FSIZE |
+| `max_processes(n)` | RLIMIT_NPROC |
+| `max_memory_bytes(n)` | RLIMIT_AS |
+| `max_cpu_time_seconds(n)` | RLIMIT_CPU |
+| `sandbox_profile(path)` | macOS sandbox profile |
+| `network_enabled(bool)` | Host sandbox network grants, not guest networking |
+| `build()` | Build SecurityOptions |
+
+### ResourceLimits
+
+Resource limits for the jailed process.
+
+```rust
+pub struct ResourceLimits {
+    /// Max open file descriptors (RLIMIT_NOFILE)
+    pub max_open_files: Option<u64>,
+
+    /// Max file size in bytes (RLIMIT_FSIZE)
+    pub max_file_size: Option<u64>,
+
+    /// Max number of processes (RLIMIT_NPROC)
+    pub max_processes: Option<u64>,
+
+    /// Max virtual memory in bytes (RLIMIT_AS)
+    pub max_memory: Option<u64>,
+
+    /// Max CPU time in seconds (RLIMIT_CPU)
+    pub max_cpu_time: Option<u64>,
+}
+```
+
+---
+
+## Metrics
+
+### RuntimeMetrics
+
+Runtime-wide metrics (aggregate across all boxes).
+
+```rust
+let metrics = runtime.metrics().await;
+println!("Boxes created: {}", metrics.boxes_created_total());
+println!("Commands run: {}", metrics.total_commands_run());
+```
+
+#### Methods
+
+| Method | Return | Description |
+|--------|--------|-------------|
+| `boxes_created_total()` | `u64` | Total boxes created |
+| `boxes_failed_total()` | `u64` | Total boxes that failed to start |
+| `num_running_boxes()` | `u64` | Currently running boxes |
+| `total_commands_run()` | `u64` | Total run() calls |
+| `total_run_errors()` | `u64` | Total run errors |
+
+### BoxMetrics
+
+Per-box metrics (individual LiteBox statistics).
+
+```rust
+let metrics = litebox.metrics().await?;
+println!("Boot time: {:?}ms", metrics.guest_boot_duration_ms());
+println!("CPU: {:?}%", metrics.cpu_percent());
+println!("Memory: {:?} bytes", metrics.memory_bytes());
+```
+
+#### Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `commands_run_total` | `u64` | Commands on this box |
+| `run_errors_total` | `u64` | Run errors on this box |
+| `bytes_sent_total` | `u64` | Bytes sent (stdin) |
+| `bytes_received_total` | `u64` | Bytes received (stdout/stderr) |
+| `total_create_duration_ms` | `Option<u128>` | Total init time |
+| `guest_boot_duration_ms` | `Option<u128>` | Guest boot time |
+| `cpu_percent` | `Option<f32>` | CPU usage (0-100) |
+| `memory_bytes` | `Option<u64>` | Memory usage |
+| `network_bytes_sent` | `Option<u64>` | Network TX |
+| `network_bytes_received` | `Option<u64>` | Network RX |
+| `network_tcp_connections` | `Option<u64>` | Active TCP connections |
+| `network_tcp_errors` | `Option<u64>` | TCP connection errors |
+
+#### Stage timing
+
+| Field | Description |
+|-------|-------------|
+| `stage_filesystem_setup_ms` | Stage 1: Directory setup |
+| `stage_image_prepare_ms` | Stage 2: Image pull/extract |
+| `stage_guest_rootfs_ms` | Stage 3: Guest rootfs bootstrap |
+| `stage_box_config_ms` | Stage 4: Box config build |
+| `stage_box_spawn_ms` | Stage 5: Subprocess spawn |
+| `stage_container_init_ms` | Stage 6: Container init |
+
+---
+
+## Type utilities
+
+### Bytes
+
+Semantic newtype for byte sizes.
+
+```rust
+use acrylmicrovm::runtime::types::Bytes;
+
+// Constructors
+let size = Bytes::from_bytes(1_000_000);
+let size = Bytes::from_kib(512);   // 512 * 1024
+let size = Bytes::from_mib(128);   // 128 * 1024²
+let size = Bytes::from_gib(2);     // 2 * 1024³
+
+// Accessors
+let bytes = size.as_bytes();
+let kib = size.as_kib();
+let mib = size.as_mib();
+
+// Display
+println!("{}", Bytes::from_mib(512));  // "512 MiB"
+```
+
+### Seconds
+
+Semantic newtype for durations.
+
+```rust
+use acrylmicrovm::runtime::types::Seconds;
+
+// Constructors
+let duration = Seconds::from_seconds(30);
+let duration = Seconds::from_minutes(5);   // 300 seconds
+let duration = Seconds::from_hours(1);     // 3600 seconds
+
+// Accessors
+let secs = duration.as_seconds();
+let mins = duration.as_minutes();
+
+// Display
+println!("{}", Seconds::from_minutes(30));  // "30 minutes"
+```
+
+### BoxID
+
+Box identifier in Base62 format (12 characters, ~71 bits of entropy).
+
+```rust
+use acrylmicrovm::runtime::id::{BoxID, BoxIDMint};
+
+let id = BoxIDMint::mint();
+println!("Full: {}", id.as_str());   // "aB3cD4eF5gH6"
+println!("Short: {}", id.short());    // "aB3cD4eF"
+
+// Validation (accepts 12-char Base62 and 26-char legacy ULID)
+let valid = BoxID::parse("aB3cD4eF5gH6");
+let invalid = BoxID::parse("too-short");  // None
+```
+
+### ContainerID
+
+Container identifier (64-char lowercase hex, OCI format).
+
+```rust
+use acrylmicrovm::runtime::types::ContainerID;
+
+let id = ContainerID::new();
+println!("Full: {}", id.as_str());   // 64 hex chars
+println!("Short: {}", id.short());    // 12 hex chars
+
+// Validation
+let valid = ContainerID::is_valid("a".repeat(64).as_str());  // true
+```
+
+---
+
+## Error types
+
+### AcrylMicrovmError
+
+Central error enum for all ACRYL microVMs operations.
+
+```rust
+pub enum AcrylMicrovmError {
+    /// Unsupported engine kind
+    UnsupportedEngine,
+
+    /// Engine reported an error
+    Engine(String),
+
+    /// Configuration error
+    Config(String),
+
+    /// Storage/filesystem error
+    Storage(String),
+
+    /// Image pull/resolve error
+    Image(String),
+
+    /// Host-guest communication error
+    Portal(String),
+
+    /// Network error
+    Network(String),
+
+    /// gRPC error
+    Rpc(String),
+
+    /// gRPC transport error
+    RpcTransport(String),
+
+    /// Internal error
+    Internal(String),
+
+    /// Command run error
+    Run(String),
+
+    /// Unsupported operation
+    Unsupported(String),
+
+    /// The named box, image, volume or snapshot does not exist
+    NotFound(String),
+
+    /// Resource already exists
+    AlreadyExists(String),
+
+    /// Invalid state for operation
+    InvalidState(String),
+
+    /// Database error
+    Database(String),
+
+    /// Metadata parsing error
+    MetadataError(String),
+
+    /// Invalid argument
+    InvalidArgument(String),
+}
+```
+
+### AcrylMicrovmResult
+
+Result type alias for ACRYL microVMs operations.
+
+```rust
+pub type AcrylMicrovmResult<T> = Result<T, AcrylMicrovmError>;
+```
+
+#### Error handling example
+
+```rust
+use acrylmicrovm::AcrylMicrovmError;
+
+match runtime.create(options, None).await {
+    Ok(litebox) => println!("Created box: {}", litebox.id()),
+    Err(AcrylMicrovmError::Image(msg)) => eprintln!("Image error: {}", msg),
+    Err(AcrylMicrovmError::Config(msg)) => eprintln!("Config error: {}", msg),
+    Err(e) => eprintln!("Other error: {}", e),
+}
+```
+
+---
+
+## Complete example
+
+```rust
+use acrylmicrovm::runtime::{AcrylMicrovmRuntime, BoxOptions};
+use acrylmicrovm::runtime::options::{AdvancedBoxOptions, RootfsSpec, SecurityOptions, VolumeSpec};
+use acrylmicrovm::BoxCommand;
+use futures::StreamExt;
+use std::time::Duration;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize runtime
+    let runtime = AcrylMicrovmRuntime::with_defaults()?;
+
+    // Configure box
+    let options = BoxOptions {
+        cpus: Some(2.0),
+        memory_mib: Some(1024),
+        rootfs: RootfsSpec::Image("python:3.11-slim".to_string()),
+        volumes: vec![
+            VolumeSpec {
+                read_only: true,
+                ..VolumeSpec::bind_mount("/home/user/code", "/app")
+            },
+        ],
+        advanced: AdvancedBoxOptions {
+            security: SecurityOptions::enabled(),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+
+    // Create and name the box
+    let litebox = runtime.create(options, Some("python-sandbox".to_string())).await?;
+    println!("Created box: {}", litebox.id());
+
+    // Run Python code
+    let cmd = BoxCommand::new("python3")
+        .args(["-c", "import sys; print(f'Python {sys.version}')"])
+        .timeout(Duration::from_secs(30))
+        .working_dir("/app");
+
+    let mut run_handle = litebox.run(cmd).await?;
+
+    // Stream output
+    if let Some(mut stdout) = run_handle.stdout() {
+        while let Some(line) = stdout.next().await {
+            println!("{}", line);
+        }
+    }
+
+    // Check result
+    let result = run_handle.wait().await?;
+    if !result.success() {
+        eprintln!("Command failed with exit code: {}", result.exit_code);
+    }
+
+    // Check metrics
+    let metrics = litebox.metrics().await?;
+    if let Some(boot_ms) = metrics.guest_boot_duration_ms() {
+        println!("Boot time: {}ms", boot_ms);
+    }
+
+    // Cleanup
+    litebox.stop().await?;
+
+    Ok(())
+}
+```
+
+---
+
+## Thread safety
+
+All public types are `Send + Sync`:
+
+- `AcrylMicrovmRuntime` - safely shareable across threads
+- `LiteBox` - safely shareable across threads
+- `Execution` - Clone + shareable
+
+```rust
+use std::sync::Arc;
+use tokio::task;
+
+let runtime = Arc::new(AcrylMicrovmRuntime::with_defaults()?);
+
+let handles: Vec<_> = (0..4).map(|i| {
+    let rt = runtime.clone();
+    task::spawn(async move {
+        let box_opts = BoxOptions::default();
+        let litebox = rt.create(box_opts, None).await?;
+        // Each task has its own box
+        Ok::<_, AcrylMicrovmError>(litebox.id().clone())
+    })
+}).collect();
+
+for handle in handles {
+    let id = handle.await??;
+    println!("Created: {}", id);
+}
+```
+
+---
+
+## See also
+
+- [Getting Started Guide](../../getting-started/README.md)
+- [Concepts](../../concepts/README.md)
+- [Configuration Reference](../configuration.md)
+- [Python SDK Reference](../python/README.md)
+- [Node.js SDK Reference](../nodejs/README.md)

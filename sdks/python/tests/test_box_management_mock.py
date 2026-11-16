@@ -1,0 +1,241 @@
+# Modified by ACRYL, 2026
+"""
+Unit tests for box management API surface (no VM required).
+
+These tests verify that the box management types and methods are properly
+exported and structured without requiring a working libkrun/VM setup.
+Requires the native Rust extension to be compiled (maturin develop).
+"""
+
+from typing import ClassVar
+
+import pytest
+
+import acrylmicrovm
+
+# Native extension types are only available when the Rust extension is compiled.
+# In CI unit-test jobs the extension is not built, so skip gracefully.
+_NATIVE_AVAILABLE = hasattr(acrylmicrovm, "AcrylMicrovm")
+
+pytestmark = pytest.mark.skipif(
+    not _NATIVE_AVAILABLE, reason="native Rust extension not available"
+)
+
+
+class TestExports:
+    """Test that key types are importable from acrylmicrovm."""
+
+    def test_acrylmicrovm_importable(self):
+        from acrylmicrovm import AcrylMicrovm
+
+        assert AcrylMicrovm is not None
+
+    def test_box_importable(self):
+        from acrylmicrovm import Box
+
+        assert Box is not None
+
+    def test_box_info_importable(self):
+        from acrylmicrovm import BoxInfo
+
+        assert BoxInfo is not None
+
+    def test_image_handle_importable(self):
+        from acrylmicrovm import ImageHandle
+
+        assert ImageHandle is not None
+
+    def test_image_info_importable(self):
+        from acrylmicrovm import ImageInfo
+
+        assert ImageInfo is not None
+
+    def test_image_pull_result_importable(self):
+        from acrylmicrovm import ImagePullResult
+
+        assert ImagePullResult is not None
+
+    def test_box_state_info_importable(self):
+        from acrylmicrovm import BoxStateInfo
+
+        assert BoxStateInfo is not None
+
+    def test_network_info_types_importable(self):
+        from acrylmicrovm import NetworkInfo, PublishedPort
+
+        assert NetworkInfo is not None
+        assert PublishedPort is not None
+
+    def test_all_contains_key_types(self):
+        """Key management types are listed in __all__."""
+        assert hasattr(acrylmicrovm, "__all__")
+        for name in (
+            "AcrylMicrovm",
+            "Box",
+            "BoxInfo",
+            "BoxStateInfo",
+            "NetworkInfo",
+            "PublishedPort",
+            "ImageHandle",
+            "ImageInfo",
+            "ImagePullResult",
+        ):
+            assert name in acrylmicrovm.__all__, f"{name} missing from __all__"
+
+
+class TestBoxInfoStructure:
+    """Test BoxInfo has expected attributes and repr."""
+
+    @pytest.fixture()
+    def box_info_cls(self):
+        return acrylmicrovm.BoxInfo
+
+    def test_has_id(self, box_info_cls):
+        assert "id" in dir(box_info_cls)
+
+    def test_has_name(self, box_info_cls):
+        assert "name" in dir(box_info_cls)
+
+    def test_has_state(self, box_info_cls):
+        assert "state" in dir(box_info_cls)
+
+    def test_has_created_at(self, box_info_cls):
+        assert "created_at" in dir(box_info_cls)
+
+    def test_has_started_at(self, box_info_cls):
+        assert "started_at" in dir(box_info_cls)
+
+    def test_has_last_activity_at(self, box_info_cls):
+        assert "last_activity_at" in dir(box_info_cls)
+
+    def test_has_image(self, box_info_cls):
+        assert "image" in dir(box_info_cls)
+
+    def test_has_cpus(self, box_info_cls):
+        assert "cpus" in dir(box_info_cls)
+
+    def test_has_memory_mib(self, box_info_cls):
+        assert "memory_mib" in dir(box_info_cls)
+
+    def test_has_network(self, box_info_cls):
+        assert "network" in dir(box_info_cls)
+
+    def test_has_repr(self, box_info_cls):
+        assert hasattr(box_info_cls, "__repr__")
+
+
+class TestNetworkInfoStructure:
+    """Test that resolved publications use named Python objects."""
+
+    @pytest.mark.parametrize("field", ["mode", "allow_net", "published_ports"])
+    def test_network_info_fields(self, field):
+        assert field in dir(acrylmicrovm.NetworkInfo)
+
+    @pytest.mark.parametrize(
+        "field", ["guest_port", "host_ip", "host_port", "protocol"]
+    )
+    def test_published_port_fields(self, field):
+        assert field in dir(acrylmicrovm.PublishedPort)
+
+
+class TestBoxStateInfoStructure:
+    """Test BoxStateInfo has expected attributes and repr."""
+
+    @pytest.fixture()
+    def state_info_cls(self):
+        return acrylmicrovm.BoxStateInfo
+
+    def test_has_status(self, state_info_cls):
+        assert "status" in dir(state_info_cls)
+
+    def test_has_running(self, state_info_cls):
+        assert "running" in dir(state_info_cls)
+
+    def test_has_pid(self, state_info_cls):
+        assert "pid" in dir(state_info_cls)
+
+    def test_has_repr(self, state_info_cls):
+        assert hasattr(state_info_cls, "__repr__")
+
+
+class TestAcrylMicrovmManagementMethods:
+    """Test that AcrylMicrovm exposes box management methods."""
+
+    @pytest.fixture()
+    def cls(self):
+        return acrylmicrovm.AcrylMicrovm
+
+    @pytest.mark.parametrize(
+        "method",
+        ["list_info", "get_info", "get", "remove", "create", "get_or_create", "images"],
+    )
+    def test_method_exists(self, cls, method):
+        assert hasattr(cls, method), f"AcrylMicrovm missing method: {method}"
+
+    @pytest.mark.asyncio
+    async def test_rest_runtime_refuses_pull_without_a_request(self):
+        # A REST runtime pulls when a box is created, so `pull` answers
+        # without a request: the unreachable URL never comes into it.
+        runtime = acrylmicrovm.AcrylMicrovm.rest(
+            acrylmicrovm.AcrylMicrovmRestOptions(url="http://localhost:1")
+        )
+        # Caught as `RuntimeError` on purpose: handlers written before the
+        # classes existed must still catch it.
+        with pytest.raises(RuntimeError) as caught:
+            await runtime.images.pull("alpine:latest")
+
+        assert type(caught.value).__name__ == "UnsupportedError"
+        assert type(caught.value) is acrylmicrovm.UnsupportedError
+        assert caught.value.code == "unsupported"
+        assert "pulls an image when a box is created" in str(caught.value)
+
+    @pytest.mark.asyncio
+    async def test_removing_a_missing_box_raises_not_found(self, tmp_path):
+        runtime = acrylmicrovm.AcrylMicrovm(acrylmicrovm.Options(home_dir=str(tmp_path)))
+        try:
+            with pytest.raises(RuntimeError) as caught:
+                await runtime.remove("no-such-box")
+
+            assert type(caught.value).__name__ == "NotFoundError"
+            assert type(caught.value) is acrylmicrovm.NotFoundError
+            assert caught.value.code == "not_found"
+            assert str(caught.value) == "not found: no-such-box"
+        finally:
+            await runtime.shutdown()
+
+
+class TestSyncAcrylMicrovmManagementMethods:
+    """Test SyncAcrylMicrovm's sync-capable management methods."""
+
+    @pytest.fixture()
+    def cls(self):
+        sync = getattr(acrylmicrovm, "SyncAcrylMicrovm", None)
+        if sync is None:
+            pytest.skip("SyncAcrylMicrovm not available (greenlet not installed)")
+        return sync
+
+    @pytest.mark.parametrize(
+        "method",
+        ["get", "remove", "create", "get_or_create", "images"],
+    )
+    def test_method_exists(self, cls, method):
+        assert hasattr(cls, method), f"SyncAcrylMicrovm missing method: {method}"
+
+    @pytest.mark.parametrize("method", ["list_info", "get_info"])
+    def test_async_metadata_method_is_absent(self, cls, method):
+        assert not hasattr(cls, method), f"SyncAcrylMicrovm unexpectedly exposes: {method}"
+
+
+class TestModuleMetadata:
+    """Test module-level metadata (always available, even without native ext)."""
+
+    # Override the module-level skip — version is always available.
+    pytestmark: ClassVar = []
+
+    def test_version_exists(self):
+        assert hasattr(acrylmicrovm, "__version__")
+        assert isinstance(acrylmicrovm.__version__, str)
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])

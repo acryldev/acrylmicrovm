@@ -1,0 +1,823 @@
+# Modified by ACRYL, 2026
+# Run hosted-runner tests and collect coverage across the runtime and SDKs.
+#
+# Non-VM integration suites use test-only runtime construction. Native x86_64
+# hypervisor tests separately exercise KVM without booting the ACRYL microVMs runtime.
+#
+# Test coverage:
+# - Rust: units and non-VM integration, with llvm-cov coverage
+# - Python: pytest with -m "not integration"
+# - Node.js: vitest unit project
+# - Go: SDK, networking bridge, runner, image service and Secret Server; API: Jest with Postgres and Redis
+# - Dashboard: vitest with jsdom, v8 coverage
+# - Plugins: Python package tests and real CLI check/dist commands
+# - Nix: the flake dev shell builds the CLI and boots a box (non-blocking)
+name: Test
+
+on:
+  merge_group:
+  schedule:
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'src/acrylmicrovm/**'
+      - 'src/shared/**'
+      - 'src/cli/**'
+      - 'src/guest/**'
+      - 'src/test-utils/**'
+      - 'src/deps/bubblewrap-sys/**'
+      - 'src/deps/e2fsprogs-sys/**'
+      - 'src/deps/libkrun-sys/**'
+      - 'src/deps/libgvproxy-sys/**'
+      - 'src/**/*.rs'
+      - '.cargo/**'
+      - '.config/nextest.toml'
+      - '.gitmodules'
+      - 'scripts/setup/**'
+      - 'scripts/build/**'
+      - 'scripts/*.sh'
+      - 'scripts/ci/**'
+      - 'scripts/test/coverage-bindings.sh'
+      - 'tests/scripts/**'
+      - 'Makefile'
+      - 'make/**'
+      - 'flake.nix'
+      - 'flake.lock'
+      - 'rust-toolchain.toml'
+      - 'sdks/**'
+      - 'apps/secret-server/**'
+      - 'apps/libs/api-client/**'
+      - 'apps/go.work'
+      - 'apps/go.work.sum'
+      - 'apps/package.json'
+      - 'apps/yarn.lock'
+      - 'apps/nx.json'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/test.yml'
+      - '.github/workflows/lint.yml'
+      - '.pre-commit-config.yaml'
+      - '.github/workflows/config.yml'
+      - '.github/actions/**'
+      - '.github/ci-config.json'
+      - 'openapi/**'
+      - 'codecov.yml'
+      - '!**/*.md'
+      - 'plugins/acrylmicrovm/**'
+      - '.agents/plugins/marketplace.json'
+      - 'scripts/plugins/**'
+      - 'tests/plugins/**'
+  # No path filter on pull_request: the `Test (conclusion)` job is a required
+  # status check, so this workflow must run on EVERY PR and report it. A
+  # path-skipped workflow leaves the required check stuck "Pending" → PR blocked.
+  # Per-suite filtering still happens in the `changes` job (jobs skip when
+  # unaffected); the conclusion job reports success-or-skipped.
+  pull_request:
+    branches: [main]
+    # Native stack entry must publish the trunk's required Test conclusion.
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, stacked]
+
+concurrency:
+  group: test-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  # Detect which files changed to conditionally run tests
+  changes:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      platforms: ${{ steps.config.outputs.platforms }}
+      rust-toolchain: ${{ steps.config.outputs.rust-toolchain }}
+      python-test-matrix: ${{ steps.config.outputs.python-test-matrix }}
+      node-test-matrix: ${{ steps.config.outputs.node-test-matrix }}
+      # Keep file selection separate: deferred SDK coverage is not an empty diff.
+      sdk-tests-enabled: ${{ github.event_name != 'pull_request' || !github.event.pull_request.draft }}
+      rust: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.rust == 'true' }}
+      python: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.python == 'true' }}
+      node: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.node == 'true' }}
+      go: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.go == 'true' }}
+      plugins: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.plugins == 'true' }}
+      setup: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.setup == 'true' }}
+      ci-scripts: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.ci-scripts == 'true' }}
+      # The real-kernel boot tests; the weekly run also refreshes main's kernel cache.
+      vmm: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' || steps.filter.outputs.vmm == 'true' }}
+      # Not weekly: flake.lock and rust-toolchain.toml pin every input, so an
+      # unchanged tree only repeats the last build.
+      nix: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.nix == 'true' }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Validate Makefile syntax
+        run: make -n help
+      - uses: ./.github/actions/ci-config
+        id: config
+        with:
+          full-matrix: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4
+        id: filter
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        with:
+          # In a merge queue, diff against the merge-group base/head (no PR base
+          # exists). Empty on pull_request/push, where paths-filter ignores them.
+          base: ${{ github.event_name == 'merge_group' && github.event.merge_group.base_sha || '' }}
+          ref: ${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || '' }}
+          # rust lists every local package its test builds compile
+          # (cargo tree -e normal,build,dev --target all), plus everything else
+          # the jobs read: manifests, toolchain, cargo, nextest, Codecov and CI
+          # config, and the local composite actions they use. rust also matches
+          # the Make recipes it runs, the OpenAPI reference server whose tests it
+          # runs, and src/**/*.rs: a core unit test scans every Rust source
+          # under src/ (no_config_json_in_tracing_sigil_workspace_wide).
+          filters: |
+            rust:
+              - 'src/acrylmicrovm/**/!(*.md)'
+              - 'src/cli/**/!(*.md)'
+              - 'src/shared/**/!(*.md)'
+              - 'src/guest/**/!(*.md)'
+              - 'src/hypervisor/**/!(*.md)'
+              - 'src/vmm/**/!(*.md)'
+              - 'sdks/c/src/**/!(*.md)'
+              - 'sdks/c/build.rs'
+              - 'sdks/python/src/**/!(*.md)'
+              # The rust job also runs the external collector, whose Python
+              # suite drives these bindings through a built extension.
+              - 'sdks/python/acrylmicrovm/**/!(*.md)'
+              - 'sdks/python/tests/**/!(*.md)'
+              - 'sdks/go/**/!(*.md)'
+              - 'scripts/test/coverage-bindings.sh'
+              - 'tests/scripts/**/!(*.md)'
+              - 'sdks/node/src/**/!(*.md)'
+              - 'sdks/node/build.rs'
+              - 'src/test-utils/**/!(*.md)'
+              - 'src/deps/bubblewrap-sys/**/!(*.md)'
+              - 'src/deps/e2fsprogs-sys/**/!(*.md)'
+              - 'src/deps/libkrun-sys/**/!(*.md)'
+              - 'src/**/*.rs'
+              - '.gitmodules'
+              - 'Makefile'
+              - 'make/vars.mk'
+              - 'make/dev.mk'
+              - 'make/test.mk'
+              - 'make/coverage.mk'
+              - 'make/build.mk'
+              - 'scripts/build/build-vmm-boot.sh'
+              - 'openapi/**/!(*.md)'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**/!(*.md)'
+              - '.config/nextest.toml'
+              - 'codecov.yml'
+              - '.github/actions/setup-rust/**/!(*.md)'
+              - '.github/actions/setup-python/**/!(*.md)'
+              - '.github/ci-config.json'
+              - '.github/actions/ci-config/**/!(*.md)'
+              - '.github/workflows/test.yml'
+            # nix matches what `make cli` reads inside the flake dev shell.
+            nix:
+              - 'flake.nix'
+              - 'flake.lock'
+              - 'src/deps/**/!(*.md)'
+              - '.gitmodules'
+              - 'Makefile'
+              - 'make/vars.mk'
+              - 'make/build.mk'
+              - 'scripts/*.sh'
+              - 'scripts/build/**'
+              - 'scripts/setup/**'
+              - '**/build.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**/!(*.md)'
+              - '.github/actions/sccache/**/!(*.md)'
+              - '.github/workflows/test.yml'
+            # vmm selects the kernel build and the real-kernel boot tests inside
+            # the rust job, so rust must match every path listed here.
+            vmm:
+              - 'src/vmm/**/!(*.md)'
+              - 'src/hypervisor/**/!(*.md)'
+              - 'scripts/build/build-vmm-boot.sh'
+              - 'Makefile'
+              - 'make/vars.mk'
+              - 'make/build.mk'
+              - 'make/test.mk'
+              - 'make/coverage.mk'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/**/!(*.md)'
+              - '.config/nextest.toml'
+              - '.github/workflows/test.yml'
+            python:
+              - 'sdks/python/**/!(*.md)'
+              - 'Makefile'
+              - 'make/vars.mk'
+              - 'make/dev.mk'
+              - 'make/test.mk'
+              - 'make/coverage.mk'
+              - 'codecov.yml'
+              - '.github/actions/setup-python/**/!(*.md)'
+              - '.github/ci-config.json'
+              - '.github/actions/ci-config/**/!(*.md)'
+              - '.github/workflows/test.yml'
+            node:
+              - 'sdks/node/**/!(*.md)'
+              - 'Makefile'
+              - 'make/vars.mk'
+              - 'make/dev.mk'
+              - 'make/test.mk'
+              - 'make/coverage.mk'
+              - 'codecov.yml'
+              - '.github/ci-config.json'
+              - '.github/actions/ci-config/**/!(*.md)'
+              - '.github/workflows/test.yml'
+            go:
+              - 'sdks/go/**/!(*.md)'
+              - 'src/deps/libgvproxy-sys/**/!(*.md)'
+              - 'apps/secret-server/**/!(*.md)'
+              - 'apps/go.work'
+              - 'apps/go.work.sum'
+              - 'Makefile'
+              - 'make/vars.mk'
+              - 'make/build.mk'
+              - 'make/setup.mk'
+              - 'make/dev.mk'
+              - 'make/test.mk'
+              - 'make/coverage.mk'
+              - 'make/quality.mk'
+              - '.pre-commit-config.yaml'
+              - 'codecov.yml'
+              - '.github/actions/setup-go/**/!(*.md)'
+              - '.github/actions/setup-rust/**/!(*.md)'
+              - '.github/actions/sccache/**/!(*.md)'
+              - '.github/ci-config.json'
+              - '.github/actions/ci-config/**/!(*.md)'
+              - '.github/workflows/test.yml'
+              - '.github/workflows/lint.yml'
+            plugins:
+              - '.agents/plugins/marketplace.json'
+              - 'plugins/acrylmicrovm/**'
+              - 'scripts/plugins/**'
+              - 'tests/plugins/**'
+              - 'Makefile'
+              - 'make/plugins.mk'
+              - 'codecov.yml'
+              - '.github/actions/setup-python/**/!(*.md)'
+              - '.github/workflows/test.yml'
+            setup:
+              - '.gitmodules'
+              - 'scripts/setup/setup-submodules.sh'
+              - 'scripts/test/test-setup-submodules.sh'
+              - 'make/setup.mk'
+              - 'make/test.mk'
+              - '.github/workflows/test.yml'
+            ci-scripts:
+              - '.github/**/!(*.md)'
+              - 'Makefile'
+              - 'make/test.mk'
+              - 'make/coverage.mk'
+              - 'make/changes.mk'
+              # tests/scripts and the scripts it drives.
+              - 'tests/scripts/**'
+              - 'scripts/ci/**/!(*.md)'
+              - 'scripts/test/coverage-bindings.sh'
+              - 'codecov.yml'
+
+  ci-scripts:
+    name: CI script checks
+    needs: changes
+    if: ${{ needs.changes.outputs.ci-scripts == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test CI and coverage scripts against fake tools
+        run: make test:unit:scripts
+
+  # Merge core, shared, REST, CLI, native VMM and Linux guest coverage.
+  # Codecov gates changed lines at 90% and reports total coverage separately.
+  rust:
+    name: Rust Tests (${{ matrix.platform.target }})
+    needs: changes
+    if: ${{ needs.changes.outputs.sdk-tests-enabled == 'true' && needs.changes.outputs.rust == 'true' }}
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(needs.changes.outputs.platforms) }}
+
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ needs.changes.outputs.rust-toolchain }}
+
+      - uses: ./.github/actions/setup-python
+        # PyO3 unit tests embed an interpreter instead of building a wheel.
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y jq libseccomp-dev protobuf-compiler util-linux
+
+      # SSH guest tests need user/mount namespaces; Ubuntu's AppArmor blocks
+      # them by default. This setting lasts only for the disposable runner.
+      - name: Enable unprivileged user namespaces (Linux)
+        if: runner.os == 'Linux'
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Install system dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Check out vendored libkrun
+        # net::socket_path's vendor-pin unit test reads the libkrun source.
+        # The libkrun build itself stays stubbed below.
+        run: git submodule update --init --depth 1 -- src/deps/libkrun-sys/vendor/libkrun
+
+      - name: Run Rust unit tests with coverage
+        # The core crate's dev-dependency acrylmicrovm-test-utils re-enables its
+        # default features, which pull in the -sys crates; those build from
+        # vendored submodules this job does not check out.
+        env:
+          ACRYLMICROVM_DEPS_STUB: "1"
+        run: make coverage:lcov NEXTEST_PROFILE=ci
+
+      # The real-kernel boot tests need the pinned vmlinux; rebuild it only
+      # when its pins or build script change.
+      - name: Restore the VMM boot kernel
+        id: vmm-kernel
+        if: matrix.platform.target == 'linux-x64-gnu' && needs.changes.outputs.vmm == 'true'
+        uses: actions/cache@v4
+        with:
+          path: target/vmm/boot/x86_64
+          key: vmm-kernel-${{ hashFiles('src/vmm/boot/kernel.lock', 'src/vmm/boot/kernel.config', 'scripts/build/build-vmm-boot.sh') }}
+
+      - name: Build the VMM boot kernel
+        if: matrix.platform.target == 'linux-x64-gnu' && needs.changes.outputs.vmm == 'true' && steps.vmm-kernel.outputs.cache-hit != 'true'
+        timeout-minutes: 20
+        run: |
+          sudo apt-get install -y build-essential bc bison flex curl xz-utils libelf-dev \
+            gcc-x86-64-linux-gnu binutils-x86-64-linux-gnu
+          make vmm:boot:host
+
+      - name: Enable KVM access for native hypervisor tests
+        if: matrix.platform.target == 'linux-x64-gnu'
+        run: sudo chmod a+rw /dev/kvm
+
+      - name: Run KVM hardware tests with coverage
+        if: matrix.platform.target == 'linux-x64-gnu'
+        timeout-minutes: 5
+        run: make coverage:vmm:kvm
+
+      - name: Prepare guest mount test toolchain
+        if: matrix.platform.target == 'linux-x64-gnu' && needs.changes.outputs.vmm == 'true'
+        run: |
+          sudo apt-get install -y musl-tools gperf
+          rustup target add x86_64-unknown-linux-musl
+
+      - name: Run real-kernel boot tests with coverage
+        if: matrix.platform.target == 'linux-x64-gnu' && needs.changes.outputs.vmm == 'true'
+        timeout-minutes: 5
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: x86_64-linux-musl-gcc
+          CC_x86_64_unknown_linux_musl: x86_64-linux-musl-gcc
+        run: make coverage:vmm:boot
+
+      - uses: actions/setup-node@v4
+        if: matrix.platform.target == 'linux-x64-gnu'
+        with:
+          node-version: '22'
+
+      - uses: ./.github/actions/setup-go
+        if: matrix.platform.target == 'linux-x64-gnu'
+
+      - name: Measure native bindings through SDK callers
+        if: matrix.platform.target == 'linux-x64-gnu'
+        env:
+          ACRYLMICROVM_DEPS_STUB: '1'
+        run: make coverage:bindings:external
+
+      - name: Run OpenAPI reference-server unit tests
+        # Keyed on AcrylMicrovmError's Display text (src/shared/src/errors.rs, in this
+        # filter), so a new variant must add its row there before the reference
+        # server can name the class. stdlib only — no extra setup.
+        run: make test:unit:openapi
+
+      - name: Run guest mount tests
+        if: runner.os == 'Linux'
+        run: make test:guest-perms
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: target/coverage/lcov.info
+          flags: rust-unit
+          use_oidc: true
+          disable_search: true
+          fail_ci_if_error: true
+
+      - name: Upload external native binding coverage
+        if: matrix.platform.target == 'linux-x64-gnu'
+        uses: codecov/codecov-action@v5
+        with:
+          files: target/coverage/native-sdk/lcov.info,target/coverage/native-sdk/go-lcov.info,target/coverage/python/coverage.xml,target/coverage/go-checkpoint-native.out
+          flags: rust-unit
+          use_oidc: true
+          disable_search: true
+          fail_ci_if_error: true
+
+  # Python SDK unit tests
+  python:
+    name: Python Tests (${{ matrix.platform.target }} / Python ${{ matrix.python-version }})
+    needs: changes
+    if: ${{ needs.changes.outputs.sdk-tests-enabled == 'true' && needs.changes.outputs.python == 'true' }}
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.changes.outputs.python-test-matrix) }}
+
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup-python
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run Python unit tests with coverage
+        run: make coverage:python
+
+      - name: Upload Python coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: target/coverage/python/coverage.xml
+          flags: python
+          use_oidc: true
+          disable_search: true
+          fail_ci_if_error: true
+
+  # Node.js SDK unit tests
+  node:
+    name: Node.js Tests (${{ matrix.platform.target }} / Node ${{ matrix.node-version }})
+    needs: changes
+    if: ${{ needs.changes.outputs.sdk-tests-enabled == 'true' && needs.changes.outputs.node == 'true' }}
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.changes.outputs.node-test-matrix) }}
+
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: npm
+          cache-dependency-path: sdks/node/package-lock.json
+
+      # `npm ci` installs the committed tree verbatim. `npm install` would
+      # re-resolve per leg — npm picks manifests by `engines`, so Node 22 lands
+      # on vite 8 while Node 18 lands on vite 6, and npm 10.x's arborist
+      # crashes walking the Node 22 peer set. One committed tree removes both.
+      # The lockfile is resolved under Node 18, the floor of the SDK's
+      # supported range, which keeps vite on 6 — a tree all three legs run.
+      # Regenerating under Node 22 pins vite 8, whose rolldown dependency
+      # imports `styleText` from `node:util`, and the Node 18 leg then dies
+      # at vitest startup. vitest 4 itself excludes Node 18 in its `engines`,
+      # so that leg warns EBADENGINE either way; the suite passes there.
+      - name: Install dependencies
+        working-directory: sdks/node
+        run: npm ci
+
+      - name: Run Node.js unit tests
+        if: matrix.node-version == '18'
+        working-directory: sdks/node
+        run: npm run test
+
+      - name: Run Node.js unit tests with coverage
+        if: matrix.node-version != '18'
+        run: make coverage:node
+
+      - name: Upload Node.js coverage to Codecov
+        if: matrix.node-version != '18'
+        uses: codecov/codecov-action@v5
+        with:
+          files: target/coverage/node/lcov.info
+          flags: node
+          use_oidc: true
+          disable_search: true
+          fail_ci_if_error: true
+
+  # Go SDK unit tests
+  go:
+    name: Go Tests (${{ matrix.platform.target }})
+    needs: changes
+    if: ${{ needs.changes.outputs.sdk-tests-enabled == 'true' && needs.changes.outputs.go == 'true' }}
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: ${{ fromJson(needs.changes.outputs.platforms) }}
+
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - uses: ./.github/actions/setup-go
+
+      - name: Check out native dependency workspaces
+        # Cargo's cache action reads the nested workspace metadata during setup.
+        run: make setup:submodules
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ needs.changes.outputs.rust-toolchain }}
+          cache-workspaces: |
+            . -> target
+            src/deps/libkrun-sys/vendor/libkrun -> target
+          cache-workspace-crates: 'true'
+
+      - name: Install build dependencies
+        run: make setup:build
+
+      - uses: ./.github/actions/sccache
+
+      - name: Run Go SDK, networking and app tests with coverage
+        run: make coverage:go
+
+      - name: Qualify nested runtime metadata with KVM coverage
+        id: nested-runtime-coverage
+        if: matrix.platform.target == 'linux-x64-gnu'
+        timeout-minutes: 5
+        env:
+          ACRYLMICROVM_REQUIRE_NESTED_RUNTIME_TESTS: '1'
+        run: |
+          mkdir -p target/coverage/full-go
+          for module in go-sdk gvproxy runner image-service; do
+            cp "target/coverage/$module.out" "target/coverage/full-go/$module.out"
+          done
+          sudo chmod a+rw /dev/kvm
+          make _ensure-kvm
+          make coverage:go GOTEST_FILTER='-count=1 -run NestedVirtualization'
+          # Both passes instrument this checkout with the same atomic mode.
+          # Keep the complete suite's blocks as well as the hardware pass.
+          for module in go-sdk gvproxy runner image-service; do
+            report="target/coverage/$module.out"
+            full="target/coverage/full-go/$module.out"
+            if [[ "$(head -n 1 "$report")" != 'mode: atomic' || "$(head -n 1 "$full")" != 'mode: atomic' ]]; then
+              echo "Expected atomic coverage profiles for $module" >&2
+              exit 1
+            fi
+            tail -n +2 "$full" >> "$report"
+          done
+
+      # coverage:go has already built the native library needed by both analyzers.
+      - name: Run Go vet
+        if: matrix.platform.target == 'linux-x64-gnu'
+        run: make lint:go
+
+      - name: golangci-lint
+        if: matrix.platform.target == 'linux-x64-gnu'
+        uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84 # v6
+        with:
+          working-directory: sdks/go
+          args: --timeout=5m --build-tags acrylmicrovm_dev
+
+      - name: Upload Go coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: target/coverage/go-sdk.out,target/coverage/gvproxy.out,target/coverage/runner.out,target/coverage/image-service.out,target/coverage/secret-server.out
+          flags: go
+          use_oidc: true
+          disable_search: true
+          fail_ci_if_error: true
+
+  guest_artifacts:
+    name: Guest Artifacts (${{ matrix.os }} / ${{ matrix.target }} / ${{ matrix.profile }})
+    needs: changes
+    # Qualify all five builds periodically without repeating them on routine CI runs.
+    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            profile: release
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            profile: debug
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            profile: release
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            profile: debug
+          - os: macos-15
+            target: aarch64-unknown-linux-musl
+            profile: release
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code and submodules
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-rust
+        with:
+          toolchain: ${{ needs.changes.outputs.rust-toolchain }}
+
+      - name: Set up build dependencies
+        run: make setup:build
+
+      - name: Build and qualify guest artifacts
+        run: make test:guest-artifacts GUEST_TARGET=${{ matrix.target }} PROFILE=${{ matrix.profile }}
+
+  setup:
+    name: Submodule setup tests
+    needs: changes
+    if: ${{ needs.changes.outputs.setup == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: "read"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Test worktree submodule setup
+        run: make test:setup:submodules
+
+  # The flake dev shell (docs/contributing/development/building.md) breaks when
+  # the flake, Make recipes, -sys crates or the toolchain change. Ubuntu still
+  # has /usr/lib, so a NixOS-only path regression passes here. Not yet in
+  # `Test (conclusion)`: it reports on the PR without blocking merges until it
+  # has proven stable.
+  nix:
+    name: Nix flake build
+    needs: changes
+    if: needs.changes.outputs.nix == 'true'
+    runs-on: ubuntu-latest
+    # A cold build took 27 minutes on 12 local cores; the runner has 4.
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+
+      # No /nix/store cache: it comes from the cache.nixos.org CDN, and
+      # restoring 3 GB from the Actions cache would save little.
+      - uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+
+      - uses: ./.github/actions/sccache
+
+      - name: Check the flake
+        run: nix flake check
+
+      # Drop the runner's environment so preinstalled compilers cannot mask a
+      # tool missing from flake.nix. The flake puts $CARGO_HOME/bin first on
+      # PATH, where the runner preinstalls rustup, so both Rust homes start
+      # empty. sccache goes in by absolute path; when its setup failed the
+      # wrapper is unset and the build runs uncached.
+      - name: Build the CLI in the dev shell
+        run: |
+          export CARGO_HOME="$RUNNER_TEMP/cargo" RUSTUP_HOME="$RUNNER_TEMP/rustup"
+          if [ -n "${RUSTC_WRAPPER:-}" ]; then
+            RUSTC_WRAPPER="$(command -v "$RUSTC_WRAPPER")"
+            export RUSTC_WRAPPER
+          fi
+          nix develop --ignore-environment --keep HOME --keep USER \
+            --keep CARGO_HOME --keep RUSTUP_HOME --keep RUSTC_WRAPPER \
+            --keep CARGO_INCREMENTAL --keep SCCACHE_IGNORE_SERVER_IO_ERROR \
+            -c make cli
+
+      # The jailer runs bwrap, which Ubuntu 24.04's AppArmor blocks without the
+      # bwrap profile (docs/guides/troubleshooting.md); the runner is discarded.
+      - name: Enable KVM and unprivileged user namespaces
+        run: |
+          sudo chmod a+rw /dev/kvm
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Boot a box
+        timeout-minutes: 10
+        run: ./target/debug/acrylmicrovm run --rm alpine:latest echo ok
+
+  plugins:
+    name: Plugin package coverage
+    needs: changes
+    if: ${{ needs.changes.outputs.plugins == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - uses: ./.github/actions/setup-python
+      - name: Install coverage collector
+        run: python3 -m pip install coverage==7.13.5
+      - name: Measure plugin package tests and CLI commands
+        run: make plugin:acrylmicrovm:coverage
+      - name: Save plugin coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-coverage
+          path: target/coverage/plugins/coverage.xml
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload plugin coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: target/coverage/plugins/coverage.xml
+          flags: plugins
+          use_oidc: true
+          disable_search: true
+          fail_ci_if_error: true
+
+  # A skipped test job cannot publish Codecov's separately required status.
+  # Validate the PR's changed files with Codecov instead of forcing a pass.
+  coverage-empty:
+    name: Codecov (no coverage changes)
+    needs: changes
+    if: >-
+      ${{ (github.event_name == 'pull_request' || github.event_name == 'merge_group') &&
+          needs.changes.result == 'success' &&
+          needs.changes.outputs.rust == 'false' &&
+          needs.changes.outputs.python == 'false' &&
+          needs.changes.outputs.node == 'false' &&
+          needs.changes.outputs.go == 'false' &&
+          needs.changes.outputs.plugins == 'false' &&
+          needs.changes.outputs.ci-scripts == 'false' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+      - name: Report coverage is unnecessary for this change
+        uses: codecov/codecov-action@v5
+        with:
+          run_command: empty-upload
+          use_oidc: true
+          fail_ci_if_error: true
+
+  # Single required status check for branch protection / merge queue.
+  # Passes only if every job above succeeded or was skipped (path- or event-filtered).
+  # `if: !cancelled()` is required: without it a failed dependency would skip
+  # this job, and GitHub treats a skipped required check as success.
+  # NOTE: keep `needs` in sync with the jobs above when adding/removing jobs.
+  test-conclusion:
+    name: Test (conclusion)
+    needs: [changes, ci-scripts, rust, python, node, go, setup, plugins, guest_artifacts, coverage-empty]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: All test jobs passed or were skipped
+        run: |
+          jq -C <<< '${{ toJSON(needs) }}'
+          jq --exit-status 'all(.result == "success" or .result == "skipped")' <<< '${{ toJSON(needs) }}'

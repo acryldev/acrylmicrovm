@@ -1,0 +1,12 @@
+// Modified by ACRYL, 2026
+//! Defaults for CLI authentication and the local REST server listener.
+
+/// Port `acrylmicrovm serve` binds when `--port` is not given.
+pub const LOCAL_SERVE_PORT: u16 = 8100;
+
+/// Address `acrylmicrovm serve` binds when `--host` is not given. Loopback only:
+/// the server grants full box control to any caller when no API key is set.
+pub const LOCAL_SERVE_HOST: &str = "127.0.0.1";
+
+/// REST API URL authentication commands use when no server is configured.
+pub const DEFAULT_REST_URL: &str = "https://api.webboxes.ai";

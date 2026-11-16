@@ -1,0 +1,409 @@
+# Error codes and handling
+
+## Error types
+
+ACRYL microVMs uses a centralized error enum with specific variants for different error categories.
+
+### `UnsupportedEngine`
+
+Platform or hypervisor not supported.
+
+**Cause:**
+- Running on Windows
+- Running on Intel Mac
+- KVM not available on Linux
+- Hypervisor.framework not available on macOS
+
+**Example:**
+```text
+Error: unsupported engine kind
+```
+
+**Solution:**
+- Use supported platform (macOS ARM64, Linux x86_64/ARM64)
+- Verify hypervisor availability:
+  - Linux: `grep -E 'vmx|svm' /proc/cpuinfo`
+  - macOS: Ensure macOS 12+ on Apple Silicon
+
+### `Engine(String)`
+
+Hypervisor or VM engine error.
+
+**Cause:**
+- KVM module not loaded
+- Insufficient permissions for `/dev/kvm`
+- Hypervisor.framework error
+- VM creation failed
+
+**Example:**
+```text
+Error: engine reported an error: KVM is not available
+```
+
+**Solution:**
+```bash
+# Linux: Load KVM module
+sudo modprobe kvm kvm_intel  # or kvm_amd
+
+# Linux: Check /dev/kvm permissions
+ls -l /dev/kvm
+
+# Linux: Add user to kvm group
+sudo usermod -aG kvm $USER
+# (logout and login required)
+```
+
+### `Config(String)`
+
+Invalid box configuration.
+
+**Cause:**
+- Invalid memory size (< 128 or > 65536)
+- Invalid paths in volumes
+- Invalid port numbers
+
+**Solution:**
+- Verify configuration parameters are within valid ranges
+- Check file paths exist for volume mounts
+- Ensure port numbers are valid (1-65535)
+
+### `Storage(String)`
+
+Filesystem or disk operation error.
+
+**Cause:**
+- Disk full (`~/.acryl/microvm` partition)
+- Permission denied writing to `~/.acryl/microvm`
+- Disk image creation failed
+- QCOW2 operation failed
+- A registry answered an image pull with an error. The message names the
+  registry's OCI error code when it sent one: `MANIFEST_UNKNOWN` or
+  `NAME_UNKNOWN` when it does not have the image, `DENIED` or `UNAUTHORIZED`
+  when it will not serve it, as in
+  `failed to pull manifest [MANIFEST_UNKNOWN]: ...`
+
+**Example:**
+```text
+Error: storage error: No space left on device
+```
+
+**Solution:**
+```bash
+# Check disk space
+df -h ~/.acryl/microvm
+
+# Check permissions
+ls -ld ~/.acryl/microvm
+chmod 755 ~/.acryl/microvm
+
+# Clean up old boxes
+acrylmicrovm rm <box>
+```
+
+### `Image(String)`
+
+OCI image pull or extraction error.
+
+**Cause:**
+- Network connectivity issues
+- Invalid image name or tag
+- Registry authentication required
+- Image not found in registry
+- Corrupted image layers
+
+**Example:**
+```text
+Error: images error: failed to pull image: 404 Not Found
+```
+
+**Solution:**
+```bash
+# Verify image exists
+docker pull <image>
+
+# Check network connectivity
+ping registry-1.docker.io
+
+# Authenticate for private images
+docker login
+
+# Clear the image cache if corrupted. Box disks are backed by files
+# in it, so remove existing boxes first (acrylmicrovm rm).
+rm -rf ~/.acryl/microvm/images/*
+```
+
+### `Portal(String)`
+
+Host-guest communication error (gRPC over vsock).
+
+**Cause:**
+- Guest agent not responding
+- vsock connection failed
+- gRPC timeout
+- Guest initialization failed
+
+**Example:**
+```text
+Error: portal error: connection timeout
+```
+
+**Solution:**
+- Enable debug logging: `RUST_LOG=debug`
+- Check if box is running: `box.info().await?.status`
+- Restart box: `box.stop()` and recreate
+- Report issue with logs if persists
+
+### `Network(String)`
+
+Network configuration or connectivity error.
+
+**Cause:**
+- gvproxy not running or crashed
+- Port already in use
+- Network backend initialization failed
+
+**Example:**
+```text
+Error: network error: bind: address already in use
+```
+
+**Solution:**
+```bash
+# Check port availability
+lsof -i :8080
+
+# Stop conflicting process or use different port
+ports=[(8081, 80, "tcp")]
+
+# gvproxy runs inside each box's shim process; verify the shim is running
+ps aux | grep acrylmicrovm-shim
+```
+
+### `Execution(String)`
+
+Command execution error.
+
+**Cause:**
+- Command crashed or killed
+- Execution timeout
+- Streaming I/O error
+
+For `exec`, a missing or non-executable command is *not* an `Execution` error:
+the guest reports a finished execution, so `wait()` returns `exit_code == 127`
+(not found) or `126` (found, not executable). The diagnostic arrives on stderr
+without a TTY, or on merged stdout with a TTY. Rejection of the box's init
+command during `start()` remains an `InvalidArgument` error; `acrylmicrovm run`
+prints an error and exits `1`.
+
+`exec` reports a startup refusal with the special codes `126` (the command
+exists but is not executable) and `127` (the command was not found). Every
+other exit code keeps its usual meaning; other startup failures, including an
+unusable working directory, remain errors. See the
+[CLI exit-code table](cli/README.md#exit-codes).
+
+**Maintenance contract:** The guest classifier recognizes youki's init-error
+marker and the fixed verdict suffix: `not found in $PATH` maps to `127`, and
+`does not have correct permissions` maps to `126`. Match the suffix, never
+substrings in the command name or path; those may contain either verdict.
+The guest executor (`ACRYLMICROVM_EXECUTOR=guest`) classifies `Command::spawn`
+directly: `NotFound` is `127` and `PermissionDenied` is `126`, with the same
+wording. A configured working directory is judged first, so its failures
+remain errors. Other startup failures remain errors.
+
+**Example:**
+```text
+Error: Execution error: execution timed out after 30s
+```
+
+**Solution:**
+- Check exit code and stderr:
+  ```python
+  result = await box.exec("command")
+  if result.exit_code != 0:
+      print(f"Failed: {result.stderr}")
+  ```
+- Treat `127` as "probe another tool" rather than a platform fault:
+  ```python
+  result = await box.exec("python3", "--version")
+  if result.exit_code == 127:
+      result = await box.exec("python", "--version")
+  ```
+
+### `Internal(String)`
+
+Internal ACRYL microVMs error.
+
+**Cause:**
+- Unexpected internal state
+- I/O error
+- JSON parsing error
+- Unhandled edge case
+
+**Example:**
+```text
+Error: internal error: unexpected state transition
+```
+
+**Solution:**
+- Enable debug logging: `RUST_LOG=debug python script.py`
+- Report issue with full logs to GitHub
+- Include ACRYL microVMs version, platform, and reproduction steps
+
+### `NotFound(String)`
+
+The named box, image, volume or snapshot does not exist.
+
+**Cause:**
+- Box ID doesn't exist, or the box was removed
+- Image name not held: not in the local cache, or not in the server's catalog
+- Volume or snapshot name doesn't exist
+
+**Example:**
+```text
+Error: not found: 01JJNH8...
+```
+
+**Solution:**
+- List what the runtime holds: `await runtime.list_info()` for boxes, `await runtime.images.list()` for images
+- Verify the ID or name is correct
+- Create the box, volume or snapshot, or use the image again, if needed
+
+### `AlreadyExists(String)`
+
+Box or resource already exists.
+
+**Cause:**
+- Duplicate box creation attempt
+- Port already forwarded
+
+**Example:**
+```text
+Error: already exists: box with this ID exists
+```
+
+**Solution:**
+- Use existing box: `await runtime.get(box_id)`
+- Remove existing box: `await runtime.remove(box_id)`
+- Use different configuration (e.g., different port)
+
+### `InvalidState(String)`
+
+Box is in wrong state for requested operation.
+
+**Cause:**
+- Executing command on stopped box
+- Stopping already stopped box
+- Restarting box that never started
+
+**Example:**
+```text
+Error: invalid state: cannot execute on stopped box
+```
+
+**Solution:**
+- Check box status: `info = await box.info(); print(info.state.status)`
+- Restart box if stopped: `await runtime.get(box_id)` (may auto-restart)
+- Create new box if needed
+
+### `InvalidArgument(String)`
+
+CPU allocations outside the supported range or precision return this error.
+For example, `cpus=0` returns `invalid argument: cpus must be finite and between 0.125 and 255`.
+The bundled guest kernel additionally limits new boxes to 16 vCPUs; see [CPU configuration](../guides/resource-limits.md#cpu-configuration).
+
+The request itself is wrong; retrying it unchanged fails the same way. Over REST it is HTTP 400.
+
+**Cause:**
+- The box's main command (its `entrypoint`, else its `cmd`) is missing from the image or is not executable. `start()` reports this.
+- An unknown Linux capability in the box's advanced options
+- Box options that conflict, such as `detach=true` with remove-on-stop, or `ports` with networking disabled
+
+**Example:**
+```text
+Error: invalid argument: executable 'httpd' not found in $PATH
+```
+
+**Solution:**
+- Read the message: it names the input to fix.
+- For a missing command, check which binaries the image ships, for example from a box with a shell: `await box.exec("which", "httpd")`. The name is looked up in the image's `PATH`, so use an absolute path for anything outside it.
+
+## Error handling patterns
+
+### Python
+
+```python
+import acrylmicrovm
+
+async def safe_execution():
+    try:
+        async with acrylmicrovm.SimpleBox(image="python:slim") as box:
+            result = await box.exec("python", "script.py")
+
+            # Check exit code
+            if result.exit_code != 0:
+                print(f"Command failed: {result.stderr}")
+                return
+
+    except acrylmicrovm.NotFoundError:
+        # One class per error type above, each with a `code` (`not_found`
+        # here); see the Python reference's "Runtime failures" table.
+        print("No such box or image")
+    except acrylmicrovm.AcrylMicrovmError as e:
+        print(f"Error [{getattr(e, 'code', '-')}]: {e}")
+
+        # Enable debug logging for details
+        # RUST_LOG=debug python script.py
+```
+
+### Node.js
+
+```typescript
+import { errorCode } from 'acrylmicrovm';
+
+try {
+  await runtime.remove('no-such-box');
+} catch (err) {
+  // The same codes as Python's `code`; see the Node.js reference's
+  // `errorCode(err)` section.
+  if (errorCode(err) === 'not_found') {
+    console.log('No such box');
+  } else {
+    throw err;
+  }
+}
+```
+
+### Rust
+
+```rust
+use acrylmicrovm::{BoxOptions, AcrylMicrovmError, AcrylMicrovmResult, AcrylMicrovmRuntime, RootfsSpec};
+
+#[tokio::main]
+async fn main() -> AcrylMicrovmResult<()> {
+    let runtime = AcrylMicrovmRuntime::default_runtime();
+    let options = BoxOptions {
+        rootfs: RootfsSpec::Image("alpine:latest".into()),
+        ..Default::default()
+    };
+
+    match runtime.create(options, None).await {
+        Ok(_litebox) => {
+            // Success
+        }
+        Err(AcrylMicrovmError::UnsupportedEngine) => {
+            eprintln!("Platform not supported");
+            return Err(AcrylMicrovmError::UnsupportedEngine);
+        }
+        Err(AcrylMicrovmError::Image(msg)) => {
+            eprintln!("Image error: {}", msg);
+            // Handle image-specific error
+        }
+        Err(e) => {
+            eprintln!("Unexpected error: {}", e);
+            return Err(e);
+        }
+    }
+
+    Ok(())
+}
+```

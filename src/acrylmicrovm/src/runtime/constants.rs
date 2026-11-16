@@ -1,0 +1,82 @@
+// Modified by ACRYL, 2026
+//! Constants for ACRYL microVMs runtime
+//!
+//! Centralized location for all hardcoded values, paths, and configuration.
+//! Host controls all paths - guest receives these via GuestInitRequest.
+
+// Re-export shared constants from acrylmicrovm-core
+pub use acrylmicrovm_shared::constants::{container, mount_tags, network};
+
+/// Guest mount points (paths inside the guest).
+///
+/// Note: Host only knows BIN_DIR (for guest entrypoint).
+/// All other guest paths are determined by the guest based on tags.
+pub mod guest_paths {
+    /// Guest binary directory (for guest entrypoint executable)
+    pub const BIN_DIR: &str = acrylmicrovm_shared::layout::BIN_DIR;
+}
+
+pub mod envs {
+    pub const ACRYLMICROVM_HOME: &str = "ACRYLMICROVM_HOME";
+
+    /// REST API base URL (required for REST mode).
+    #[cfg(feature = "rest")]
+    pub const ACRYLMICROVM_REST_URL: &str = "ACRYLMICROVM_REST_URL";
+
+    /// Opaque API key, sent directly as `Authorization: Bearer <key>`. Flat
+    /// name (not `ACRYLMICROVM_REST_API_KEY`) matches industry convention —
+    /// `STRIPE_API_KEY`, `HEROKU_API_KEY`, `GH_TOKEN`.
+    #[cfg(feature = "rest")]
+    pub const ACRYLMICROVM_API_KEY: &str = "ACRYLMICROVM_API_KEY";
+
+    /// Value substituted into the `{prefix}` URL segment on
+    /// box-scoped routes (`/v1/{prefix}/boxes/...`). Opaque
+    /// to the client — deployment decides what it means. When
+    /// unset / empty the client builds URLs without the segment
+    /// (`/v1/boxes/...`) — the canonical single-tenant shape
+    /// used by `acrylmicrovm serve` and similar single-scope deployments.
+    #[cfg(feature = "rest")]
+    pub const ACRYLMICROVM_REST_PATH_PREFIX: &str = "ACRYLMICROVM_REST_PATH_PREFIX";
+}
+
+/// Container images used by the runtime
+pub mod images {
+    /// Default container image when none is specified
+    pub const DEFAULT: &str = "alpine:latest";
+
+    /// Base image for VM init rootfs (must include mkfs.ext4 for disk formatting)
+    pub const INIT_ROOTFS: &str = "debian:bookworm-slim";
+}
+
+/// Filesystem and mount options
+pub mod fs_options {
+    /// Default tmpfs size for writable layer (in MB)
+    pub const TMPFS_SIZE_MB: usize = 1024;
+
+    /// Overlayfs mount options
+    pub const OVERLAYFS_OPTIONS: &[&str] =
+        &["metacopy=off", "redirect_dir=off", "index=off", "xino=off"];
+}
+
+/// Virtual machine resource defaults
+pub mod vm_defaults {
+    /// Default number of CPUs allocated to a Box
+    pub const DEFAULT_CPUS: u8 = 1;
+
+    /// Most vCPUs the bundled guest kernel brings online: libkrunfw is built
+    /// with `CONFIG_NR_CPUS=16`. libkrun still creates any extra vCPUs, but the
+    /// guest ignores them. Raise together with the kernel config.
+    pub const MAX_CPUS: u8 = 16;
+
+    /// Default memory in MiB allocated to a Box
+    pub const DEFAULT_MEMORY_MIB: u32 = 1024;
+
+    /// Default disk size in GB for the container rootfs (sparse, grows as needed)
+    pub const DEFAULT_DISK_SIZE_GB: u64 = 10;
+}
+
+/// File naming patterns
+pub mod filenames {
+    /// Lock file name
+    pub const LOCK_FILE: &str = ".lock";
+}

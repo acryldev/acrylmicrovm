@@ -1,0 +1,284 @@
+// Modified by ACRYL, 2026
+use std::sync::Arc;
+
+use acrylmicrovm::{BoxArchive, BoxOptions, AcrylMicrovmOptions, AcrylMicrovmRuntime};
+use pyo3::prelude::*;
+
+use crate::box_handle::PyBox;
+use crate::domains::PyDomainHandle;
+use crate::images::PyImageHandle;
+use crate::info::PyBoxInfo;
+use crate::metrics::PyRuntimeMetrics;
+use crate::options::{PyBoxOptions, PyAcrylMicrovmRestOptions, PyOptions};
+use crate::util::map_err;
+use crate::volumes::PyVolumeHandle;
+
+#[pyclass(name = "ACRYL microVMs")]
+pub(crate) struct PyAcrylMicrovm {
+    pub(crate) runtime: Arc<AcrylMicrovmRuntime>,
+}
+
+#[pymethods]
+impl PyAcrylMicrovm {
+    #[new]
+    fn new(options: PyOptions) -> PyResult<Self> {
+        let core_opts = options.into_core()?;
+        // Executable-owned logging init (the library no longer auto-installs a subscriber).
+        let _ = acrylmicrovm::init_logging_for(&core_opts.home_dir);
+        let runtime = AcrylMicrovmRuntime::new(core_opts).map_err(map_err)?;
+
+        Ok(Self {
+            runtime: Arc::new(runtime),
+        })
+    }
+
+    #[staticmethod]
+    fn default() -> PyResult<Self> {
+        // Executable-owned logging init (the library no longer auto-installs a
+        // subscriber). The default runtime uses `AcrylMicrovmOptions::default()`, so
+        // we mirror its home_dir for the log location.
+        let _ = acrylmicrovm::init_logging_for(&AcrylMicrovmOptions::default().home_dir);
+        let runtime = AcrylMicrovmRuntime::default_runtime();
+        Ok(Self {
+            runtime: Arc::new(runtime.clone()),
+        })
+    }
+
+    /// Create a REST-backed runtime connecting to a remote ACRYL microVMs server.
+    ///
+    /// All box operations are delegated to the remote server via HTTP.
+    ///
+    /// Example::
+    ///
+    ///     opts = acrylmicrovm.AcrylMicrovmRestOptions(url="https://api.example.com")
+    ///     runtime = acrylmicrovm.ACRYL microVMs.rest(opts)
+    ///
+    ///     # From environment variables
+    ///     opts = acrylmicrovm.AcrylMicrovmRestOptions.from_env()
+    ///     runtime = acrylmicrovm.ACRYL microVMs.rest(opts)
+    #[staticmethod]
+    fn rest(options: PyAcrylMicrovmRestOptions) -> PyResult<Self> {
+        let runtime = AcrylMicrovmRuntime::rest(options.into()).map_err(map_err)?;
+        Ok(Self {
+            runtime: Arc::new(runtime),
+        })
+    }
+
+    #[staticmethod]
+    fn init_default(options: PyOptions) -> PyResult<()> {
+        let core_opts = options.into_core()?;
+        let _ = acrylmicrovm::init_logging_for(&core_opts.home_dir);
+        AcrylMicrovmRuntime::init_default_runtime(core_opts).map_err(map_err)
+    }
+
+    #[pyo3(signature = (options, name=None))]
+    fn create<'py>(
+        &self,
+        py: Python<'py>,
+        options: PyBoxOptions,
+        name: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let runtime = Arc::clone(&self.runtime);
+        let opts = BoxOptions::try_from(options).map_err(map_err)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let handle = runtime.create(opts, name).await.map_err(map_err)?;
+            Ok(PyBox {
+                handle: Arc::new(handle),
+            })
+        })
+    }
+
+    #[pyo3(signature = (_state=None))]
+    fn list_info<'py>(
+        &self,
+        py: Python<'py>,
+        _state: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let runtime = Arc::clone(&self.runtime);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let infos = runtime.list_info().await.map_err(map_err)?;
+            Ok(infos.into_iter().map(PyBoxInfo::from).collect::<Vec<_>>())
+        })
+    }
+
+    /// Get information about a specific box by ID or name.
+    fn get_info<'py>(&self, py: Python<'py>, id_or_name: String) -> PyResult<Bound<'py, PyAny>> {
+        let runtime = Arc::clone(&self.runtime);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            Ok(runtime
+                .get_info(&id_or_name)
+                .await
+                .map_err(map_err)?
+                .map(PyBoxInfo::from))
+        })
+    }
+
+    /// Get a box handle by ID or name (for reattach or restart).
+    fn get<'py>(&self, py: Python<'py>, id_or_name: String) -> PyResult<Bound<'py, PyAny>> {
+        let runtime = Arc::clone(&self.runtime);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            tracing::trace!("Python get() called with id_or_name={}", id_or_name);
+
+            let result = runtime.get(&id_or_name).await.map_err(map_err)?;
+
+            tracing::trace!("Rust get() returned: is_some={}", result.is_some());
+
+            let py_box = result.map(|handle| {
+                tracing::trace!("Wrapping LiteBox in PyBox for id_or_name={}", id_or_name);
+                PyBox {
+                    handle: Arc::new(handle),
+                }
+            });
+
+            tracing::trace!("Returning PyBox to Python: is_some={}", py_box.is_some());
+            Ok(py_box)
+        })
+    }
+
+    /// Get an existing box by name, or create a new one if it doesn't exist.
+    #[pyo3(signature = (options, name=None))]
+    fn get_or_create<'py>(
+        &self,
+        py: Python<'py>,
+        options: PyBoxOptions,
+        name: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let runtime = Arc::clone(&self.runtime);
+        let opts = BoxOptions::try_from(options).map_err(map_err)?;
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let (handle, created) = runtime.get_or_create(opts, name).await.map_err(map_err)?;
+            Ok((
+                PyBox {
+                    handle: Arc::new(handle),
+                },
+                created,
+            ))
+        })
+    }
+
+    fn metrics<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let runtime = Arc::clone(&self.runtime);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let metrics = runtime.metrics().await.map_err(map_err)?;
+            Ok(PyRuntimeMetrics::from(metrics))
+        })
+    }
+
+    #[getter]
+    fn images(&self) -> PyResult<PyImageHandle> {
+        let handle = self.runtime.images().map_err(map_err)?;
+        Ok(PyImageHandle {
+            handle: Arc::new(handle),
+        })
+    }
+
+    #[getter]
+    fn checkpoints(&self) -> crate::checkpoints::PyCheckpointHandle {
+        crate::checkpoints::PyCheckpointHandle {
+            handle: Arc::new(self.runtime.checkpoints()),
+        }
+    }
+
+    /// Return the runtime-scoped named-volume handle.
+    ///
+    /// The handle exposes asynchronous create, list, get, and remove operations
+    /// for backends that support named volumes. Unsupported backends raise the
+    /// same ACRYL microVMs error they return through the lower-level runtime API.
+    #[getter]
+    fn volumes(&self) -> PyResult<PyVolumeHandle> {
+        let handle = self.runtime.volumes().map_err(map_err)?;
+        Ok(PyVolumeHandle {
+            handle: Arc::new(handle),
+        })
+    }
+
+    /// Return the organization's domain handle: list, bind and unbind
+    /// domains by name. A local runtime raises the same unsupported error as
+    /// the runtime API.
+    #[getter]
+    fn domains(&self) -> PyResult<PyDomainHandle> {
+        let handle = self.runtime.domains().map_err(map_err)?;
+        Ok(PyDomainHandle {
+            handle: Arc::new(handle),
+        })
+    }
+
+    /// Remove a box by ID or name.
+    #[pyo3(signature = (id_or_name, force=false))]
+    fn remove<'py>(
+        &self,
+        py: Python<'py>,
+        id_or_name: String,
+        force: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let runtime = Arc::clone(&self.runtime);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            runtime.remove(&id_or_name, force).await.map_err(map_err)?;
+            Ok(())
+        })
+    }
+
+    fn close(&self) -> PyResult<()> {
+        Ok(())
+    }
+
+    /// Gracefully shutdown all boxes in this runtime.
+    #[pyo3(signature = (timeout=None))]
+    fn shutdown<'py>(&self, py: Python<'py>, timeout: Option<i32>) -> PyResult<Bound<'py, PyAny>> {
+        let runtime = Arc::clone(&self.runtime);
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            runtime.shutdown(timeout).await.map_err(map_err)?;
+            Ok(())
+        })
+    }
+
+    // ========================================================================
+    // IMPORT (kept on runtime - export moved to Box)
+    // ========================================================================
+
+    /// Import a box from a `.acrylmicrovm` archive.
+    ///
+    /// Returns a Box handle for the imported box.
+    /// If `name` is omitted, the imported box remains unnamed.
+    /// Server implementations must pass `untrusted=True` for uploaded bytes so
+    /// host-only features and filesystem paths are rejected and server-owned
+    /// security is enforced.
+    #[pyo3(signature = (archive_path, name=None, *, untrusted=false))]
+    fn import_box<'py>(
+        &self,
+        py: Python<'py>,
+        archive_path: String,
+        name: Option<String>,
+        untrusted: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let runtime = Arc::clone(&self.runtime);
+        let archive = if untrusted {
+            BoxArchive::from_untrusted_upload(archive_path)
+        } else {
+            BoxArchive::new(archive_path)
+        };
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let handle = runtime.import_box(archive, name).await.map_err(map_err)?;
+            Ok(PyBox {
+                handle: Arc::new(handle),
+            })
+        })
+    }
+
+    fn __enter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
+        Ok(slf)
+    }
+
+    fn __exit__(
+        &self,
+        _exc_type: Py<PyAny>,
+        _exc_val: Py<PyAny>,
+        _exc_tb: Py<PyAny>,
+    ) -> PyResult<()> {
+        self.close()
+    }
+
+    fn __repr__(&self) -> String {
+        "AcrylMicrovm(open=true)".to_string()
+    }
+}

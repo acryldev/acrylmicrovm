@@ -1,0 +1,166 @@
+#![allow(unsafe_op_in_unsafe_fn, non_local_definitions)]
+// Modified by ACRYL, 2026
+
+mod advanced_options;
+mod box_handle;
+mod checkpoints;
+mod domains;
+mod exec;
+mod executions;
+mod images;
+mod info;
+mod metrics;
+mod network;
+mod options;
+mod registries;
+mod runtime;
+mod snapshot_options;
+mod snapshots;
+mod ssh;
+mod util;
+mod volumes;
+
+use crate::advanced_options::{
+    PyAdvancedBoxOptions, PyContainerCapabilities, PyHealthCheckOptions, PySecurityOptions,
+};
+use crate::box_handle::PyBox;
+use crate::domains::{PyDomain, PyDomainHandle, PyDomainList, PyDomainTarget};
+use crate::exec::{PyExecStderr, PyExecStdin, PyExecStdout, PyExecution, PyExecutionInfo};
+use crate::executions::PyExecutions;
+use crate::images::{
+    PyImageAliasEvent, PyImageDetail, PyImageHandle, PyImageInfo, PyImagePullResult, PyImageUsage,
+    PyImageVersion,
+};
+use crate::info::{
+    PyBoxInfo, PyBoxStateInfo, PyHealthState, PyHealthStatus, PyInboundNetworkInfo, PyNetworkInfo,
+    PyOutboundNetworkInfo, PyPublishedPort,
+};
+use crate::metrics::{PyBoxMetrics, PyRuntimeMetrics};
+use crate::network::{
+    PyBoxConnection, PyBoxTunnel, PyNetworkHandle, PySocketAddress, PyTunnelForwarder,
+    PyTunnelOptions,
+};
+use crate::options::{
+    PyAccessToken, PyApiKeyCredential, PyBoxOptions, PyAcrylMicrovmRestOptions, PyCopyOptions,
+    PyImageRegistry, PyInboundNetworkSpec, PyNetworkSpec, PyOptions, PyOutboundNetworkSpec,
+    PySecret,
+};
+use crate::registries::{PyRegistryCredential, PyRegistryHandle};
+use crate::runtime::PyAcrylMicrovm;
+use crate::snapshot_options::{PyCloneOptions, PyExportOptions, PySnapshotOptions};
+use crate::snapshots::{PySnapshotHandle, PySnapshotInfo};
+use crate::ssh::{PySshAccount, PySshCaConfig, PySshConfig, PySshHandle, PySshStatus};
+use crate::volumes::{PyVolumeHandle, PyVolumeInfo};
+use pyo3::prelude::*;
+
+#[pymodule(name = "acrylmicrovm")]
+fn acrylmicrovm_python(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyOptions>()?;
+    m.add_class::<PyImageRegistry>()?;
+    m.add_class::<PyBoxOptions>()?;
+    m.add_class::<PyNetworkSpec>()?;
+    m.add_class::<PyOutboundNetworkSpec>()?;
+    m.add_class::<PyInboundNetworkSpec>()?;
+    m.add_class::<PySecurityOptions>()?;
+    m.add_class::<PyHealthCheckOptions>()?;
+    m.add_class::<PyAdvancedBoxOptions>()?;
+    m.add_class::<PyContainerCapabilities>()?;
+    m.add_class::<PyAcrylMicrovm>()?;
+    m.add_class::<PyBox>()?;
+    m.add_class::<PyExecution>()?;
+    m.add_class::<PyExecutions>()?;
+    m.add_class::<PyExecutionInfo>()?;
+    m.add_class::<PyExecStdin>()?;
+    m.add_class::<PyExecStdout>()?;
+    m.add_class::<PyExecStderr>()?;
+    m.add_class::<PyImageHandle>()?;
+    m.add_class::<PyImageInfo>()?;
+    m.add_class::<PyImagePullResult>()?;
+    m.add_class::<PyImageDetail>()?;
+    m.add_class::<PyImageVersion>()?;
+    m.add_class::<PyImageAliasEvent>()?;
+    m.add_class::<PyImageUsage>()?;
+    m.add_class::<PyVolumeHandle>()?;
+    m.add_class::<PyVolumeInfo>()?;
+    m.add_class::<crate::checkpoints::PyCheckpointHandle>()?;
+    m.add_class::<crate::checkpoints::PyCheckpointInfo>()?;
+    m.add_class::<PyRegistryHandle>()?;
+    m.add_class::<PyRegistryCredential>()?;
+    m.add_class::<PyBoxInfo>()?;
+    m.add_class::<PyBoxStateInfo>()?;
+    m.add_class::<PyNetworkInfo>()?;
+    m.add_class::<PyOutboundNetworkInfo>()?;
+    m.add_class::<PyInboundNetworkInfo>()?;
+    m.add_class::<PyPublishedPort>()?;
+    m.add_class::<PyHealthState>()?;
+    m.add_class::<PyHealthStatus>()?;
+    m.add_class::<PyRuntimeMetrics>()?;
+    m.add_class::<PyBoxMetrics>()?;
+    m.add_class::<PyNetworkHandle>()?;
+    m.add_class::<PyBoxTunnel>()?;
+    m.add_class::<PyBoxConnection>()?;
+    m.add_class::<PySocketAddress>()?;
+    m.add_class::<PyTunnelForwarder>()?;
+    m.add_class::<PyTunnelOptions>()?;
+    m.add_class::<PyCopyOptions>()?;
+    m.add_class::<PySnapshotInfo>()?;
+    m.add_class::<PySnapshotHandle>()?;
+    m.add_class::<PySnapshotOptions>()?;
+    m.add_class::<PyExportOptions>()?;
+    m.add_class::<PyCloneOptions>()?;
+    m.add_class::<PyHealthCheckOptions>()?;
+    m.add_class::<PyAcrylMicrovmRestOptions>()?;
+    m.add_class::<PyApiKeyCredential>()?;
+    m.add_class::<PyAccessToken>()?;
+    m.add_class::<PySecret>()?;
+    m.add_class::<PyDomainTarget>()?;
+    m.add_class::<PyDomain>()?;
+    m.add_class::<PyDomainList>()?;
+    m.add_class::<PyDomainHandle>()?;
+    m.add_class::<PySshAccount>()?;
+    m.add_class::<PySshCaConfig>()?;
+    m.add_class::<PySshConfig>()?;
+    m.add_class::<PySshHandle>()?;
+    m.add_class::<PySshStatus>()?;
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `acrylmicrovm/__init__.py` imports these names from the extension in one
+    /// statement, so a class it names but the module never registers fails
+    /// that import, and the package loads with no native API at all.
+    #[test]
+    fn module_registers_every_class_the_package_imports() {
+        let source = include_str!("../acrylmicrovm/__init__.py");
+        let opening = "from .acrylmicrovm import (";
+        let start = source
+            .find(opening)
+            .expect("the package imports the extension")
+            + opening.len();
+        let end = start
+            + source[start..]
+                .find(')')
+                .expect("the import list is closed");
+        let names: Vec<&str> = source[start..end]
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .collect();
+        assert!(names.contains(&"ImageDetail"), "{names:?}");
+
+        Python::attach(|py| {
+            let module = PyModule::new(py, "acrylmicrovm").unwrap();
+            acrylmicrovm_python(&module).unwrap();
+            for name in names {
+                assert!(
+                    module.hasattr(name).unwrap(),
+                    "the extension registers no {name}"
+                );
+            }
+        });
+    }
+}

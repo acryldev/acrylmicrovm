@@ -1,0 +1,36 @@
+# Modified by ACRYL, 2026
+[package]
+name = "acrylmicrovm-python"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+description = "Python bindings for AcrylMicrovm"
+
+[lib]
+name = "acrylmicrovm_python"
+crate-type = ["cdylib"]
+
+[features]
+# `extension-module` tells pyo3 not to link libpython, which is right for the
+# wheel maturin builds but makes `cargo test` unlinkable. Gating it lets the
+# binding's own unit tests run with --no-default-features while every normal
+# build keeps the wheel behaviour.
+default = ["extension-module"]
+extension-module = ["pyo3/extension-module"]
+
+[dependencies]
+acrylmicrovm = { path = "../../src/acrylmicrovm", features = ["rest"] }
+pyo3 = { version = "0.27.1" }
+pyo3-async-runtimes = { version = "0.27", features = ["tokio-runtime"] }
+tokio = { version = "1.37", features = ["io-util", "net", "sync"] }
+futures = "0.3.31"
+tracing = "0.1.44"
+serde_json = "1.0"
+
+[dev-dependencies]
+# `cargo test --no-default-features` links libpython but does not start an
+# interpreter; auto-initialize does that on first use so the binding's own
+# tests can build Python objects.
+pyo3 = { version = "0.27.1", features = ["auto-initialize"] }

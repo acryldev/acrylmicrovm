@@ -1,0 +1,105 @@
+# Modified by ACRYL, 2026
+"""Meta-test: prove the e2e suite actually goes through SDK → API → Runner.
+
+The check is two-part:
+
+  (1) The SDK's configured runtime URL is NOT the runner's :8080. Local
+      stacks use `http://localhost:3000/api`; hosted stages use the API host
+      alone (`https://api.dev.webboxes.ai`), whose load balancer adds `/api`.
+      Which layer answered is proven by (2), not by the URL's shape.
+
+  (2) After one round-trip create+exec, the API response carries the
+      X-AcrylMicrovm-Api-Version header, proving the request went through the
+      NestJS API layer (not direct runner). A successful exec with stdout
+      proves the runner executed the command behind the API.
+
+If either check fails, downstream regression tests cannot be trusted —
+they may be passing because they're talking to something other than the
+production exec path.
+"""
+from __future__ import annotations
+
+import json
+import urllib.error
+import urllib.request
+
+import pytest
+
+from conftest import drain, with_bounded_lifetime
+
+
+@pytest.mark.asyncio
+async def test_sdk_runtime_is_rest_against_local_api(rt):
+    """The runtime must be REST-mode and pointing at the API
+    (not the runner on :8080, not local FFI)."""
+    from e2e_auth import auth_context
+
+    url = auth_context().url
+    assert ":8080" not in url, (
+        f"profile p1.url={url!r} points at the runner (:8080) instead of "
+        f"the API. E2E tests must go through the API layer."
+    )
+
+
+@pytest.mark.smoke
+@pytest.mark.asyncio
+async def test_exec_roundtrip_proves_api_to_runner_chain(rt, image):
+    """Create a box, exec a command, and verify:
+    1. The API response has X-AcrylMicrovm-Api-Version (proves API layer)
+    2. exec stdout contains the expected output (proves runner executed it)
+    Together these prove SDK → API → Runner end-to-end."""
+    import acrylmicrovm
+    from e2e_auth import auth_context, request_json
+
+    ctx = auth_context()
+
+    # Raw HTTP create to inspect response headers
+    req = urllib.request.Request(
+        ctx.url_for(ctx.v1("boxes")),
+        method="POST",
+        data=json.dumps(with_bounded_lifetime({
+            "image": image, "cpus": 1, "memory_mib": 256, "disk_size_gb": 4,
+        })).encode(),
+        headers=ctx.auth_headers(content_type=True),
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        # `resp.headers` looks up case-insensitively; `dict()` of it does not.
+        # A cloud stage behind an HTTP/2 load balancer sends header names
+        # lowercased, so the `dict()` form failed against api.dev.webboxes.ai
+        # on a header the response was in fact carrying
+        # (`x-acrylmicrovm-api-version: 0.0.1`).
+        api_version = resp.headers.get("X-AcrylMicrovm-Api-Version")
+        header_names = sorted(resp.headers.keys())
+        body = json.loads(resp.read())
+        bid = body["box_id"]
+
+    try:
+        assert api_version, (
+            f"create response missing X-AcrylMicrovm-Api-Version header — "
+            f"request may have bypassed the API layer. headers={header_names}"
+        )
+
+        # exec through SDK to verify runner actually runs the command
+        box = await rt._inner.get(bid)
+        if box is None:
+            info_status, info_body = request_json("GET", ctx.v1(f"boxes/{bid}"))
+            pytest.fail(f"SDK.get({bid}) returned None; API says {info_status}")
+
+        ex = await box.exec("echo", ["e2e-chain-proof"], None)
+        out, _ = await drain(ex)
+        await ex.wait()
+
+        assert "e2e-chain-proof" in out, (
+            f"exec stdout missing expected marker — runner may not have "
+            f"executed the command. stdout={out!r}"
+        )
+    finally:
+        try:
+            req = urllib.request.Request(
+                ctx.url_for(ctx.v1(f"boxes/{bid}")),
+                method="DELETE",
+                headers=ctx.auth_headers(),
+            )
+            urllib.request.urlopen(req, timeout=15)
+        except Exception:
+            pass  # best-effort cleanup; don't fail the test on delete error

@@ -1,0 +1,1294 @@
+# Python SDK API reference
+
+Complete API reference for the ACRYL microVMs Python SDK.
+
+**Python:** 3.10+
+**Platforms:** macOS (Apple Silicon), Linux (x86_64, ARM64)
+
+## Table of contents
+
+- [Runtime Management](#runtime-management)
+- [Box Handle](#box-handle)
+- [SSH Control](#ssh-control)
+- [Network Tunnels](#network-tunnels)
+- [Command Execution](#command-execution)
+- [Box Types](#box-types)
+- [Sync API](#sync-api)
+- [Error Types](#error-types)
+- [Metrics](#metrics)
+- [Constants](#constants)
+
+---
+
+## Runtime management
+
+### `acrylmicrovm.AcrylMicrovm`
+
+The main runtime for creating and managing boxes.
+
+```python
+from acrylmicrovm import AcrylMicrovm, Options, BoxOptions, ImageRegistry
+```
+
+#### Class methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `default()` | `() -> AcrylMicrovm` | Create runtime with default settings (`~/.acryl/microvm`) |
+| `__init__()` | `(options: Options) -> AcrylMicrovm` | Create runtime with custom options |
+
+#### Instance methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `create()` | `async (options: BoxOptions, name: str = None) -> Box` | Create a new box |
+| `get()` | `async (box_id: str) -> Optional[Box]` | Reattach to an existing box by ID |
+| `get_info()` | `async (box_id: str) -> Optional[BoxInfo]` | Get current box metadata by ID or name |
+| `list_info()` | `async () -> List[BoxInfo]` | List all boxes |
+| `metrics()` | `async () -> RuntimeMetrics` | Get runtime-wide metrics |
+| `images` | property `-> ImageHandle` | The images this runtime can boot from; see [`acrylmicrovm.ImageHandle`](#acrylmicrovmimagehandle) |
+| `registries` | property `-> RegistryHandle` | The server's registry logins; raises `UnsupportedError` on a local runtime. See [`acrylmicrovm.RegistryHandle`](#acrylmicrovmregistryhandle) |
+
+#### Example
+
+```python
+# Default runtime
+runtime = AcrylMicrovm.default()
+
+# Custom runtime
+runtime = AcrylMicrovm(Options(home_dir="/custom/path"))
+
+# Registry host config with auth
+runtime = AcrylMicrovm(Options(
+    image_registries=[
+        ImageRegistry(
+            host="registry.example.com",
+            username="user",
+            password="password",
+        )
+    ]
+))
+
+# Create a box
+box = await runtime.create(BoxOptions(image="alpine:latest"))
+
+# List all boxes
+for info in await runtime.list_info():
+    print(f"{info.id}: {info.state.status}")
+```
+
+### `acrylmicrovm.ImageHandle`
+
+The images a runtime can boot from: the local cache on an embedded runtime,
+the server catalog on a REST runtime. Registry credentials are accessed through
+`runtime.images.registries`.
+
+| Operation | Embedded runtime | REST runtime |
+|-----------|------------------|--------------|
+| `pull` | Pulls into the cache | Unsupported; creating a box pulls |
+| `list` | One row per cached reference | Catalog alias and digest references |
+| `get` | Cached versions under the name | Catalog versions, aliases and history |
+| `remove` | Forgets the name; layers stay | Removes the entry; refused while a box can boot from it |
+| `usage` | Unsupported | Image count, allowance and known bytes |
+| `create_alias()` | Unsupported | Creates a new alias for a ready digest; existing names conflict |
+| `delete_alias()` | Unsupported | Removes only the named alias; absent names return NotFound |
+
+`get` and `remove` take an image name, without a tag or digest, such as
+`quay.io/acme/app`. Alias names use OCI tag syntax; creation takes the
+`sha256:` digest of a ready version recorded for that image.
+
+A registry tag belongs to the upstream registry. A ACRYL microVMs alias belongs to
+the runtime catalog and selects a recorded digest independently. A successful
+pull seeds an alias from the registry tag; it never overwrites an existing
+binding. Creating an alias never pushes a registry tag or pulls image bytes.
+
+Alias creation refuses every existing name, even for the same digest, with
+`AlreadyExists`. Delete the alias explicitly before creating it again. Deletion
+removes only the binding: versions and existing boxes keep their digests.
+Creation history remains available; deletion is recorded by the server audit log.
+
+Image details and versions expose `aliases`. Their `history` contains
+`ImageAliasEvent` records with `alias`, optional `from_digest`, `to_digest`,
+optional `actor` and `recorded_at`. A local cache mirrors its cached registry
+tags in `aliases`, leaves history empty and refuses alias writes.
+
+```python
+detail = await runtime.images.get("quay.io/acme/app")
+digest = detail.versions[0].digest
+await runtime.images.create_alias(detail.name, "verified", digest)
+await runtime.images.delete_alias(detail.name, "verified")
+logins = await runtime.images.registries.list()
+```
+
+### `acrylmicrovm.RegistryHandle`
+
+The logins a REST server presents when it pulls a private image for a box.
+`runtime.images.registries` raises `UnsupportedError` on a local runtime, which pulls
+with the logins in `Options(image_registries=...)` instead.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `list()` | `async () -> List[RegistryCredential]` | Every login the organization holds, oldest first |
+| `create()` | `async (*, registry_host: str, username: str, password: str, repository_prefix: str \| None = None) -> RegistryCredential` | Add a login; `AlreadyExistsError` while one is held for the same registry and prefix |
+| `remove()` | `async (id: str) -> None` | Remove a login; `InvalidStateError`, naming the boxes, while a box still pulls through it; `NotFoundError` for an unknown id |
+
+`create()` takes keyword arguments only. `repository_prefix` is whole path
+segments ending in `/`, such as `"acme/"`; leave it out for the whole
+registry. The password goes up once: `RegistryCredential` has `id`,
+`registry_host`, `repository_prefix`, `username`, `created_by` and
+`created_at`, and no password. `remove()` raises `InvalidArgumentError` for an
+id that is not a UUID, before any request.
+
+```python
+import os
+from acrylmicrovm import AcrylMicrovm, AcrylMicrovmRestOptions, BoxOptions
+
+runtime = AcrylMicrovm.rest(AcrylMicrovmRestOptions.from_env())
+login = await runtime.images.registries.create(
+    registry_host="ghcr.io",
+    repository_prefix="acme/",
+    username="acme-bot",
+    password=os.environ["GHCR_TOKEN"],
+)
+box = await runtime.create(BoxOptions(image="ghcr.io/acme/private-app:1"))
+for login in await runtime.images.registries.list():
+    print(login.registry_host, login.repository_prefix, login.username)
+```
+
+---
+
+### `acrylmicrovm.Options`
+
+Runtime configuration options.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `home_dir` | `str` | `~/.acryl/microvm` | Base directory for runtime data |
+| `image_registries` | `List[ImageRegistry]` | `[]` | Registry transport, TLS, search, and auth configuration |
+
+#### `acrylmicrovm.ImageRegistry`
+
+```python
+ImageRegistry(
+    host="registry.local:5000",
+    transport="http",
+    search=True,
+)
+
+ImageRegistry(
+    host="registry.example.com",
+    skip_verify=True,
+    username="user",
+    password="password",
+)
+
+ImageRegistry(
+    host="ghcr.io",
+    bearer_token="token",
+)
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `host` | `str` | Required | Registry host, optionally with port. Do not include `http://` or `https://` |
+| `transport` | `str` | `"https"` | `"https"` or `"http"` |
+| `skip_verify` | `bool` | `False` | Disable TLS certificate and hostname verification for HTTPS registries |
+| `search` | `bool` | `False` | Include this host when resolving unqualified image references |
+| `username` / `password` | `str \| None` | `None` | Basic auth credentials. Provide both together |
+| `bearer_token` | `str \| None` | `None` | Bearer token auth |
+
+---
+
+### `acrylmicrovm.BoxOptions`
+
+Configuration options for creating a box.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `image` | `str` | Required | OCI image URI (e.g., `"python:slim"`, `"alpine:latest"`) |
+| `cpus` | `float` | `1` | CPU allocation (0.125–16, step 0.001); fractional values require a Linux execution host; see [resource limits](../../guides/resource-limits.md#fractional-cpus-linux) |
+| `memory_mib` | `int` | `512` | Memory limit in MiB (128-65536) |
+| `disk_size_gb` | `int \| None` | `None` | Container disk size in GB, never smaller than the image (None = image size) |
+| `working_dir` | `str` | `"/root"` | Working directory inside container |
+| `env` | `List[Tuple[str, str]]` | `[]` | Environment variables as (key, value) pairs |
+| `volumes` | `List[Tuple \| Dict]` | `[]` | Volume mounts; tuple = host bind, dict = `managed_volume` or `host_path` |
+| `network` | `NetworkSpec \| None` | `None` | Structured network configuration. Omit for default enabled networking. |
+| `ports` | `List[Tuple \| Dict]` | `[]` | Local TCP forwarding; omit `host_port` in a dict for automatic allocation |
+| `secrets` | `List[Secret]` | `[]` | Secrets rendered into configured headers of outbound HTTPS requests |
+| `advanced` | `AdvancedBoxOptions \| None` | `None` | Expert-only options, including `capabilities.add` and `capabilities.drop` |
+| `auto_delete` | `int \| None` | `None` | `0` keeps the box after stop; above `0`, a REST runtime deletes it that many seconds after stop and a local runtime at stop. `None` keeps the runtime's default (`auto_remove` locally) |
+| `auto_remove` | `bool` | `True` | Deprecated: use `auto_delete`. Auto cleanup when stopped |
+| `detach` | `bool` | `False` | Survive parent process exit |
+
+Capability policy is intentionally nested with the other expert-only options:
+
+```python
+from acrylmicrovm import AdvancedBoxOptions, BoxOptions, ContainerCapabilities
+
+options = BoxOptions(
+    image="alpine:latest",
+    advanced=AdvancedBoxOptions(
+        capabilities=ContainerCapabilities(
+            add=["NET_BIND_SERVICE"],
+            drop=["NET_RAW"],
+        )
+    ),
+)
+```
+
+#### `NetworkSpec`
+
+```python
+from acrylmicrovm import NetworkSpec
+
+network = NetworkSpec(
+    mode="enabled",
+    allow_net=["api.openai.com"],
+)
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `mode` | `str` | Required | `"enabled"` or `"disabled"` |
+| `allow_net` | `List[str]` | `[]` | Outbound allowlist used only when `mode="enabled"` |
+
+A host matched by a configured `Secret` is additionally reachable on port 443
+without a rule of its own, so `allow_net` is not the only egress gate. The
+connection is dialed by name, and under a non-empty `allow_net` an answer in a
+private, loopback or CGNAT range is refused unless an IP or CIDR rule covers it.
+
+`mode="disabled"` removes the guest network interface entirely. No secret makes
+a host reachable in that mode — there is no network to reach it over.
+
+#### Volume mount format
+
+A mount has exactly one origin. A tuple is always a host bind:
+
+```python
+volumes=[
+    ("/host/config", "/etc/app/config", True),  # Read-only
+    ("/host/data", "/mnt/data", False),         # Read-write
+]
+```
+
+A dict takes `managed_volume` — the volume's server-assigned id **or** its
+name, the server resolves either — or `host_path`, never both:
+
+```python
+volumes=[
+    {"managed_volume": "my-data", "guest_path": "/data"},
+    {"managed_volume": "vol_01K2EXAMPLE", "guest_path": "/cache"},
+    {"host_path": "/host/config", "guest_path": "/etc/app/config"},
+]
+```
+
+Managed volumes require a REST runtime; host binds are local-runtime only.
+`read_only` is rejected on a managed mount - only host binds may be read-only.
+
+#### Port forwarding format
+
+```python
+ports=[
+    (8080, 80, "tcp"),    # HTTP
+    (5432, 5432, "tcp"),  # PostgreSQL
+    {"guest_port": 3000},  # OS-selected host port
+]
+```
+
+Port publication is local-only and TCP-only. For portable local/remote access,
+use `box.network.tunnel(("127.0.0.1", port))`; each returned tunnel is one-shot.
+
+#### Secret format
+
+```python
+from acrylmicrovm import Secret
+
+secrets=[
+    Secret(
+        name="openai",
+        value="sk-...",
+        hosts=["api.openai.com"],
+        headers={"Authorization": "Bearer {value}"},
+        # placeholder is a dummy guest value, default "<ACRYLMICROVM_SECRET:openai>"
+    )
+]
+```
+
+Each host a secret matches becomes reachable on port 443 under a non-empty
+`allow_net` without a rule of its own — a secret is an egress grant as well as
+a credential. It is a by-name dial like any hostname rule, so a host answering
+with a private, loopback or CGNAT address is still refused unless an IP or CIDR
+rule covers that range. Those hosts on port 80, on any other port, or over UDP
+are governed by `allow_net` alone.
+
+`headers` is a required keyword argument containing a non-empty name-to-template dictionary.
+Omission, `None` and empty dictionaries are rejected.
+Each template contains exactly one `{value}`; only headers already present in
+the original request are replaced. See the [validation rules](../configuration.md#secrets).
+
+---
+
+## Box handle
+
+### `acrylmicrovm.Box`
+
+Handle to a running or stopped box.
+
+#### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `id` | `str` | Unique box identifier (ULID format) |
+| `network` | `NetworkHandle` | Box-scoped tunnel operations |
+| `ssh` | `SshHandle` | SSH control (`configure`/`enable`/`status`/`disable`) |
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `exec()` | `(cmd, args, env, tty) -> Execution` | Execute command (async) |
+| `attach()` | `(execution_id=None, stdin=True) -> Execution` | Follow a running session (async) |
+| `executions()` | `() -> Executions` | Live session inventory and recovery; never boots a box |
+| `stop()` | `() -> None` | Stop the box gracefully (async) |
+| `info()` | `async () -> BoxInfo` | Get box metadata |
+| `metrics()` | `() -> BoxMetrics` | Get resource usage metrics (async) |
+
+`executions().list()` returns the box's live sessions, so an execution whose
+handle was lost — a crashed client, a dropped connection — can be named again
+and driven through `executions().attach()` for streams or `executions().get()`
+for a control handle. Call `kill()`, `signal()`, `resize_tty()`, or `wait()` on
+that handle.
+Listing reads the guest's own registry, never boots or resumes a box, and lists
+only unfinished sessions: a finished execution's exit status is read through
+`wait()`. A created or stopped box returns an empty list; a paused box returns
+an invalid-state error. See [`ExecutionInfo`](#acrylmicrovmexecutioninfo) for the fields.
+
+`attach()` with no argument follows the box's main command — the container
+init, which is what `run IMAGE COMMAND` starts. Pass `execution_id` to
+reattach to an `exec()` session instead.
+
+`attach(stdin=False)` attaches read-only — docker's `--no-stdin`. The returned
+execution exposes no stdin, and against a remote runtime the server refuses
+stdin, `signal` and `resize` sent over that socket. Use it to follow a box's
+output without a keystroke reaching the workload.
+
+The guarantee is scoped to the attach stream, as it is in docker: holding a box
+handle still lets you `stop()` it, and `Execution.kill()` / `.signal()` /
+`.resize_tty()` go over their own routes rather than this socket.
+
+---
+
+### `acrylmicrovm.BoxInfo`
+
+Metadata about a box.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `id` | `str` | Unique box identifier (ULID) |
+| `name` | `str \| None` | Optional user-assigned name |
+| `state` | `BoxStateInfo` | Runtime state with `status`, `running`, and nullable `pid` and `exit_code` fields. `exit_code` is how the main command ended — its own code, or `128 + n` when a signal ended it; stopping a box signals that command, so a stop is recorded here too; `0` is a real value, so test for `None` rather than falsiness |
+| `created_at` | `str` | ISO 8601 creation timestamp |
+| `started_at` | `str \| None` | Time when the box most recently entered `Running` (RFC 3339); `None` if not recorded or unavailable over REST |
+| `last_activity_at` | `str \| None` | Time the box was last active (RFC 3339), the clock AutoStop measures idleness against; `None` for a local box, which records no activity |
+| `image` | `str` | OCI image used |
+| `cpus` | `float` | Configured CPU allocation; guest vCPUs are rounded up for fractions |
+| `memory_mib` | `int` | Allocated memory in MiB |
+| `network` | `NetworkInfo \| None` | Current network configuration and resolved local publications |
+
+`NetworkInfo` has `outbound: OutboundNetworkInfo`, `inbound:
+InboundNetworkInfo`, and `published_ports: List[PublishedPort] | None`; each
+direction has `mode: str` and `allow_net: List[str]`. The pre-split
+`mode: str` / `allow_net: List[str]` attributes remain readable on
+`NetworkInfo` as views onto `outbound`. Each `PublishedPort` has named
+`guest_port`, `host_ip`, `host_port`, and `protocol` attributes.
+
+`network is None` means network information is unavailable. Within
+`NetworkInfo`, `published_ports is None` means the current handle does not know
+the lifecycle's publications, `[]` means there are no active publications, and
+a populated list contains concrete active local bindings. `BoxOptions.ports`
+remains the request API; its optional host port is not reused in resolved output.
+
+`box.info()` has no synchronous variant. Local metadata reads report
+bindings captured when this handle started or reattached the box; REST metadata
+reads fetch the current server record. A newly loaded local running box has no
+live binding data yet, so box, get, or list info may report
+`published_ports is None` until an operation requiring live state reattaches it.
+
+---
+
+### `acrylmicrovm.BoxStateInfo`
+
+Detailed state information for a box.
+
+| Value | Description |
+|-------|-------------|
+| `Created` | Box created but not yet started |
+| `Starting` | Box is initializing |
+| `Running` | Box is running and ready |
+| `Stopping` | Box is shutting down |
+| `Stopped` | Box is stopped |
+| `Failed` | Box encountered an error |
+
+---
+
+## SSH control
+
+Both `acrylmicrovm.Box` and `SyncBox` expose `box.ssh`. Synchronous calls omit `await`;
+for example, `box.ssh.enable()` returns the enabled `SshStatus`. Enable works
+locally and over REST, requires saved configuration, and never starts the box.
+
+| Operation | Signature | Description |
+|-----------|-----------|-------------|
+| Configure | `await box.ssh.configure(config) -> SshStatus` | Apply SSH configuration |
+| Enable | `await box.ssh.enable() -> SshStatus` | Enable saved configuration on a running box; preserve healthy connections |
+| Query | `await box.ssh.status() -> SshStatus` | Return SSH status |
+| Disable | `await box.ssh.disable() -> SshStatus` | Disable SSH |
+
+`enable()` and `disable()` require a running box. On a valid handle to a configured
+or stopped box, both raise `InvalidStateError` (HTTP 409 over REST) without changing
+saved SSH intent. Disable is safe to repeat while running; call it while running
+to persist the disabled switch.
+
+If a box is not running and explicitly sets `BoxOptions.cmd` or `entrypoint`,
+call `await box.start()` before configuring SSH; otherwise `configure()` raises
+`InvalidStateError`. See the [SSH lifecycle guide](../../guides/ssh.md) for
+implicit startup and stopped-box behavior.
+
+```python
+from acrylmicrovm import SshAccount, SshConfig
+
+config = SshConfig(
+    listen_address="0.0.0.0:2222",
+    host_private_key=open("host_key").read(),
+    accounts=[SshAccount(login="alice", authorized_keys=[open("id_ed25519.pub").read()])],
+)
+status = await box.ssh.configure(config)
+```
+
+In the sync API the same calls drop `await`: `box.ssh.configure(config)`.
+
+`SshConfig(listen_address, host_private_key, accounts=[])` accepts
+`SshAccount(login, authorized_keys=[], ca=None)` entries; certificate
+authentication uses `SshCaConfig(public_key, principal)`. Credential-bearing
+objects redact keys in `repr()`.
+
+Configuration getters return copies: `config.accounts`, each account's
+`authorized_keys`, and its nested `ca` must be assigned back after editing.
+For example, `config.accounts[0].authorized_keys.append(key)` does not update
+`config`. This follows [PyO3's field-copying rules](https://pyo3.rs/v0.27.1/faq#pyo3get-clones-my-field).
+
+```python
+accounts = config.accounts
+account = accounts[0]
+keys = account.authorized_keys
+keys.append(open("new_user.pub").read())
+account.authorized_keys = keys
+ca = account.ca
+if ca is not None:
+    ca.principal = "updated-principal"
+    account.ca = ca
+config.accounts = accounts
+status = await box.ssh.configure(config)
+```
+
+`SshStatus` exposes `enabled: bool`, `generation: int`, `listen_address`,
+`host_public_key`, and `host_key_fingerprint`. `generation` is a Python `int`
+that preserves the full unsigned 64-bit value.
+
+---
+
+## Network tunnels
+
+Both `acrylmicrovm.Box` and `acrylmicrovm.SimpleBox` expose `box.network`.
+
+| Operation | Signature | Description |
+|-----------|-----------|-------------|
+| Tunnel | `await box.network.tunnel(target, options=None) -> BoxTunnel` | Prepare a tunnel; `target` is a socket address tuple `(ip, port)` (loopback or the guest IP), `options` is `TunnelOptions(is_public=False)` for a private cloud tunnel, public by default |
+| Token | `tunnel.token() -> str \| None` | Full on creation, masked on later preparations; `is_public()` reports the mode |
+| Revoke | `await box.network.revoke_tunnel(port) -> None` | Withdraw the port's tunnel; open connections stay open |
+| Domains | `runtime.domains -> DomainHandle` | `await handle.list() -> DomainList` returns full `hostname` values, no short `name`, and quota fields (`limit`, `used`, `remaining`, `min_length`). `target` is `None` while unbound. `await handle.bind(domain, DomainTarget(type="box", box=..., port=...))` requires an owned full hostname; request new names in Dashboard > Domains first; `await handle.unbind(hostname)` requires the full hostname and retains ownership. `DomainTarget(type="app", app=...)` is reserved; App binding is rejected. The sync API's `SyncAcrylMicrovm.domains` mirrors it. Hosted runtimes only; see [Domains](../../concepts/networking.md#domains). |
+| Forward | `await tunnel.forward(listen) -> TunnelForwarder` | Bind one local listener and forward every client |
+| Inspect | `tunnel.uri() -> str \| None` | Read the prepared public URL; `None` for a local box |
+| Connect | `await tunnel.connect() -> BoxConnection` | Consume the prepared tunnel into its byte stream |
+| Read/write | `await connection.read(max_bytes)`, `await connection.write(data)` | Exchange bytes with the service |
+| Close | `await connection.close()` | Close the connection |
+
+`await runtime.domains.unbind(hostname)` and
+`runtime.domains.unbind(hostname)` in the sync API return the empty tuple `()`
+on success. Failures raise a `AcrylMicrovmError` subclass; `()` is not an error
+indicator. Unbinding requires the full hostname returned by `list()`, retains
+the organization's domain and any platform quota slot, and succeeds again if that held
+hostname is already unbound.
+
+Creation accepts `(ip, port)` and IPv6 `(ip, port, 0, 0)` tuples. IPs must be
+numeric; hostnames and nonzero IPv6 flowinfo/scope_id are rejected. Bare ports and
+`SocketAddress` objects are no longer creation arguments.
+
+For the separate `forward(listen)` operation, use `SocketAddress.tcp(host="127.0.0.1", port=0)` or
+`SocketAddress.unix(path)`. A forwarder exposes `local_addr()`, `await
+wait()`, and repeatable `await close()`; synchronous and `SimpleBox` wrappers
+provide the same operations.
+
+Each `BoxTunnel` is one-shot: choose `connect()` or `forward()`. Forwarding opens
+authenticated connections against the existing declaration and cannot undo revocation. This differs
+from `BoxOptions.ports`, which creates a persistent, local-only host listener
+that accepts repeated connections from ordinary host applications.
+
+---
+
+## Command execution
+
+### `acrylmicrovm.Execution`
+
+Represents a running command execution.
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `stdout()` | `() -> ExecStdout` | Get stdout stream (async iterator) |
+| `stderr()` | `() -> ExecStderr` | Get stderr stream (async iterator) |
+| `stdin()` | `() -> ExecStdin` | Get stdin writer |
+| `wait()` | `() -> ExecResult` | Wait for completion (async) |
+| `kill()` | `(signal: int = 9) -> None` | Send signal to process (async) |
+| `resize_tty()` | `(rows: int, cols: int) -> None` | Resize PTY terminal for executions started with `tty=True` (async) |
+
+#### Example
+
+```python
+# Execute with streaming output
+execution = await box.exec("python", ["-c", "for i in range(5): print(i)"])
+
+# Stream stdout
+async for line in execution.stdout():
+    print(f"Output: {line}")
+
+# Wait for completion
+result = await execution.wait()
+print(f"Exit code: {result.exit_code}")
+```
+
+---
+
+### `acrylmicrovm.Executions`
+
+Live execution namespace of one box, returned by `box.executions()`. Creating it
+never starts the box. Native `Box` and `SimpleBox` operations are async.
+`SyncBox.executions()` and `SyncSimpleBox.executions()` expose the same three
+operations synchronously through `SyncExecutions`.
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `list()` | `() -> list[ExecutionInfo]` | List live sessions, including the main command (async) |
+| `get()` | `(execution_id: str) -> Execution` | Recover control without taking the output reader (async) |
+| `attach()` | `(execution_id: str, stdin=True) -> Execution` | Attach output to a listed live session (async) |
+
+`attach()` here needs an explicit ID; the pre-existing `Box.attach()` keeps its
+optional `execution_id`, which defaults to the main command session.
+
+---
+
+### `acrylmicrovm.ExecutionInfo`
+
+Metadata for one live session, captured when it was spawned — not derived from
+a process listing, so `execution_id` is always addressable.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `execution_id` | `str` | Identifier accepted by `executions().attach()` and `executions().get()` |
+| `argv` | `list[str]` | The command as requested, program first |
+| `started_at` | `int` | Spawn time, Unix epoch milliseconds |
+| `tty` | `bool` | Whether the session owns a PTY |
+| `is_main_session` | `bool` | `True` for the box's main command (the container init) |
+
+The main session's `execution_id` is the container id, the same convention the
+wire layer uses.
+
+Use a listed ID while the session is still live; it may finish between listing
+and recovery. On a REST-backed box, `executions().get(id)` asks the server by ID,
+so a retained terminal session can still be recovered after it leaves the live
+list; the local runtime resolves live sessions only. A control handle has no
+streams: `stdin()`, `stdout()`, and `stderr()` raise `RuntimeError` when
+unavailable, including on `SyncExecution`. Use `executions().attach()` to claim
+streams instead.
+
+```python
+for session in await box.executions().list():
+    marker = " (main)" if session.is_main_session else ""
+    print(f"{session.execution_id}{marker}: {' '.join(session.argv)}")
+```
+
+---
+
+### `acrylmicrovm.ExecStdout` / `acrylmicrovm.ExecStderr`
+
+Async iterators for streaming output.
+
+```python
+# Stream stdout line by line
+stdout = execution.stdout()
+async for line in stdout:
+    print(line)
+
+# Stream stderr
+stderr = execution.stderr()
+async for line in stderr:
+    print(f"Error: {line}", file=sys.stderr)
+```
+
+**Note:** Each stream can only be iterated once. After iteration, the stream is consumed.
+
+---
+
+### `acrylmicrovm.ExecStdin`
+
+Writer for sending input to a running process.
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `send_input()` | `(data: bytes) -> None` | Write bytes to stdin (async) |
+
+#### Example
+
+```python
+# Interactive input
+execution = await box.exec("cat")
+stdin = execution.stdin()
+
+# Send data
+await stdin.send_input(b"Hello\n")
+await stdin.send_input(b"World\n")
+
+# Wait for completion
+result = await execution.wait()
+```
+
+---
+
+### `acrylmicrovm.ExecResult`
+
+Result of a completed execution.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `exit_code` | `int` | Process exit code (0 = success) |
+
+**Note:** For higher-level APIs (`SimpleBox.exec()`), the result also includes `stdout` and `stderr` strings.
+
+---
+
+## Box types
+
+### `acrylmicrovm.SimpleBox`
+
+Context manager for basic command execution with automatic cleanup.
+
+```python
+from acrylmicrovm import SimpleBox
+```
+
+#### Constructor
+
+```python
+SimpleBox(
+    image: str,
+    memory_mib: int = None,
+    cpus: float = None,
+    runtime: AcrylMicrovm = None,
+    name: str = None,
+    auto_remove: bool = True,
+    **kwargs
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `image` | `str` | Required | Container image to use |
+| `memory_mib` | `int` | System default | Memory limit in MiB |
+| `cpus` | `float` | System default | Number of CPU cores |
+| `runtime` | `AcrylMicrovm` | Global default | Runtime instance |
+| `name` | `str` | None | Optional unique name |
+| `auto_remove` | `bool` | `True` | Remove box when stopped |
+| `**kwargs` | | | Additional options: `env`, `volumes`, `ports`, `working_dir`, `network`, `secrets` |
+
+#### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `id` | `str` | Box ID (raises if not started) |
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `start()` | `() -> Self` | Explicitly start the box (async) |
+| `exec()` | `(cmd, *args, env=None, user=None, timeout=None, cwd=None) -> ExecResult` | Execute command and wait (async) |
+| `info()` | `async () -> BoxInfo` | Get box metadata |
+| `shutdown()` | `() -> None` | Shutdown and release resources |
+
+#### Example
+
+```python
+async with SimpleBox(image="python:slim") as box:
+    result = await box.exec("python", "-c", "print('Hello!')")
+    print(result.stdout)   # "Hello!\n"
+    print(result.exit_code)  # 0
+
+    # Per-command options
+    result = await box.exec("pwd", cwd="/tmp")         # working directory
+    result = await box.exec("whoami", user="nobody")    # run as user
+    result = await box.exec("sleep", "60", timeout=5)   # timeout in seconds
+```
+
+---
+
+### `acrylmicrovm.CodeBox`
+
+Specialized box for Python code execution with package management.
+
+```python
+from acrylmicrovm import CodeBox
+```
+
+#### Constructor
+
+```python
+CodeBox(
+    image: str = "python:slim",
+    memory_mib: int = None,
+    cpus: float = None,
+    runtime: AcrylMicrovm = None,
+    **kwargs
+)
+```
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `run()` | `(code: str, timeout: float \| None = None) -> str` | Execute Python code (async) |
+| `run_script()` | `(script_path: str) -> str` | Execute Python script file (async) |
+| `install_package()` | `(package: str) -> str` | Install package with pip (async) |
+| `install_packages()` | `(*packages: str) -> str` | Install multiple packages (async) |
+
+#### Example
+
+```python
+async with CodeBox() as cb:
+    # Install packages
+    await cb.install_package("requests")
+
+    # Run code
+    result = await cb.run("""
+import requests
+print(requests.get('https://api.github.com/zen').text)
+""")
+    print(result)
+```
+
+---
+
+### `acrylmicrovm.BrowserBox`
+
+Box configured for browser automation with Chrome DevTools Protocol.
+
+```python
+from acrylmicrovm import BrowserBox, BrowserBoxOptions
+```
+
+#### `BrowserBoxOptions`
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `browser` | `str` | `"chromium"` | Browser type: `"chromium"`, `"firefox"`, `"webkit"` |
+| `memory` | `int` | `2048` | Memory in MiB |
+| `cpu` | `int` | `2` | Number of CPU cores |
+
+#### Browser CDP ports
+
+| Browser | Port |
+|---------|------|
+| chromium | 9222 |
+| firefox | 9223 |
+| webkit | 9224 |
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `endpoint()` | `() -> str` | Get CDP endpoint URL |
+
+#### Example
+
+```python
+from acrylmicrovm import BrowserBox, BrowserBoxOptions
+
+opts = BrowserBoxOptions(browser="chromium", memory=4096)
+async with BrowserBox(opts) as browser:
+    endpoint = browser.endpoint()  # "http://localhost:9222"
+
+    # Connect with Puppeteer or Playwright
+    # puppeteer.connect({ browserURL: endpoint })
+```
+
+---
+
+### `acrylmicrovm.ComputerBox`
+
+Box with full desktop environment and GUI automation capabilities.
+
+```python
+from acrylmicrovm import ComputerBox
+```
+
+#### Constructor
+
+```python
+ComputerBox(
+    cpu: int = 2,
+    memory: int = 2048,
+    gui_http_port: int = 3000,
+    gui_https_port: int = 3001,
+    runtime: AcrylMicrovm = None,
+    **kwargs
+)
+```
+
+#### Mouse methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `mouse_move()` | `(x: int, y: int) -> None` | Move cursor to coordinates (async) |
+| `left_click()` | `() -> None` | Left click at current position (async) |
+| `right_click()` | `() -> None` | Right click at current position (async) |
+| `middle_click()` | `() -> None` | Middle click at current position (async) |
+| `double_click()` | `() -> None` | Double left click (async) |
+| `triple_click()` | `() -> None` | Triple left click (async) |
+| `left_click_drag()` | `(start_x, start_y, end_x, end_y) -> None` | Drag from start to end (async) |
+| `cursor_position()` | `() -> Tuple[int, int]` | Get current cursor (x, y) (async) |
+
+#### Keyboard methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `type()` | `(text: str) -> None` | Type text characters (async) |
+| `key()` | `(text: str) -> None` | Press key or key combination (async) |
+
+##### Key syntax reference
+
+The `key()` method uses **xdotool key syntax**:
+
+| Key | Syntax |
+|-----|--------|
+| Enter | `Return` |
+| Tab | `Tab` |
+| Escape | `Escape` |
+| Backspace | `BackSpace` |
+| Delete | `Delete` |
+| Arrow keys | `Up`, `Down`, `Left`, `Right` |
+| Function keys | `F1`, `F2`, ... `F12` |
+| Modifiers | `ctrl`, `alt`, `shift`, `super` |
+| Combinations | `ctrl+c`, `ctrl+shift+s`, `alt+Tab` |
+
+**Examples:**
+```python
+await computer.key("Return")        # Press Enter
+await computer.key("ctrl+c")        # Copy
+await computer.key("ctrl+shift+s")  # Save As
+await computer.key("alt+Tab")       # Switch window
+await computer.key("ctrl+a Delete") # Select all and delete
+```
+
+#### Display methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `wait_until_ready()` | `(timeout: int = 60) -> None` | Wait for desktop ready (async) |
+| `screenshot()` | `() -> dict` | Capture screen (async) |
+| `scroll()` | `(x, y, direction, amount=3) -> None` | Scroll at position (async) |
+| `get_screen_size()` | `() -> Tuple[int, int]` | Get screen dimensions (async) |
+
+##### Screenshot return format
+
+```python
+{
+    "data": str,    # Base64-encoded PNG
+    "width": int,   # 1024 (default)
+    "height": int,  # 768 (default)
+    "format": str   # "png"
+}
+```
+
+##### Scroll directions
+
+| Direction | Description |
+|-----------|-------------|
+| `"up"` | Scroll up |
+| `"down"` | Scroll down |
+| `"left"` | Scroll left |
+| `"right"` | Scroll right |
+
+#### Example
+
+```python
+async with ComputerBox() as desktop:
+    await desktop.wait_until_ready()
+
+    # Take screenshot
+    screenshot = await desktop.screenshot()
+
+    # Mouse interaction
+    await desktop.mouse_move(100, 200)
+    await desktop.left_click()
+
+    # Type text
+    await desktop.type("Hello, World!")
+    await desktop.key("Return")
+
+    # Get screen size
+    width, height = await desktop.get_screen_size()
+```
+
+---
+
+### `acrylmicrovm.InteractiveBox`
+
+Box for interactive terminal sessions with PTY support.
+
+```python
+from acrylmicrovm import InteractiveBox
+```
+
+#### Constructor
+
+```python
+InteractiveBox(
+    image: str,
+    shell: str = "/bin/sh",
+    tty: bool = None,
+    memory_mib: int = None,
+    cpus: float = None,
+    runtime: AcrylMicrovm = None,
+    name: str = None,
+    auto_remove: bool = True,
+    **kwargs
+)
+```
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `image` | `str` | Required | Container image |
+| `shell` | `str` | `"/bin/sh"` | Shell to run |
+| `tty` | `bool \| None` | `None` | TTY mode (see below) |
+
+##### TTY mode
+
+| Value | Behavior |
+|-------|----------|
+| `None` | Auto-detect from `sys.stdin.isatty()` |
+| `True` | Force TTY mode with I/O forwarding |
+| `False` | No I/O forwarding (programmatic control) |
+
+#### Methods
+
+| Method | Signature | Description |
+|--------|-----------|-------------|
+| `wait()` | `() -> None` | Wait for shell to exit (async) |
+
+#### Example
+
+```python
+# Interactive shell session
+async with InteractiveBox(image="alpine:latest") as box:
+    # You're now in an interactive shell
+    # Type commands, see output in real-time
+    # Type "exit" to close
+    await box.wait()
+```
+
+---
+
+## Sync API
+
+Synchronous wrappers using greenlet fiber switching. Requires `pip install acrylmicrovm[sync]`.
+
+```python
+from acrylmicrovm import SyncAcrylMicrovm, SyncBox, SyncSimpleBox, SyncCodeBox
+```
+
+### When to use
+
+| Use Case | API |
+|----------|-----|
+| New async applications | Async API (default) |
+| Existing sync codebase | Sync API |
+| Jupyter notebooks | Sync API |
+| REPL/interactive use | Sync API |
+| Inside async functions | Async API only |
+
+### Comparison table
+
+| Async API | Sync API | Notes |
+|-----------|----------|-------|
+| `AcrylMicrovm` | `SyncAcrylMicrovm` | `get_info()` and `list_info()` are async-only |
+| `Box` | `SyncBox` | `Box.info()` is async-only and is not exposed by `SyncBox` |
+| `Execution` | `SyncExecution` | |
+| `ExecStdout` | `SyncExecStdout` | Regular iterator |
+| `ExecStderr` | `SyncExecStderr` | Regular iterator |
+| `SimpleBox` | `SyncSimpleBox` | `SimpleBox.info()` is async-only and is not exposed by `SyncSimpleBox` |
+| `CodeBox` | `SyncCodeBox` | Inherits the async-only metadata rule |
+| `RegistryHandle` | `SyncRegistryHandle` | |
+
+### Classes
+
+#### `SyncAcrylMicrovm`
+
+```python
+from acrylmicrovm import SyncAcrylMicrovm, BoxOptions
+
+with SyncAcrylMicrovm.default() as runtime:
+    box = runtime.create(BoxOptions(image="alpine:latest"))
+    execution = box.exec("echo", ["Hello"])
+    for line in execution.stdout():
+        print(line)
+    box.stop()
+```
+
+`SyncAcrylMicrovm.rest(options)` mirrors `AcrylMicrovm.rest(...)`:
+
+```python
+from acrylmicrovm import AcrylMicrovmRestOptions, SyncAcrylMicrovm
+
+with SyncAcrylMicrovm.rest(AcrylMicrovmRestOptions.from_env()) as runtime:
+    print(runtime.images.usage())
+    print(runtime.images.registries.list())
+```
+
+#### `SyncSimpleBox`
+
+```python
+from acrylmicrovm import SyncSimpleBox
+
+with SyncSimpleBox(image="python:slim") as box:
+    result = box.exec("python", "-c", "print('Hello!')")
+    print(result.stdout)
+```
+
+#### `SyncCodeBox`
+
+```python
+from acrylmicrovm import SyncCodeBox
+
+with SyncCodeBox() as cb:
+    result = cb.run("print('Hello, World!')")
+    print(result)
+```
+
+Both `CodeBox.run()` and `SyncCodeBox.run()` accept a `timeout` in seconds and
+forward it to `exec()`, which passes it to the guest as `timeout_secs`. The
+guest sends SIGTERM and then SIGKILL when the deadline passes. `run()` does not
+raise on a timeout: it returns whatever the snippet wrote to stdout before it
+was terminated.
+
+The deadline applies to the process the guest started. A child that keeps the
+stdout pipe open after it is killed -- a grandchild that inherited the
+descriptor, for example -- can still hold the read side open, so the call may
+wait for that pipe to close. The timeout bounds the workload, not every
+reader of its output.
+
+```python
+with SyncCodeBox() as cb:
+    # A runaway snippet is killed after half a second; whatever it printed
+    # before then is returned.
+    output = cb.run("while True: pass", timeout=0.5)
+```
+
+### Architecture
+
+The sync API uses greenlet fiber switching:
+1. A dispatcher fiber runs the asyncio event loop
+2. User code runs in the main fiber
+3. Sync methods switch to dispatcher, await async operations, then switch back
+
+**Limitation:** Cannot be used inside an async context (when an event loop is already running).
+
+---
+
+## Error types
+
+```python
+from acrylmicrovm import AcrylMicrovmError, ExecError, TimeoutError, ParseError
+```
+
+### Exception hierarchy
+
+```text
+AcrylMicrovmError (base)
+├── ExecError       # Command execution failed
+├── TimeoutError    # Operation timed out
+├── ParseError      # Output parsing failed
+└── NotFoundError, InvalidStateError, …   # Runtime failures, see below
+```
+
+### Runtime failures
+
+A failure the native runtime reports is raised as one class per kind of
+failure, each with a `code`. The names and codes are the ones
+`AcrylMicrovmError::http()` gives (`src/shared/src/errors.rs`), so a REST server
+answers the same failure with the same `code`. Every class is also a
+`RuntimeError`, which is what these failures were raised as before.
+
+| Class | `code` | Raised when |
+|-------|--------|-------------|
+| `NotFoundError` | `not_found` | The box, image, volume or snapshot does not exist |
+| `AlreadyExistsError` | `already_exists` | The name is taken |
+| `InvalidStateError` | `invalid_state` | The resource's state does not allow the operation |
+| `InvalidArgumentError` | `invalid_argument` | A value was refused |
+| `UnsupportedError` | `unsupported` | The operation is not available on this runtime |
+| `ResourceExhaustedError` | `resource_exhausted` | A limit was reached |
+| `StoppedError` | `stopped` | The box has stopped |
+| `SessionReapedError` | `session_reaped` | The session was reaped |
+| `ImageError` | `image_pull_failed` | An image could not be pulled or read |
+| `ExecutionError` | `execution_failed` | A process could not be run |
+| `NetworkError` | `network_unavailable` | The network was unavailable |
+| `UpstreamUnavailableError` | `upstream_unavailable` | A component did not answer |
+| `EngineError` | `engine_unavailable` | The virtualization engine failed |
+| `ConfigError` | `config_error` | Configuration is invalid, or authentication failed |
+| `StorageError` | `storage_error` | Storage could not be read or written |
+| `DatabaseError` | `database_error` | The runtime's database failed |
+| `MetadataError` | `metadata_error` | Stored metadata could not be read |
+| `InternalError` | `internal` | An unexpected failure |
+
+```python
+from acrylmicrovm import NotFoundError
+
+try:
+    await runtime.remove("no-such-box")
+except NotFoundError as e:
+    print(e.code)  # not_found
+```
+
+### `AcrylMicrovmError`
+
+Base exception for all ACRYL microVMs errors.
+
+```python
+try:
+    async with SimpleBox(image="invalid:image") as box:
+        pass
+except AcrylMicrovmError as e:
+    print(f"AcrylMicrovm error: {e}")
+```
+
+### `ExecError`
+
+Raised when a command execution fails (non-zero exit code).
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `command` | `str` | The command that failed |
+| `exit_code` | `int` | Non-zero exit code |
+| `stderr` | `str` | Standard error output |
+
+```python
+try:
+    result = await box.exec("false")  # Exit code 1
+except ExecError as e:
+    print(f"Command: {e.command}")
+    print(f"Exit code: {e.exit_code}")
+    print(f"Stderr: {e.stderr}")
+```
+
+### `TimeoutError`
+
+Raised when an operation times out.
+
+```python
+try:
+    await computer.wait_until_ready(timeout=5)
+except TimeoutError:
+    print("Desktop did not become ready in time")
+```
+
+### `ParseError`
+
+Raised when output parsing fails.
+
+```python
+try:
+    x, y = await computer.cursor_position()
+except ParseError:
+    print("Failed to parse cursor position")
+```
+
+---
+
+## Metrics
+
+### `acrylmicrovm.RuntimeMetrics`
+
+Aggregate metrics across all boxes.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `boxes_created` | `int` | Total boxes created |
+| `boxes_destroyed` | `int` | Total boxes destroyed |
+| `total_exec_calls` | `int` | Total command executions |
+| `active_boxes` | `int` | Currently running boxes |
+
+```python
+runtime = AcrylMicrovm.default()
+metrics = await runtime.metrics()
+
+print(f"Boxes created: {metrics.boxes_created}")
+print(f"Active boxes: {metrics.active_boxes}")
+```
+
+---
+
+### `acrylmicrovm.BoxMetrics`
+
+Per-box resource usage metrics.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `cpu_time_ms` | `int` | Total CPU time in milliseconds |
+| `memory_usage_bytes` | `int` | Current memory usage in bytes |
+| `network_bytes_sent` | `int` | Total bytes sent |
+| `network_bytes_received` | `int` | Total bytes received |
+
+```python
+metrics = await box.metrics()
+
+print(f"CPU time: {metrics.cpu_time_ms}ms")
+print(f"Memory: {metrics.memory_usage_bytes / (1024**2):.2f} MB")
+```
+
+---
+
+## Constants
+
+Default values used by ACRYL microVMs.
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `DEFAULT_CPUS` | `1` | Default CPU cores |
+| `DEFAULT_MEMORY_MIB` | `2048` | Default memory in MiB |
+| `COMPUTERBOX_CPUS` | `2` | ComputerBox default CPUs |
+| `COMPUTERBOX_MEMORY_MIB` | `2048` | ComputerBox default memory |
+| `COMPUTERBOX_DISPLAY_WIDTH` | `1024` | Screen width in pixels |
+| `COMPUTERBOX_DISPLAY_HEIGHT` | `768` | Screen height in pixels |
+| `COMPUTERBOX_GUI_HTTP_PORT` | `3000` | HTTP GUI port |
+| `COMPUTERBOX_GUI_HTTPS_PORT` | `3001` | HTTPS GUI port |
+| `DESKTOP_READY_TIMEOUT` | `60` | Desktop ready timeout (seconds) |
+
+---
+
+## See also
+
+- [Python SDK README](../../../sdks/python/README.md) - Quick start and examples
+- [Getting Started Guide](../../getting-started/quickstart-python.md) - Installation
+- [Configuration Reference](../configuration.md) - BoxOptions details
+- [Error Codes](../errors.md) - Error handling

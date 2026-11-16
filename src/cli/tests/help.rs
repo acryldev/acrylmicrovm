@@ -1,0 +1,586 @@
+// Modified by ACRYL, 2026
+use assert_cmd::Command;
+use predicates::prelude::PredicateBooleanExt;
+use rstest::rstest;
+
+const GLOBAL_OPTIONS: &[&str] = &[
+    "--debug",
+    "--home",
+    "--registry",
+    "--config",
+    "--url",
+    "--context",
+    "--path-prefix",
+];
+
+const BOX_GLOBAL_OPTIONS: &[&str] = &[
+    "--debug",
+    "--home",
+    "--config",
+    "--url",
+    "--context",
+    "--path-prefix",
+];
+
+fn help_for(path: &[&str], help_flag: &str) -> String {
+    let output = Command::new(assert_cmd::cargo::cargo_bin!("acrylmicrovm"))
+        .args(path)
+        .arg(help_flag)
+        .assert()
+        .success();
+    std::str::from_utf8(&output.get_output().stdout)
+        .unwrap()
+        .to_owned()
+}
+
+fn declares_option(help: &str, option: &str) -> bool {
+    help.lines().any(|line| {
+        let declaration = line.trim_start();
+        declaration.starts_with('-')
+            && declaration
+                .split_ascii_whitespace()
+                .any(|token| token.trim_end_matches(',') == option)
+    })
+}
+
+#[rstest]
+#[case::root(&[], &["--help", "--version"], GLOBAL_OPTIONS)]
+#[case::list(&["list"], &["--all", "--quiet", "--format"], BOX_GLOBAL_OPTIONS)]
+#[case::ls(&["ls"], &["--all", "--quiet", "--format"], BOX_GLOBAL_OPTIONS)]
+#[case::ps(&["ps"], &["--all", "--quiet", "--format"], BOX_GLOBAL_OPTIONS)]
+#[case::run(&["run"], &["--rootfs", "--detach", "--rm"], GLOBAL_OPTIONS)]
+#[case::create(&["create"], &["--rootfs", "--name"], GLOBAL_OPTIONS)]
+#[case::pull(&["pull"], &[], &["--debug", "--home", "--registry", "--config"])]
+#[case::auth(&["auth"], &[], &["--debug", "--home", "--context"])]
+#[case::login(
+    &["auth", "login"],
+    &["--url", "--method", "--api-key-stdin"],
+    &["--debug", "--home", "--context"]
+)]
+#[case::auth_status(
+    &["auth", "status"],
+    &[],
+    &["--debug", "--home", "--url", "--context"]
+)]
+#[case::agent_wait(
+    &["agent", "wait"],
+    &["--agent", "--turn", "--timeout-seconds"],
+    BOX_GLOBAL_OPTIONS
+)]
+#[case::volume_create(
+    &["volume", "create"],
+    &[],
+    &["--debug", "--home", "--url", "--context", "--path-prefix"]
+)]
+fn command_help_groups_global_options(
+    #[case] path: &[&str],
+    #[case] command_options: &[&str],
+    #[case] global_options: &[&str],
+    #[values("-h", "--help")] help_flag: &str,
+) {
+    let help = help_for(path, help_flag);
+    let (command_help, global_help) = help
+        .split_once("\nGlobal options:\n")
+        .unwrap_or_else(|| panic!("missing Global options section:\n{help}"));
+    assert_eq!(help.matches("\nGlobal options:\n").count(), 1, "{help}");
+    assert!(command_help.contains("\nOptions:\n"), "{help}");
+
+    for option in command_options.iter().chain([&"--help"]) {
+        assert!(declares_option(command_help, option), "{option}:\n{help}");
+        assert!(!declares_option(global_help, option), "{option}:\n{help}");
+    }
+    for option in global_options {
+        assert!(!declares_option(command_help, option), "{option}:\n{help}");
+    }
+
+    let mut actual_globals: Vec<_> = global_help
+        .lines()
+        .filter(|line| line.trim_start().starts_with('-'))
+        .filter_map(|line| {
+            line.split_ascii_whitespace()
+                .find(|token| token.starts_with("--"))
+        })
+        .collect();
+    let mut expected_globals = global_options.to_vec();
+    actual_globals.sort_unstable();
+    expected_globals.sort_unstable();
+    assert_eq!(actual_globals, expected_globals, "{help}");
+}
+
+#[test]
+fn command_help_ssh_advertises_default_setup_and_operation_options() {
+    for flag in ["--help", "-h"] {
+        let help = help_for(&["ssh"], flag);
+        assert!(help.contains("<BOX>"), "{help}");
+        assert!(!help.contains("Commands:"), "{help}");
+        assert!(!help.contains("configure-and-forward"), "{help}");
+        for name in [
+            "--configure",
+            "--proxy",
+            "--status",
+            "--enable",
+            "--disable",
+            "--tunnel",
+        ] {
+            assert!(
+                help.lines()
+                    .any(|line| line.split_whitespace().next() == Some(name)),
+                "{help}"
+            );
+        }
+    }
+}
+
+#[test]
+fn command_help_only_advertises_meaningful_global_options() {
+    let cases: &[(&[&str], &[&str])] = &[
+        (&["run"], GLOBAL_OPTIONS),
+        (
+            &["exec"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (&["create"], GLOBAL_OPTIONS),
+        (
+            &["top"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["attach"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["kill"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["signal"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["list"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["ls"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["ps"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["rm"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["start"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["stop"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["restart"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (&["pull"], &["--debug", "--home", "--registry", "--config"]),
+        (&["images"], &["--debug", "--home", "--config"]),
+        (
+            &["inspect"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["cp"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (&["info"], &["--debug", "--home", "--config"]),
+        (&["logs"], &["--debug", "--home", "--config"]),
+        (
+            &["stats"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["network"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["network", "tunnel"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["ssh"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["ssh", "dev", "--configure"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["ssh", "dev", "--status"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["ssh", "dev", "--disable"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (
+            &["ssh", "dev", "--tunnel"],
+            &[
+                "--debug",
+                "--home",
+                "--config",
+                "--url",
+                "--context",
+                "--path-prefix",
+            ],
+        ),
+        (&["serve"], &["--debug", "--home", "--registry", "--config"]),
+        (&["context"], &["--debug", "--home", "--url", "--context"]),
+        (
+            &["context", "use"],
+            &["--debug", "--home", "--url", "--context"],
+        ),
+        (
+            &["context", "ls"],
+            &["--debug", "--home", "--url", "--context"],
+        ),
+        (
+            &["context", "list"],
+            &["--debug", "--home", "--url", "--context"],
+        ),
+        (
+            &["context", "show"],
+            &["--debug", "--home", "--url", "--context"],
+        ),
+        (&["auth"], &["--debug", "--home", "--context"]),
+        (
+            &["auth", "login"],
+            &["--debug", "--home", "--url", "--context"],
+        ),
+        (&["auth", "logout"], &["--debug", "--home", "--context"]),
+        (
+            &["auth", "status"],
+            &["--debug", "--home", "--url", "--context"],
+        ),
+        (
+            &["auth", "whoami"],
+            &["--debug", "--home", "--url", "--context"],
+        ),
+        (
+            &["volume"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
+        ),
+        (
+            &["volume", "create"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
+        ),
+        (
+            &["volume", "ls"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
+        ),
+        (
+            &["volume", "list"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
+        ),
+        (
+            &["volume", "get"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
+        ),
+        (
+            &["volume", "inspect"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
+        ),
+        (
+            &["volume", "rm"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
+        ),
+        (
+            &["volume", "delete"],
+            &["--debug", "--home", "--url", "--context", "--path-prefix"],
+        ),
+        (&["completion"], &[]),
+    ];
+
+    for help_flag in ["-h", "--help"] {
+        for (path, visible) in cases {
+            let help = help_for(path, help_flag);
+            if *path == ["completion"] {
+                assert!(!help.contains("\nGlobal options:\n"), "{help}");
+            }
+            if matches!(*path, ["run"] | ["create"]) {
+                assert!(!help.contains("\nAdvanced boot options:\n"), "{help}");
+                for option in [
+                    "--kernel",
+                    "--kernel-format",
+                    "--initramfs",
+                    "--kernel-args",
+                    "--nested-virtualization",
+                ] {
+                    assert!(!declares_option(&help, option), "{option}:\n{help}");
+                }
+            }
+            for option in GLOBAL_OPTIONS {
+                assert_eq!(
+                    declares_option(&help, option),
+                    visible.contains(option),
+                    "{option} visibility is wrong in `acrylmicrovm {} {help_flag}`:\n{help}",
+                    path.join(" ")
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn command_specific_help_has_no_noop_options() {
+    let cases: &[(&[&str], &[&str])] = &[
+        (&["exec"], &["--entrypoint"]),
+        (&["create"], &["--detach", "--rm"]),
+        (&["images"], &["--all"]),
+        (&["cp"], &["--include-parent"]),
+    ];
+
+    for (path, absent) in cases {
+        let help = help_for(path, "--help");
+        for option in *absent {
+            assert!(
+                !declares_option(&help, option),
+                "{option} is a no-op but appears in `acrylmicrovm {} --help`:\n{help}",
+                path.join(" ")
+            );
+        }
+    }
+
+    // `cp` spells "the contents, not the directory" as `SRC/.` now; the flag
+    // that used to say it must be gone rather than silently accepted.
+    let cp_help = help_for(&["cp"], "--help");
+    assert!(
+        !declares_option(&cp_help, "--no-include-parent"),
+        "--no-include-parent was replaced by the SRC/. spelling:\n{cp_help}"
+    );
+}
+
+#[test]
+fn serve_help_never_reveals_the_api_key_environment_value() {
+    const SENTINEL: &str = "acrylmicrovm-help-must-mask-this-secret";
+
+    Command::new(assert_cmd::cargo::cargo_bin!("acrylmicrovm"))
+        .env("ACRYLMICROVM_SERVE_API_KEY", SENTINEL)
+        .args(["serve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains(SENTINEL).not())
+        .stderr(predicates::str::contains(SENTINEL).not());
+}
+
+#[test]
+fn irrelevant_global_options_are_rejected_wherever_they_are_written() {
+    for (args, diagnostic) in [
+        (
+            ["--url", "https://ignored.test", "completion", "bash"],
+            "--url is not valid for `acrylmicrovm completion`",
+        ),
+        (
+            ["completion", "bash", "--url", "https://ignored.test"],
+            "unexpected argument '--url'",
+        ),
+    ] {
+        Command::new(assert_cmd::cargo::cargo_bin!("acrylmicrovm"))
+            .args(args)
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains(diagnostic));
+    }
+}
+
+#[test]
+fn irrelevant_global_environment_values_do_not_break_a_command() {
+    Command::new(assert_cmd::cargo::cargo_bin!("acrylmicrovm"))
+        .env("ACRYLMICROVM_HOME", "relative-but-unused")
+        .args(["completion", "bash"])
+        .assert()
+        .success();
+}
+
+#[cfg(unix)]
+#[test]
+fn irrelevant_non_utf8_global_environment_values_do_not_break_a_command() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    Command::new(assert_cmd::cargo::cargo_bin!("acrylmicrovm"))
+        .env(
+            "ACRYLMICROVM_REST_URL",
+            OsString::from_vec(vec![b'h', b't', b't', b'p', 0xff]),
+        )
+        .args(["completion", "bash"])
+        .assert()
+        .success();
+}
+
+#[cfg(unix)]
+#[test]
+fn auth_login_rejects_a_non_utf8_url_environment_value() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    Command::new(assert_cmd::cargo::cargo_bin!("acrylmicrovm"))
+        .env(
+            "ACRYLMICROVM_REST_URL",
+            OsString::from_vec(vec![b'h', b't', b't', b'p', 0xff]),
+        )
+        .args(["auth", "login", "--api-key-stdin"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains(
+            "ACRYLMICROVM_REST_URL must contain valid UTF-8",
+        ));
+}

@@ -1,0 +1,510 @@
+# Modified by ACRYL, 2026
+# Run VM-based E2E integration tests on a persistent GCP VM runner.
+#
+# Full-runtime tests use persistent KVM capacity and cached native builds.
+# This workflow starts a pre-configured VM, runs integration tests, then
+# stops it. The VM is never deleted — build caches persist on its disk.
+#
+# Architecture:
+#   start-runner (ubuntu-latest)  →  e2e-tests (self-hosted)  →  stop-runner (ubuntu-latest)
+#     Start stopped VM                Build + run tests             Stop VM
+#     Wait for runner online           50-min timeout               if: always()
+#
+# Concurrency: only ONE e2e run at a time (single persistent VM).
+# A newer push queues behind the in-progress run instead of cancelling it.
+#
+# Authentication:
+#   GCP: GitHub OIDC → workload identity pool ci-gha-e2e → service account
+#        ci-gha-e2e-ctl, which can only get/start/stop/set metadata on the VM
+#   GitHub: GitHub App → short-lived installation token (no PAT)
+#
+# Registration: every start hands the VM a fresh runner registration token
+# through instance metadata (scripts/ci/gcp-e2e-vm.sh), and the VM's startup
+# script (scripts/ci/gcp-e2e-startup.sh) re-registers with it, so a
+# registration GitHub deleted heals on the next run.
+#
+# Fork PRs: plain `pull_request` withholds secrets AND repo variables from
+# fork runs, so start-runner cannot authenticate. The PR trigger is
+# therefore `pull_request_target` (base context: secrets available, workflow
+# definition always from main), gated by the maintainer-applied `e2e-local`
+# label. For forks the approval is per-push: only the labeling event runs,
+# pinned to the head SHA the maintainer approved — a new push needs a
+# re-label. Untrusted code runs only in e2e-tests, which holds no secrets
+# and a read-only token; the VM has no service account, so that code gets
+# no cloud credentials either.
+#
+# Runbook: docs/contributing/development/e2e-local.md
+name: E2E local
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/acrylmicrovm/**'
+      - 'src/shared/**'
+      - 'src/cli/**'
+      - 'src/guest/**'
+      - 'src/shim/**'
+      - 'src/deps/**'
+      - 'src/vmm/**'
+      - 'src/hypervisor/**'
+      - 'scripts/build/build-vmm-boot.sh'
+      - 'sdks/**'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '.gitmodules'
+      - '.github/workflows/e2e-local.yml'
+      - '!**/*.md'
+  pull_request_target:
+    types: [labeled, synchronize]
+    branches: [main]
+    paths:
+      - 'src/acrylmicrovm/**'
+      - 'src/shared/**'
+      - 'src/cli/**'
+      - 'src/guest/**'
+      - 'src/shim/**'
+      - 'src/deps/**'
+      - 'src/vmm/**'
+      - 'src/hypervisor/**'
+      - 'scripts/build/build-vmm-boot.sh'
+      - 'sdks/**'
+      - '**/Cargo.toml'
+      - 'Cargo.lock'
+      - '.gitmodules'
+      - '!**/*.md'
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: 'Open SSH session on failure (via tmate)'
+        type: boolean
+        default: false
+      registries:
+        description: 'Registries tests pull from: local (recorded replay) or upstream (public mirrors)'
+        type: choice
+        options:
+          - local
+          - upstream
+        default: local
+
+# Single global concurrency group — only one e2e run at a time (the
+# persistent VM can only serve one job). A newer push queues behind
+# the in-progress run instead of cancelling it, so an in-flight run keeps
+# its VM work and the earlier commit still gets a result. GitHub keeps only
+# the newest pending run, so intermediate queued pushes are superseded.
+concurrency:
+  group: e2e-runner
+  cancel-in-progress: false
+
+# pull_request_target's default token is write-capable and e2e-tests runs
+# labeled fork code — keep the inherited token read-only. start-runner and
+# stop-runner declare their own id-token permissions.
+permissions:
+  contents: read
+
+env:
+  GCP_PROJECT: acrylmicrovm-dev-project
+  GCP_ZONE: us-east5-a
+  GCP_INSTANCE: ci-gha-e2e-1
+  GCP_WORKLOAD_IDENTITY_PROVIDER: projects/929248348760/locations/global/workloadIdentityPools/ci-gha-e2e/providers/github
+  GCP_SERVICE_ACCOUNT: ci-gha-e2e-ctl@acrylmicrovm-dev-project.iam.gserviceaccount.com
+  RUNNER_LABEL: gcp-e2e
+
+jobs:
+  # =========================================================================
+  # Gate: PRs require 'e2e-local' label (only maintainers can add it).
+  # Same-repo PRs re-run while labeled; fork PRs run only on the labeling
+  # event itself, so every new fork push needs a fresh maintainer re-label.
+  # =========================================================================
+  should-run:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - name: Check trigger conditions
+        id: check
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+          ADDED_LABEL: ${{ github.event.label.name }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          LABELS: ${{ toJson(github.event.pull_request.labels.*.name) }}
+        run: |
+          if [ "$EVENT_NAME" != "pull_request_target" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"   # push / workflow_dispatch
+            exit 0
+          fi
+          if ! echo "$LABELS" | jq -e 'index("e2e-local")' > /dev/null 2>&1; then
+            echo "run=false" >> "$GITHUB_OUTPUT"  # label is the cost gate
+            exit 0
+          fi
+          if [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_ACTION" = "labeled" ] && [ "$ADDED_LABEL" = "e2e-local" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Fork PR changed since its e2e-local approval. Remove and re-add the label to re-run e2e."
+          fi
+
+  # =========================================================================
+  # Job 1: Start the persistent VM and wait for runner
+  # =========================================================================
+  start-runner:
+    name: Start E2E Runner
+    needs: should-run
+    if: needs.should-run.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      instance: ${{ steps.start.outputs.instance }}
+    steps:
+      - name: Generate GitHub App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ vars.GH_APP_ID }}
+          private-key: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          # Least privilege: the registration-token and list-runners calls need
+          # repo Administration. Scope the token so it does not inherit other
+          # installation permissions.
+          permission-administration: write
+
+      # google-github-actions/auth writes its credentials file under
+      # $GITHUB_WORKSPACE, so checkout comes first. Under pull_request_target
+      # this is main's tree; no PR code runs in this job.
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Federate a GCP identity
+        id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - name: Start the VM with a fresh runner registration
+        id: start
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          # Set first, so stop-runner still stops a VM this step left booting.
+          echo "instance=$GCP_INSTANCE" >> "$GITHUB_OUTPUT"
+          scripts/ci/gcp-e2e-vm.sh start
+
+      - name: Wait for runner to come online
+        run: |
+          # A boot re-registers the runner; the very first boot also
+          # installs it (~1 min).
+          TIMEOUT=300
+          ELAPSED=0
+          INTERVAL=10
+
+          echo "Waiting for runner '${{ env.RUNNER_LABEL }}' to come online..."
+
+          while [ $ELAPSED -lt $TIMEOUT ]; do
+            STATUS=$(curl -sf \
+              -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${{ github.repository }}/actions/runners" \
+              | jq -r '.runners[] | select(.labels[].name == "${{ env.RUNNER_LABEL }}") | .status // empty' \
+              2>/dev/null || echo "")
+
+            if [ "$STATUS" = "online" ]; then
+              echo "Runner is online"
+              exit 0
+            fi
+
+            echo "  Waiting... (${ELAPSED}s / ${TIMEOUT}s)"
+            sleep $INTERVAL
+            ELAPSED=$((ELAPSED + INTERVAL))
+          done
+
+          echo "::error::Runner did not come online within ${TIMEOUT}s"
+          exit 1
+
+      # A registration token stays valid for an hour; remove it so the tests'
+      # code cannot read it from the metadata server and register its own
+      # runner.
+      - name: Remove the registration token from VM metadata
+        if: always() && steps.auth.outcome == 'success'
+        env:
+          REPO: ${{ github.repository }}
+        run: scripts/ci/gcp-e2e-vm.sh clear-token
+
+  # =========================================================================
+  # Job 2: Run integration tests on the persistent runner
+  # =========================================================================
+  e2e-tests:
+    name: E2E Integration Tests
+    needs: start-runner
+    runs-on:
+      - self-hosted
+      - gcp-e2e
+    timeout-minutes: 50
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: '0'
+      HOME: /root
+    steps:
+      - name: Clean workspace (persistent runner)
+        run: |
+          rm -rf /tmp/acrylmicrovm-* 2>/dev/null || true
+          if [ -d "$GITHUB_WORKSPACE/.git" ]; then
+            cd "$GITHUB_WORKSPACE"
+            git clean -ffd 2>/dev/null || true
+            git checkout -- . 2>/dev/null || true
+          fi
+
+      - name: Stage prior-run logs for rescue
+        # If a previous run died mid-step (e.g. Worker ENOSPC), its logs
+        # are still on this persistent runner under /var/log/acrylmicrovm-ci/.
+        # Move them aside so the upload step below can ship them as a
+        # separate artifact, then clear them off the runner volume.
+        #
+        # Namespace key is "<run_id>-<run_attempt>": reruns of the same
+        # workflow share github.run_id and only github.run_attempt
+        # increments, so run_id alone would let attempt N misidentify
+        # attempt N-1's directory as its own and skip rescuing it.
+        env:
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_RUN_ATTEMPT: ${{ github.run_attempt }}
+        run: |
+          set -u
+          BASE=/var/log/acrylmicrovm-ci
+          STAGE=/tmp/acrylmicrovm-rescue
+          CURRENT="${GH_RUN_ID}-${GH_RUN_ATTEMPT}"
+          rm -rf "$STAGE" && mkdir -p "$STAGE"
+          if [ -d "$BASE" ]; then
+            for d in "$BASE"/*; do
+              [ -d "$d" ] || continue
+              [ "$(basename "$d")" = "$CURRENT" ] && continue
+              mv "$d" "$STAGE/"
+            done
+          fi
+
+      - name: Upload rescued prior-run logs
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-local-logs-rescued-${{ github.run_id }}-${{ github.run_attempt }}
+          path: /tmp/acrylmicrovm-rescue/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Pre-flight runner cleanup (runner internals only — never caches)
+        # Housekeeping for actions-runner's own diagnostic logs so they
+        # don't accumulate over the runner's lifetime. Build/image caches
+        # (~/.acryl/microvm/, ~/.cargo/, target/) are LEFT ALONE — they are why
+        # this runner is persistent.
+        #
+        # Triggered by run 25726812554 where _diag was the canary for a
+        # 50→500GB root-volume migration: _diag was the first write to
+        # hit ENOSPC, but the actual disk fill came from build artifacts
+        # under _work/.../target/, not from _diag itself. This step is
+        # preventative housekeeping, not the fix for that incident.
+        run: |
+          find /opt/actions-runner/_diag -maxdepth 1 -type f -name 'Worker_*.log' -mtime +1 -delete 2>/dev/null || true
+          find /opt/actions-runner/_diag -maxdepth 1 -type f -name 'Runner_*.log' -mtime +1 -delete 2>/dev/null || true
+
+      - name: Checkout code
+        id: checkout
+        uses: actions/checkout@v5
+        with:
+          # pull_request_target resolves to the BASE branch by default, which
+          # would silently test main instead of the PR. Pin the head SHA the
+          # maintainer approved when labeling; push/dispatch keep github.sha.
+          # No credentials persist on the runner: fork code runs after this.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+          submodules: recursive
+          clean: false
+          # checkout v5.1.0+ refuses fork-PR checkouts under
+          # pull_request_target unless opted in. Safe here: the run is
+          # label-gated to the maintainer-approved head SHA, this job holds
+          # no secrets, and the token is read-only and not persisted.
+          allow-unsafe-pr-checkout: true
+
+      - name: Disk-pressure cache eviction
+        # Keep this workflow-owned: older PR heads may lack new helper scripts.
+        run: &e2e_disk_cleanup |
+          set -euo pipefail
+          export LC_ALL=C
+          WORKSPACE=$(realpath -e -- "$GITHUB_WORKSPACE")
+          CACHE_HOME=$(realpath -e -- "$HOME")
+          TEMP_ROOT=$(realpath -e -- "${TMPDIR:-/tmp}")
+          if [[ "$WORKSPACE" == / || ! -d "$WORKSPACE" ]]; then
+            echo "::error::Invalid cleanup workspace: $WORKSPACE"
+            exit 1
+          fi
+          readonly THRESHOLD_PCT=70 MIN_FREE_BYTES=$((50 * 1024 ** 3))
+
+          read_df() {
+            local output reading
+            if ! output=$(df -B1 --output=avail,pcent -- "$WORKSPACE"); then
+              echo "::error::Cannot read workspace disk usage"
+              exit 1
+            fi
+            reading=$(tail -n 1 <<< "$output")
+            if ! [[ "$reading" =~ ^[[:space:]]*([0-9]{1,15})[[:space:]]+([0-9]{1,3})%[[:space:]]*$ ]]; then
+              echo "::error::Invalid df reading: $reading"
+              exit 1
+            fi
+            FREE_BYTES=$((10#${BASH_REMATCH[1]}))
+            USED_PCT=$((10#${BASH_REMATCH[2]}))
+            if (( USED_PCT > 100 )); then
+              echo "::error::Invalid disk usage: $USED_PCT%"
+              exit 1
+            fi
+            echo "Workspace disk: $FREE_BYTES bytes free ($USED_PCT% used)"
+          }
+
+          under_pressure() {
+            (( USED_PCT >= THRESHOLD_PCT || FREE_BYTES < MIN_FREE_BYTES ))
+          }
+
+          clear_cache() {
+            local path=$1
+            [[ -e "$path" || -L "$path" ]] || return 0
+            # Reject redirects, including a symlinked target/ ancestor.
+            if [[ "$(realpath -e -- "$path")" != "$path" ]]; then
+              echo "::error::Refusing redirected cleanup path: $path"
+              exit 1
+            fi
+            echo "Reclaiming $path"
+            if ! rm -rf --one-file-system -- "$path"; then
+              echo "::error::Cannot remove cache: $path"
+              exit 1
+            fi
+          }
+
+          read_df
+          under_pressure || exit 0
+          for path in "$WORKSPACE/target/acrylmicrovm-test" "$TEMP_ROOT"/acrylmicrovm-* "$CACHE_HOME/.acryl/microvm"; do
+            [[ "$path" == "$TEMP_ROOT/acrylmicrovm-rescue" ]] && continue
+            clear_cache "$path"
+          done
+          read_df
+          under_pressure || exit 0
+
+          # Keep native dependencies and nextest logs; stop once headroom returns.
+          for path in "$WORKSPACE"/target/{debug,release} \
+                      "$WORKSPACE"/target/*-unknown-linux-{gnu,musl}/{debug,release}; do
+            clear_cache "$path"
+            read_df
+            under_pressure || exit 0
+          done
+          echo "::error::Disk still exceeds 70% use or has less than 50 GiB free; manual cleanup needed"
+          exit 1
+
+      - name: Verify KVM access
+        run: |
+          test -c /dev/kvm && test -r /dev/kvm -a -w /dev/kvm && echo "/dev/kvm is accessible" || {
+            echo "::error::/dev/kvm not accessible"; exit 1
+          }
+
+      - name: Install build dependencies (make setup)
+        run: |
+          # First run on a fresh VM: ~5–10 min (apt + rustup +
+          # cargo-nextest; CI=true so prek install is skipped).
+          # Subsequent runs reuse the persistent disk and are
+          # idempotent fast-paths (~10–30 s).
+          bash scripts/setup/setup-ubuntu.sh
+
+      # The runner is a reused VM, so its hardware is not implied
+      # by this workflow. Enable the nested-KVM test only where the loaded KVM
+      # module actually reports nesting; warn loudly otherwise, because a silent
+      # skip is indistinguishable from a pass.
+      - name: Probe runner for nested virtualization
+        run: |
+          for probe in /sys/module/kvm_intel/parameters/nested \
+                       /sys/module/kvm_amd/parameters/nested; do
+            if grep -qiE '^(Y|1)$' "$probe" 2>/dev/null; then
+              echo "ACRYLMICROVM_TEST_NESTED_VIRTUALIZATION=1" >> "$GITHUB_ENV"
+              echo "nested virtualization available via $probe"
+              exit 0
+            fi
+          done
+          echo "::warning::Runner does not report nested KVM; nested_virtualization_can_create_kvm_vm will not run."
+
+      - name: Run integration tests
+        env:
+          GH_RUN_ID: ${{ github.run_id }}
+          GH_RUN_ATTEMPT: ${{ github.run_attempt }}
+          # Pushes and labeled PRs carry no inputs, so they use the local registry.
+          ACRYLMICROVM_TEST_REGISTRIES: ${{ inputs.registries || 'local' }}
+        run: |
+          source "$HOME/.cargo/env" 2>/dev/null || true
+          export PATH="/usr/local/go/bin:$HOME/go/bin:$PATH"
+          LOG_DIR="/var/log/acrylmicrovm-ci/${GH_RUN_ID}-${GH_RUN_ATTEMPT}"
+          mkdir -p "$LOG_DIR"
+          # tee to persistent volume so logs survive runner Worker death.
+          # The next run's Stage step rescues + uploads "$LOG_DIR".
+          set -o pipefail
+          make test:integration 2>&1 | tee "${LOG_DIR}/integration.log"
+
+      - name: Upload test logs on failure or cancellation
+        # `failure()` alone misses cancelled jobs (concurrency cancellation,
+        # host reboot, timeout — all surface as `cancelled()`, not failure).
+        # We want logs for every non-success outcome.
+        if: failure() || cancelled()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-local-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            target/nextest/
+            /tmp/acrylmicrovm-*/
+            !/tmp/acrylmicrovm-rescue/
+            /var/log/acrylmicrovm-ci/${{ github.run_id }}-${{ github.run_attempt }}/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Debug via SSH on failure
+        if: failure() && inputs.debug
+        uses: mxschmitt/action-tmate@v3
+        with:
+          limit-access-to-actor: true
+          timeout-minutes: 30
+
+      - name: Post-run disk-pressure cache eviction
+        if: always() && steps.checkout.outcome == 'success' && !(failure() && inputs.debug)
+        timeout-minutes: 5
+        run: *e2e_disk_cleanup
+
+  # =========================================================================
+  # Job 3: Stop the VM (always runs)
+  # =========================================================================
+  stop-runner:
+    name: Stop E2E Runner
+    needs: [start-runner, e2e-tests]
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    if: always() && needs.start-runner.outputs.instance != ''
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+
+      - name: Federate a GCP identity
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - name: Stop the VM
+        if: ${{ !(needs.e2e-tests.result == 'failure' && inputs.debug) }}
+        env:
+          REPO: ${{ github.repository }}
+        run: |
+          scripts/ci/gcp-e2e-vm.sh stop \
+            && echo "VM stopping" \
+            || echo "::warning::Failed to stop the VM"
+
+      - name: Skip stop (debug mode — tests failed with SSH active)
+        if: ${{ needs.e2e-tests.result == 'failure' && inputs.debug }}
+        run: echo "::warning::VM left running for the SSH debug session. The next run reuses it; stop it from the GCP console when done."

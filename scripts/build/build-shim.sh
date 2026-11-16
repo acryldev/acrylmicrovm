@@ -1,0 +1,113 @@
+#!/bin/bash
+# Modified by ACRYL, 2026
+# Universal script to build acrylmicrovm-shim binary on macOS or Linux
+#
+# Usage:
+#   ./build-shim.sh [--profile PROFILE]
+#
+# Options:
+#   --profile PROFILE   Build profile: release or debug (default: release)
+#
+# Note: On macOS, the binary is automatically signed with hypervisor entitlements
+# Note: On Linux, the binary is statically linked using glibc (crt-static).
+#       Go c-archive is incompatible with musl TLS, so we use glibc static linking instead.
+
+set -e
+
+# Load common utilities
+SCRIPT_BUILD_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$SCRIPT_BUILD_DIR/.." && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+source "$SCRIPT_DIR/common.sh"
+
+# Parse command-line arguments
+parse_args() {
+    PROFILE="release"
+
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --profile)
+                PROFILE="$2"
+                shift 2
+                ;;
+            *)
+                echo "Unknown option: $1"
+                echo "Usage: $0 [--profile PROFILE]"
+                exit 1
+                ;;
+        esac
+    done
+
+    # Validate PROFILE value
+    if [ "$PROFILE" != "release" ] && [ "$PROFILE" != "debug" ]; then
+        echo "Invalid profile: $PROFILE"
+        echo "Run with --profile release or --profile debug"
+        exit 1
+    fi
+}
+
+parse_args "$@"
+
+# Detect OS
+OS=$(detect_os)
+print_header "🚀 Building acrylmicrovm-shim on $OS..."
+
+SHIM_BINARY_PATH="$PROJECT_ROOT/target/$PROFILE/acrylmicrovm-shim"
+
+# Build the shim binary
+build_shim_binary() {
+    cd "$PROJECT_ROOT"
+    echo "🔨 Building shim binary $PROFILE..."
+    local build_flag=""
+    if [ "$PROFILE" = "release" ]; then
+        build_flag="--release"
+    fi
+
+    if [ "$OS" = "linux" ]; then
+        # Go c-archive crashes with musl TLS; use glibc + crt-static instead.
+        # Whether crt-static can dlopen libkrunfw depends on libkrunfw's own libc
+        # DT_NEEDED, which LibFixup::enforce_libc_dependency sets per target arch:
+        # aarch64 needs the entry (a static binary cannot otherwise resolve it),
+        # x86_64 needs it absent (it would pull in the deployment host's libc).
+        # relocation-model=static avoids static-pie which is incompatible with Go c-archive relocations.
+        # --target is required so RUSTFLAGS (crt-static, relocation-model) don't leak into
+        # proc-macro compilation — proc-macros are dylibs and can't use crt-static.
+        # The downside is cargo outputs to target/<triple>/$PROFILE/ instead of target/$PROFILE/,
+        # so we copy the binary back to the canonical path after building.
+        local arch
+        arch=$(uname -m)
+        local target="${arch}-unknown-linux-gnu"
+        export RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C link-arg=-Wl,-z,stack-size=2097152 -C link-arg=-Wl,--allow-multiple-definition"
+        echo "🎯 Static glibc binary (crt-static + relocation-model=static)"
+        cargo build $build_flag -p acrylmicrovm-shim --target "$target"
+        cp "$PROJECT_ROOT/target/$target/$PROFILE/acrylmicrovm-shim" "$SHIM_BINARY_PATH"
+    else
+        cargo build $build_flag -p acrylmicrovm-shim
+    fi
+}
+
+# Sign the binary (macOS only, automatic)
+sign_binary() {
+    if [ "$OS" != "macos" ]; then
+        echo "⏭️  Signing skipped (not macOS)"
+        return 0
+    fi
+
+    # Always sign the build output (cargo produces unsigned binaries)
+    echo "📦 Signing acrylmicrovm-shim with hypervisor entitlements..."
+    "$SCRIPT_BUILD_DIR/sign.sh" "$SHIM_BINARY_PATH"
+}
+
+# Main execution
+main() {
+    build_shim_binary
+    sign_binary
+
+    echo "✅ Shim binary built successfully"
+    echo "Binary location: $SHIM_BINARY_PATH"
+
+    echo ""
+    echo "🎉 Done! Shim binary is ready."
+}
+
+main "$@"

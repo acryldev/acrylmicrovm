@@ -1,0 +1,32 @@
+{
+  "name": "acrylmicrovm",
+  "version": "1.0.0",
+  "description": "[![Build](https://github.com/acryldev/acrylmicrovm/actions/workflows/build-wheels.yml/badge.svg)](https://github.com/acryldev/acrylmicrovm/actions/workflows/build-wheels.yml) [![Lint](https://github.com/acryldev/acrylmicrovm/actions/workflows/lint.yml/badge.svg)](https://github.com/acryldev/acrylmicrovm/actions/workflows/lint.yml) [![PyPI](https://img.shields.io/pypi/v/acrylmicrovm.svg)](https://pypi.org/project/acrylmicrovm/) [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "example": "examples"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/acryldev/acrylmicrovm.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/acryldev/acrylmicrovm/issues"
+  },
+  "homepage": "https://github.com/acryldev/acrylmicrovm#readme",
+  "dependencies": {
+    "@acryldev/acrylmicrovm": "^0.13.1"
+  },
+  "optionalDependencies": {
+    "@acryldev/acrylmicrovm-darwin-arm64": "^0.2.8",
+    "@acryldev/acrylmicrovm-linux-x64-gnu": "^0.2.8"
+  }
+}

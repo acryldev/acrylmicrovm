@@ -1,0 +1,841 @@
+// Modified by ACRYL, 2026
+package acrylmicrovm
+
+/*
+#include "bridge.h"
+*/
+import "C"
+
+import (
+	"runtime/cgo"
+	"unsafe"
+)
+
+// handleToPtr converts a cgo.Handle into the unsafe.Pointer expected by the
+// C user_data slots. cgo.Handle is a uintptr under the hood; we read its
+// representation as an unsafe.Pointer to keep go vet happy (uintptr ->
+// unsafe.Pointer conversions are flagged because they typically indicate a
+// pointer escape, but here we are simply transporting an opaque
+// pointer-sized token through C).
+func handleToPtr(h cgo.Handle) unsafe.Pointer {
+	return *(*unsafe.Pointer)(unsafe.Pointer(&h))
+}
+
+// ptrToHandle reverses handleToPtr.
+func ptrToHandle(p unsafe.Pointer) cgo.Handle {
+	return *(*cgo.Handle)(unsafe.Pointer(&p))
+}
+
+// errorFromCError copies the typed error out of *CAcrylMicrovmError (releasing
+// the C-allocated message) before returning. Returns nil on success codes.
+func errorFromCError(cerr *C.CAcrylMicrovmError) error {
+	if cerr == nil || cerr.code == C.Ok {
+		return nil
+	}
+	return freeError(cerr)
+}
+
+// ─── Streaming callbacks ───────────────────────────────────────────────────
+
+//export goAcrylMicrovmOnStdout
+func goAcrylMicrovmOnStdout(data *C.uint8_t, length C.size_t, userData unsafe.Pointer) {
+	dispatchStreamWrite(userData, data, length, false)
+}
+
+//export goAcrylMicrovmOnStderr
+func goAcrylMicrovmOnStderr(data *C.uint8_t, length C.size_t, userData unsafe.Pointer) {
+	dispatchStreamWrite(userData, data, length, true)
+}
+
+//export goAcrylMicrovmOnExit
+func goAcrylMicrovmOnExit(exitCode C.int, userData unsafe.Pointer) {
+	dispatchExit(int(exitCode), ptrToHandle(userData))
+}
+
+// dispatchExit handles the per-execution Exit callback dispatch logic.
+// Split out from goAcrylMicrovmOnExit so unit tests (which can't use cgo) can
+// exercise the same code path.
+//
+// Rust now orders Exit strictly last: exit_pump awaits every stream pump's
+// completion oneshot before pushing the Exit event, and execution_free
+// synthesises an Exit (with EXIT_CODE_FORCE_CLOSED) for the abort path.
+// Therefore no stream callback can fire after the exit callback runs, and
+// it is safe to Delete the shared cgo.Handle here.
+func dispatchExit(exitCode int, h cgo.Handle) {
+	if h == 0 {
+		return
+	}
+	if value := h.Value(); value != nil {
+		if exec, ok := value.(*executionStreamState); ok {
+			exec.deliverExit(exitCode)
+		}
+	}
+	h.Delete()
+}
+
+// ─── Box lifecycle callbacks ───────────────────────────────────────────────
+
+// freeBoxHandlePayload reclaims a *CBoxHandle that the C side
+// `OwnedFfiPtr::take()`'d before invoking the dispatch callback. Used
+// by the claim-failure branch in goAcrylMicrovmOnCreateBox /
+// goAcrylMicrovmOnGetBox so the live VM (Create) or the attached handle
+// (Get) does NOT leak when Runtime.Close races a queued success.
+func freeBoxHandlePayload(b **C.CBoxHandle) {
+	if b == nil || *b == nil {
+		return
+	}
+	C.acrylmicrovm_box_free(*b)
+}
+
+func freeAcrylMicrovmStringPayload(value **C.char) {
+	if value == nil || *value == nil {
+		return
+	}
+	freeAcrylMicrovmString(*value)
+}
+
+//export goAcrylMicrovmOnCreateBox
+func goAcrylMicrovmOnCreateBox(box *C.CBoxHandle, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	if !claimOrFreePayload(h, &box, freeBoxHandlePayload) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan handleResult[*C.CBoxHandle])
+	if !ok {
+		return
+	}
+	ch <- handleResult[*C.CBoxHandle]{value: box, err: errorFromCError(errPtr)}
+}
+
+//export goAcrylMicrovmOnBoxExport
+func goAcrylMicrovmOnBoxExport(archivePath *C.char, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		freeAcrylMicrovmStringPayload(&archivePath)
+		return
+	}
+	if !claimOrFreePayload(h, &archivePath, freeAcrylMicrovmStringPayload) {
+		return
+	}
+	defer h.Delete()
+
+	ch, ok := h.Value().(chan handleResult[*C.char])
+	if !ok {
+		freeAcrylMicrovmStringPayload(&archivePath)
+		return
+	}
+	ch <- handleResult[*C.char]{value: archivePath, err: errorFromCError(errPtr)}
+}
+
+//export goAcrylMicrovmOnRuntimeImport
+func goAcrylMicrovmOnRuntimeImport(box *C.CBoxHandle, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		freeBoxHandlePayload(&box)
+		return
+	}
+	if !claimOrFreePayload(h, &box, freeBoxHandlePayload) {
+		return
+	}
+	defer h.Delete()
+
+	ch, ok := h.Value().(chan handleResult[*C.CBoxHandle])
+	if !ok {
+		freeBoxHandlePayload(&box)
+		return
+	}
+	ch <- handleResult[*C.CBoxHandle]{value: box, err: errorFromCError(errPtr)}
+}
+
+// boxAndCreated carries a get-or-create result across the dispatch channel: the
+// box handle plus whether it was newly created (true) or an adopted existing
+// box (false). Wrapping both in one value lets GetOrCreate reuse the generic
+// handleResult/abandonAsync machinery.
+type boxAndCreated struct {
+	box     *C.CBoxHandle
+	created bool
+}
+
+//export goAcrylMicrovmOnGetOrCreateBox
+func goAcrylMicrovmOnGetOrCreateBox(box *C.CBoxHandle, created C.bool, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	if !claimOrFreePayload(h, &box, freeBoxHandlePayload) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan handleResult[boxAndCreated])
+	if !ok {
+		return
+	}
+	ch <- handleResult[boxAndCreated]{
+		value: boxAndCreated{box: box, created: bool(created)},
+		err:   errorFromCError(errPtr),
+	}
+}
+
+//export goAcrylMicrovmOnGetBox
+func goAcrylMicrovmOnGetBox(box *C.CBoxHandle, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	if !claimOrFreePayload(h, &box, freeBoxHandlePayload) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan handleResult[*C.CBoxHandle])
+	if !ok {
+		return
+	}
+	ch <- handleResult[*C.CBoxHandle]{value: box, err: errorFromCError(errPtr)}
+}
+
+//export goAcrylMicrovmOnStartBox
+func goAcrylMicrovmOnStartBox(errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	deliverUnitResult(userData, errPtr)
+}
+
+//export goAcrylMicrovmOnStopBox
+func goAcrylMicrovmOnStopBox(errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	deliverUnitResult(userData, errPtr)
+}
+
+//export goAcrylMicrovmOnRemoveBox
+func goAcrylMicrovmOnRemoveBox(errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	deliverUnitResult(userData, errPtr)
+}
+
+//export goAcrylMicrovmOnCopy
+func goAcrylMicrovmOnCopy(errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	deliverUnitResult(userData, errPtr)
+}
+
+// ─── Image callbacks ───────────────────────────────────────────────────────
+
+//export goAcrylMicrovmOnImagePull
+func goAcrylMicrovmOnImagePull(res *C.CImagePullResult, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	// Claim the handle and free the payload on claim-failure. Without
+	// freeing here, the C-allocated CImagePullResult would leak when
+	// Runtime.Close races a queued success callback.
+	if !claimOrFreePayload(h, &res, func(r **C.CImagePullResult) {
+		if r != nil && *r != nil {
+			C.acrylmicrovm_free_image_pull_result(*r)
+		}
+	}) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan imagePullResult)
+	if !ok {
+		return
+	}
+	if err := errorFromCError(errPtr); err != nil {
+		ch <- imagePullResult{err: err}
+		return
+	}
+	out := &ImagePullResult{}
+	if res != nil {
+		out.Reference = cString(res.reference)
+		out.ConfigDigest = cString(res.config_digest)
+		out.LayerCount = int(res.layer_count)
+		C.acrylmicrovm_free_image_pull_result(res)
+	}
+	ch <- imagePullResult{value: out}
+}
+
+//export goAcrylMicrovmOnImageList
+func goAcrylMicrovmOnImageList(list *C.CImageInfoList, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	if !claimOrFreePayload(h, &list, func(l **C.CImageInfoList) {
+		if l != nil && *l != nil {
+			C.acrylmicrovm_free_image_info_list(*l)
+		}
+	}) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan imageListResult)
+	if !ok {
+		return
+	}
+	if err := errorFromCError(errPtr); err != nil {
+		ch <- imageListResult{err: err}
+		return
+	}
+	images := convertImageInfoList(list)
+	if list != nil {
+		C.acrylmicrovm_free_image_info_list(list)
+	}
+	ch <- imageListResult{value: images}
+}
+
+//export goAcrylMicrovmOnImageGet
+func goAcrylMicrovmOnImageGet(detail *C.CImageDetail, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	if !claimOrFreePayload(h, &detail, func(d **C.CImageDetail) {
+		if d != nil && *d != nil {
+			C.acrylmicrovm_free_image_detail(*d)
+		}
+	}) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan imageDetailResult)
+	if !ok {
+		return
+	}
+	if err := errorFromCError(errPtr); err != nil {
+		ch <- imageDetailResult{err: err}
+		return
+	}
+	if detail == nil {
+		ch <- imageDetailResult{}
+		return
+	}
+	v := cImageDetailToGo(detail)
+	C.acrylmicrovm_free_image_detail(detail)
+	ch <- imageDetailResult{value: &v}
+}
+
+//export goAcrylMicrovmOnImageRemove
+func goAcrylMicrovmOnImageRemove(errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	deliverUnitResult(userData, errPtr)
+}
+
+// goAcrylMicrovmOnImageUsage copies the usage out during the callback: the C side
+// lends the pointer for the callback only.
+//
+//export goAcrylMicrovmOnImageUsage
+func goAcrylMicrovmOnImageUsage(usage *C.CImageUsage, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	// Claim before Value/Delete; see claimHandleForDispatch.
+	if !claimHandleForDispatch(h) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan imageUsageResult)
+	if !ok {
+		return
+	}
+	if err := errorFromCError(errPtr); err != nil {
+		ch <- imageUsageResult{err: err}
+		return
+	}
+	if usage == nil {
+		ch <- imageUsageResult{}
+		return
+	}
+	ch <- imageUsageResult{value: &ImageUsage{
+		Count:      uint64(usage.count),
+		Limit:      uint64(usage.limit),
+		KnownBytes: uint64(usage.known_bytes),
+	}}
+}
+
+// ─── Volume callbacks ──────────────────────────────────────────────────────
+
+// goAcrylMicrovmOnVolume delivers a single CVolumeInfo. Shared by Create and Get
+// (their C typedefs differ but the payload shape is identical).
+//
+//export goAcrylMicrovmOnVolume
+func goAcrylMicrovmOnVolume(info *C.CVolumeInfo, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	if !claimOrFreePayload(h, &info, func(i **C.CVolumeInfo) {
+		if i != nil && *i != nil {
+			C.acrylmicrovm_free_volume_info(*i)
+		}
+	}) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan volumeResult)
+	if !ok {
+		return
+	}
+	if err := errorFromCError(errPtr); err != nil {
+		ch <- volumeResult{err: err}
+		return
+	}
+	if info == nil {
+		ch <- volumeResult{}
+		return
+	}
+	v := cVolumeInfoToGo(info)
+	C.acrylmicrovm_free_volume_info(info)
+	ch <- volumeResult{value: &v}
+}
+
+//export goAcrylMicrovmOnVolumeList
+func goAcrylMicrovmOnVolumeList(list *C.CVolumeInfoList, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	if !claimOrFreePayload(h, &list, func(l **C.CVolumeInfoList) {
+		if l != nil && *l != nil {
+			C.acrylmicrovm_free_volume_info_list(*l)
+		}
+	}) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan volumeListResult)
+	if !ok {
+		return
+	}
+	if err := errorFromCError(errPtr); err != nil {
+		ch <- volumeListResult{err: err}
+		return
+	}
+	volumes := convertVolumeInfoList(list)
+	if list != nil {
+		C.acrylmicrovm_free_volume_info_list(list)
+	}
+	ch <- volumeListResult{value: volumes}
+}
+
+//export goAcrylMicrovmOnVolumeRemove
+func goAcrylMicrovmOnVolumeRemove(errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	deliverUnitResult(userData, errPtr)
+}
+
+//export goAcrylMicrovmOnRegistryCreate
+func goAcrylMicrovmOnRegistryCreate(login *C.CRegistryCredential, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	if !claimOrFreePayload(h, &login, func(l **C.CRegistryCredential) {
+		if l != nil && *l != nil {
+			C.acrylmicrovm_free_registry_credential(*l)
+		}
+	}) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan registryResult)
+	if !ok {
+		return
+	}
+	if err := errorFromCError(errPtr); err != nil {
+		ch <- registryResult{err: err}
+		return
+	}
+	if login == nil {
+		ch <- registryResult{}
+		return
+	}
+	v := cRegistryCredentialToGo(login)
+	C.acrylmicrovm_free_registry_credential(login)
+	ch <- registryResult{value: &v}
+}
+
+//export goAcrylMicrovmOnRegistryList
+func goAcrylMicrovmOnRegistryList(list *C.CRegistryCredentialList, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	if !claimOrFreePayload(h, &list, func(l **C.CRegistryCredentialList) {
+		if l != nil && *l != nil {
+			C.acrylmicrovm_free_registry_credential_list(*l)
+		}
+	}) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan registryListResult)
+	if !ok {
+		return
+	}
+	if err := errorFromCError(errPtr); err != nil {
+		ch <- registryListResult{err: err}
+		return
+	}
+	logins := convertRegistryCredentialList(list)
+	if list != nil {
+		C.acrylmicrovm_free_registry_credential_list(list)
+	}
+	ch <- registryListResult{value: logins}
+}
+
+//export goAcrylMicrovmOnRegistryRemove
+func goAcrylMicrovmOnRegistryRemove(errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	deliverUnitResult(userData, errPtr)
+}
+
+// ─── Info callbacks ────────────────────────────────────────────────────────
+
+//export goAcrylMicrovmOnInfo
+func goAcrylMicrovmOnInfo(info *C.CBoxInfo, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	if !claimOrFreePayload(h, &info, func(i **C.CBoxInfo) {
+		if i != nil && *i != nil {
+			C.acrylmicrovm_free_box_info(*i)
+		}
+	}) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan infoResult)
+	if !ok {
+		return
+	}
+	if err := errorFromCError(errPtr); err != nil {
+		ch <- infoResult{err: err}
+		return
+	}
+	if info == nil {
+		ch <- infoResult{}
+		return
+	}
+	v := cBoxInfoToGo(info)
+	C.acrylmicrovm_free_box_info(info)
+	ch <- infoResult{value: &v}
+}
+
+//export goAcrylMicrovmOnInfoList
+func goAcrylMicrovmOnInfoList(list *C.CBoxInfoList, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	if !claimOrFreePayload(h, &list, func(l **C.CBoxInfoList) {
+		if l != nil && *l != nil {
+			C.acrylmicrovm_free_box_info_list(*l)
+		}
+	}) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan infoListResult)
+	if !ok {
+		return
+	}
+	if err := errorFromCError(errPtr); err != nil {
+		ch <- infoListResult{err: err}
+		return
+	}
+	out := convertBoxInfoList(list)
+	if list != nil {
+		C.acrylmicrovm_free_box_info_list(list)
+	}
+	ch <- infoListResult{value: out}
+}
+
+// ─── Metrics callbacks ─────────────────────────────────────────────────────
+
+//export goAcrylMicrovmOnBoxMetrics
+func goAcrylMicrovmOnBoxMetrics(m *C.CBoxMetrics, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	// Claim before Value/Delete; see claimHandleForDispatch.
+	if !claimHandleForDispatch(h) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan boxMetricsResult)
+	if !ok {
+		return
+	}
+	if err := errorFromCError(errPtr); err != nil {
+		ch <- boxMetricsResult{err: err}
+		return
+	}
+	if m == nil {
+		ch <- boxMetricsResult{}
+		return
+	}
+	v := cBoxMetricsToGo(m)
+	ch <- boxMetricsResult{value: &v}
+}
+
+//export goAcrylMicrovmOnRuntimeMetrics
+func goAcrylMicrovmOnRuntimeMetrics(m *C.CRuntimeMetrics, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	// Claim before Value/Delete; see claimHandleForDispatch.
+	if !claimHandleForDispatch(h) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan runtimeMetricsResult)
+	if !ok {
+		return
+	}
+	if err := errorFromCError(errPtr); err != nil {
+		ch <- runtimeMetricsResult{err: err}
+		return
+	}
+	if m == nil {
+		ch <- runtimeMetricsResult{}
+		return
+	}
+	v := cRuntimeMetricsToGo(m)
+	ch <- runtimeMetricsResult{value: &v}
+}
+
+// ─── Runtime shutdown callback ─────────────────────────────────────────────
+
+//export goAcrylMicrovmOnRuntimeShutdown
+func goAcrylMicrovmOnRuntimeShutdown(errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	deliverUnitResult(userData, errPtr)
+}
+
+// ─── Execution lifecycle callbacks ─────────────────────────────────────────
+
+//export goAcrylMicrovmOnExecutionWait
+func goAcrylMicrovmOnExecutionWait(exitCode C.int, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	// Claim before Value/Delete; see claimHandleForDispatch.
+	if !claimHandleForDispatch(h) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan executionWaitResult)
+	if !ok {
+		return
+	}
+	ch <- executionWaitResult{
+		exitCode: int(exitCode),
+		err:      errorFromCError(errPtr),
+	}
+}
+
+//export goAcrylMicrovmOnExecutionKill
+func goAcrylMicrovmOnExecutionKill(errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	deliverUnitResult(userData, errPtr)
+}
+
+//export goAcrylMicrovmOnExecutionSignal
+func goAcrylMicrovmOnExecutionSignal(errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	deliverUnitResult(userData, errPtr)
+}
+
+//export goAcrylMicrovmOnExecutionResize
+func goAcrylMicrovmOnExecutionResize(errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	deliverUnitResult(userData, errPtr)
+}
+
+//export goAcrylMicrovmOnTunnelForwarderWait
+func goAcrylMicrovmOnTunnelForwarderWait(errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	deliverUnitResult(userData, errPtr)
+}
+
+//export goAcrylMicrovmOnTunnelForwarderClose
+func goAcrylMicrovmOnTunnelForwarderClose(errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	deliverUnitResult(userData, errPtr)
+}
+
+// freeSSHStatus releases a status the native side handed to an SSH callback.
+// A variable so development tests can count releases.
+var freeSSHStatus = func(status *C.CSshStatus) { C.acrylmicrovm_free_ssh_status(status) }
+
+func freeSSHStatusPayload(status **C.CSshStatus) {
+	if *status != nil {
+		freeSSHStatus(*status)
+	}
+}
+
+// goAcrylMicrovmOnSSHStatus serves configure, enable, status, and disable. The callback
+// owns the status, so every path frees it once: a zero or lost handle frees
+// without delivering, and a won claim copies it before checking the channel.
+//
+//export goAcrylMicrovmOnSSHStatus
+func goAcrylMicrovmOnSSHStatus(status *C.CSshStatus, errPtr *C.CAcrylMicrovmError, userData unsafe.Pointer) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		freeSSHStatusPayload(&status)
+		return
+	}
+	if !claimOrFreePayload(h, &status, freeSSHStatusPayload) {
+		return
+	}
+	defer h.Delete()
+	result := sshStatusResult{err: errorFromCError(errPtr)}
+	if status != nil {
+		if result.err == nil {
+			value := sshStatusFromC(status)
+			result.value = &value
+		}
+		freeSSHStatus(status)
+	}
+	if ch, ok := h.Value().(chan sshStatusResult); ok {
+		ch <- result
+	}
+}
+
+// ─── Generic delivery helpers ──────────────────────────────────────────────
+
+// deliverUnitResult sends an error-only result to the channel referenced by
+// userData. The cgo.Handle is freed exactly once here.
+func deliverUnitResult(userData unsafe.Pointer, errPtr *C.CAcrylMicrovmError) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	// Claim before Value/Delete; see claimHandleForDispatch.
+	if !claimHandleForDispatch(h) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan error)
+	if !ok {
+		return
+	}
+	ch <- errorFromCError(errPtr)
+}
+
+// deliverHandleResult sends a (handle, error) pair. The handle pointer is
+// owned by the receiver after delivery (the C side does not free it).
+func deliverHandleResult[T any](userData unsafe.Pointer, value T, errPtr *C.CAcrylMicrovmError) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	// Claim before Value/Delete; see claimHandleForDispatch.
+	if !claimHandleForDispatch(h) {
+		return
+	}
+	defer h.Delete()
+	ch, ok := h.Value().(chan handleResult[T])
+	if !ok {
+		return
+	}
+	ch <- handleResult[T]{value: value, err: errorFromCError(errPtr)}
+}
+
+// dispatchStreamWrite forwards a streaming chunk to the executionStreamState
+// referenced by userData. The Handle is intentionally never Deleted by any
+// stream callback (see goAcrylMicrovmOnExit for the rationale), so Value() is
+// always safe to call here.
+func dispatchStreamWrite(userData unsafe.Pointer, data *C.uint8_t, length C.size_t, isStderr bool) {
+	h := ptrToHandle(userData)
+	if h == 0 {
+		return
+	}
+	value := h.Value()
+	state, ok := value.(*executionStreamState)
+	if !ok {
+		return
+	}
+	if length == 0 || data == nil {
+		return
+	}
+	bytes := C.GoBytes(unsafe.Pointer(data), C.int(length))
+	if isStderr {
+		state.deliverStderr(bytes)
+	} else {
+		state.deliverStdout(bytes)
+	}
+}
+
+// ─── Result envelope types ─────────────────────────────────────────────────
+
+type handleResult[T any] struct {
+	value T
+	err   error
+}
+
+type imagePullResult struct {
+	value *ImagePullResult
+	err   error
+}
+
+type imageListResult struct {
+	value []ImageInfo
+	err   error
+}
+
+type imageDetailResult struct {
+	value *ImageDetail
+	err   error
+}
+
+type imageUsageResult struct {
+	value *ImageUsage
+	err   error
+}
+
+type volumeResult struct {
+	value *VolumeInfo
+	err   error
+}
+
+type volumeListResult struct {
+	value []VolumeInfo
+	err   error
+}
+
+type registryResult struct {
+	value *RegistryCredential
+	err   error
+}
+
+type registryListResult struct {
+	value []RegistryCredential
+	err   error
+}
+
+type infoResult struct {
+	value *BoxInfo
+	err   error
+}
+
+type infoListResult struct {
+	value []BoxInfo
+	err   error
+}
+
+type boxMetricsResult struct {
+	value *BoxMetrics
+	err   error
+}
+
+type runtimeMetricsResult struct {
+	value *RuntimeMetrics
+	err   error
+}
+
+type executionWaitResult struct {
+	exitCode int
+	err      error
+}
+
+type sshStatusResult struct {
+	value *SSHStatus
+	err   error
+}

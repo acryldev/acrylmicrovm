@@ -1,0 +1,310 @@
+# Modified by ACRYL, 2026
+"""
+AcrylMicrovm - Lightweight, secure containerization for any environment.
+
+Following SQLite philosophy: "AcrylMicrovm" for branding, "acrylmicrovm" for code APIs.
+"""
+
+import warnings
+
+# Import core Rust API
+try:
+    from .acrylmicrovm import (
+        AccessToken,
+        AdvancedBoxOptions,
+        ApiKeyCredential,
+        Box,
+        BoxInfo,
+        AcrylMicrovm,
+        AcrylMicrovmRestOptions,
+        BoxMetrics,
+        BoxOptions,
+        BoxStateInfo,
+        CheckpointHandle,
+        CheckpointInfo,
+        CloneOptions,
+        ContainerCapabilities,
+        CopyOptions,
+        Domain,
+        DomainHandle,
+        DomainList,
+        DomainTarget,
+        ExecStderr,
+        ExecStdout,
+        Execution,
+        ExecutionInfo,
+        Executions,
+        ExportOptions,
+        HealthCheckOptions,
+        HealthState,
+        HealthStatus,
+        ImageAliasEvent,
+        ImageDetail,
+        ImageHandle,
+        ImageInfo,
+        ImagePullResult,
+        ImageRegistry,
+        ImageUsage,
+        ImageVersion,
+        InboundNetworkInfo,
+        InboundNetworkSpec,
+        NetworkHandle,
+        NetworkInfo,
+        NetworkSpec,
+        Options,
+        OutboundNetworkInfo,
+        OutboundNetworkSpec,
+        PublishedPort,
+        RegistryCredential,
+        RegistryHandle,
+        RuntimeMetrics,
+        Secret,
+        SecurityOptions,
+        SnapshotHandle,
+        SnapshotInfo,
+        SnapshotOptions,
+        SocketAddress,
+        SshAccount,
+        SshCaConfig,
+        SshConfig,
+        SshHandle,
+        SshStatus,
+        TunnelForwarder,
+        TunnelOptions,
+        VolumeHandle,
+        VolumeInfo,
+    )
+
+    __all__ = [  # noqa: RUF022 - grouped by API area, not alphabetical
+        # Core Rust API
+        "Options",
+        "AdvancedBoxOptions",
+        "ContainerCapabilities",
+        "ImageRegistry",
+        "BoxOptions",
+        "AcrylMicrovmRestOptions",
+        "ApiKeyCredential",
+        "AccessToken",
+        "AcrylMicrovm",
+        "CheckpointHandle",
+        "CheckpointInfo",
+        "NetworkSpec",
+        "OutboundNetworkSpec",
+        "InboundNetworkSpec",
+        "NetworkHandle",
+        "SocketAddress",
+        "SshAccount",
+        "SshCaConfig",
+        "SshConfig",
+        "SshHandle",
+        "SshStatus",
+        "TunnelForwarder",
+        "TunnelOptions",
+        "NetworkInfo",
+        "OutboundNetworkInfo",
+        "InboundNetworkInfo",
+        "Box",
+        "Execution",
+        "ExecutionInfo",
+        "Executions",
+        "ExecStdout",
+        "ExecStderr",
+        "ImageHandle",
+        "ImageInfo",
+        "ImagePullResult",
+        "ImageDetail",
+        "ImageVersion",
+        "ImageAliasEvent",
+        "ImageUsage",
+        "BoxInfo",
+        "BoxStateInfo",
+        "HealthState",
+        "HealthStatus",
+        "RuntimeMetrics",
+        "PublishedPort",
+        "BoxMetrics",
+        "CopyOptions",
+        "HealthCheckOptions",
+        "SecurityOptions",
+        "Secret",
+        "SnapshotHandle",
+        "SnapshotInfo",
+        "SnapshotOptions",
+        "CloneOptions",
+        "ExportOptions",
+        "VolumeHandle",
+        "VolumeInfo",
+        "Domain",
+        "DomainHandle",
+        "DomainList",
+        "DomainTarget",
+        "RegistryHandle",
+        "RegistryCredential",
+    ]
+    # Credential abstraction (ABC + virtual-registered native classes)
+    from .credential import Credential  # noqa: F401
+
+    __all__.append("Credential")
+except ImportError as e:
+    warnings.warn(f"AcrylMicrovm native extension not available: {e}", ImportWarning)
+    __all__ = []
+
+# Import Python convenience wrappers (re-exported via __all__)
+# Agent types do not require a native runtime.
+from .agents import (  # noqa: F401 - re-exported through __all__ below
+    Agent,
+    AgentCapabilities,
+    AgentConfig,
+    AgentControlOptions,
+    AgentCreateOptions,
+    AgentEvent,
+    AgentEventsOptions,
+    AgentRequest,
+    AgentResponse,
+    AgentResult,
+    Agents,
+    AgentSendOptions,
+    AgentState,
+    AgentSteeringReceipt,
+    AgentTurn,
+    AgentTurnState,
+    AgentWaitOptions,
+)
+
+__all__.extend(
+    [
+        "Agent",
+        "AgentCapabilities",
+        "AgentConfig",
+        "AgentControlOptions",
+        "AgentCreateOptions",
+        "AgentEvent",
+        "AgentEventsOptions",
+        "AgentRequest",
+        "AgentResponse",
+        "AgentResult",
+        "AgentSendOptions",
+        "AgentState",
+        "AgentSteeringReceipt",
+        "AgentTurn",
+        "AgentTurnState",
+        "AgentWaitOptions",
+        "Agents",
+    ]
+)
+
+try:
+    from .codebox import CodeBox  # noqa: F401
+    from .errors import *  # every error type, listed once in errors.__all__
+    from .errors import __all__ as _error_types
+    from .exec import ExecResult  # noqa: F401
+    from .simplebox import SimpleBox  # noqa: F401
+
+    __all__.extend(
+        [  # grouped by API area, not alphabetical
+            # Python convenience wrappers
+            "SimpleBox",
+            "CodeBox",
+            "ExecResult",
+            # Error types
+            *_error_types,
+        ]
+    )
+except ImportError:
+    pass
+
+# Specialized containers (re-exported via __all__)
+try:
+    from .browserbox import BrowserBox, BrowserBoxOptions  # noqa: F401
+
+    __all__.extend(["BrowserBox", "BrowserBoxOptions"])
+except ImportError:
+    pass
+
+try:
+    from .computerbox import ComputerBox  # noqa: F401
+
+    __all__.extend(["ComputerBox"])
+except ImportError:
+    pass
+
+try:
+    from .interactivebox import InteractiveBox  # noqa: F401
+
+    __all__.extend(["InteractiveBox"])
+except ImportError:
+    pass
+
+try:
+    from .skillbox import SkillBox  # noqa: F401
+
+    __all__.extend(["SkillBox"])
+except ImportError:
+    pass
+
+# Multi-box orchestration (guest-initiated messaging)
+try:
+    from .orchestration import BoxGroup, BoxRuntime, ManagedBox  # noqa: F401
+
+    __all__.extend(["BoxGroup", "BoxRuntime", "ManagedBox"])
+except ImportError:
+    pass
+
+# Sync API (greenlet-based synchronous wrappers, re-exported via __all__)
+# Requires greenlet: pip install acrylmicrovm[sync]
+try:
+    from .sync_api import (  # noqa: F401
+        SyncAgent,
+        SyncAgents,
+        SyncAgentTurn,
+        SyncBox,
+        SyncAcrylMicrovm,
+        SyncCheckpointHandle,
+        SyncCodeBox,
+        SyncExecStderr,
+        SyncExecStdout,
+        SyncExecution,
+        SyncExecutions,
+        SyncImageHandle,
+        SyncNetworkHandle,
+        SyncRegistryHandle,
+        SyncSimpleBox,
+        SyncSkillBox,
+        SyncSshHandle,
+        SyncTunnelForwarder,
+    )
+
+    __all__.extend(
+        [
+            "SyncAgent",
+            "SyncAgentTurn",
+            "SyncAgents",
+            "SyncBox",
+            "SyncAcrylMicrovm",
+            "SyncCheckpointHandle",
+            "SyncCodeBox",
+            "SyncExecStderr",
+            "SyncExecStdout",
+            "SyncExecution",
+            "SyncExecutions",
+            "SyncImageHandle",
+            "SyncNetworkHandle",
+            "SyncRegistryHandle",
+            "SyncSimpleBox",
+            "SyncSkillBox",
+            "SyncSshHandle",
+            "SyncTunnelForwarder",
+        ]
+    )
+except ImportError:
+    # greenlet not installed - sync API not available
+    pass
+
+# Get version from package metadata
+try:
+    from importlib.metadata import PackageNotFoundError, version
+
+    __version__ = version("acrylmicrovm")
+except PackageNotFoundError:
+    # Package not installed (e.g., development mode)
+    __version__ = "0.0.0+dev"

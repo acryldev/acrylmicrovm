@@ -1,0 +1,780 @@
+# ACRYL microVMs Node.js/TypeScript SDK
+
+Embeddable VM runtime for secure, isolated code execution environments.
+
+Access the [agent API](../../docs/reference/agents.md) through `JsBox.agents`
+and `SimpleBox.agents` for agent and turn methods, grouped options and error handling.
+
+**Think "SQLite for sandboxing"** - a lightweight library embedded directly in your application without requiring a daemon or root privileges.
+
+[![npm version](https://badge.fury.io/js/%40acrylmicrovm%2Fcore.svg)](https://badge.fury.io/js/acrylmicrovm)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+
+**Upgrade notice:** existing local boxes with secrets must be recreated with explicit
+`headers`, including boxes managed by `acrylmicrovm serve`. See the
+[required-headers migration notes](../../docs/reference/configuration.md#secrets).
+
+## Managed checkpoints
+
+A checkpoint is a source for a new box, like an image: pass it to the ordinary
+create call. The checkpoint handle only manages checkpoints. Archive import is a
+separate operation for local `.acrylmicrovm` files and is unchanged. The CLI form is
+`acrylmicrovm create --checkpoint ID [--name NAME]`.
+
+The source must be stopped before `create`; stop it and wait for `stopped` first.
+Checkpoint creation rejects other states and never stops the source automatically.
+
+The REST runtime's `checkpoints` handle exposes `create`, `list`,
+`get` and `remove` as promises. Checkpoints survive their source box.
+
+```typescript
+const checkpoint = await runtime.checkpoints.create("source", "dev-base");
+const worker = await runtime.create({ checkpoint: checkpoint.id }, "worker");
+```
+
+A box created from a checkpoint inherits its saved execution settings. Setting any
+other option, including `image` or `rootfsPath`, rejects with an invalid-argument
+error before a request is sent.
+This includes explicit defaults such as `detach: false` or
+`advanced: { privileged: false }`, and empty lists such as `env: []`.
+Cloud capture may initially report `creating`; query until `ready` before use.
+`remove(key, true)` ignores absence only. Storage belongs to the server.
+Local runtime checkpoint operations, including `create` with a checkpoint, reject
+with an unsupported-operation error.
+
+## Features
+
+- **Hardware-level VM isolation** (KVM on Linux, Hypervisor.framework on macOS)
+- **OCI container support** - Use any Docker/OCI image
+- **Async-first API** - Built on native async Rust + napi-rs
+- **Multiple specialized boxes**:
+  - `SimpleBox` - Basic command execution
+  - `CodeBox` - Python code sandbox
+  - `BrowserBox` - Browser automation (Puppeteer/Playwright)
+  - `ComputerBox` - Desktop automation (14 automation functions)
+  - `InteractiveBox` - PTY terminal sessions
+- **Zero daemon** - No background processes required
+- **Cross-platform** - macOS ARM64, Linux x86_64/ARM64
+
+## Installation
+
+```bash
+npm install @acryldev/acrylmicrovm
+```
+
+**Requirements:**
+- Node.js 18 or later
+- Platform with hardware virtualization:
+  - macOS: Apple Silicon (macOS 12+)
+  - Linux: x86_64 or ARM64 with KVM (`/dev/kvm` accessible)
+
+**Not supported:** macOS Intel, Windows (use WSL2 with Linux requirements)
+
+## Quick Start
+
+### JavaScript
+
+```javascript
+import { SimpleBox } from '@acryldev/acrylmicrovm';
+
+async function main() {
+  const box = new SimpleBox({ image: 'alpine:latest' });
+
+  try {
+    const result = await box.exec('echo', 'Hello from AcrylMicrovm!');
+    console.log(result.stdout);  // Hello from AcrylMicrovm!
+  } finally {
+    await box.stop();
+  }
+}
+
+main();
+```
+
+### TypeScript
+
+```typescript
+import { SimpleBox } from 'acrylmicrovm';
+
+async function main() {
+  const box = new SimpleBox({ image: 'alpine:latest' });
+
+  try {
+    const result = await box.exec('echo', 'Hello from AcrylMicrovm!');
+    console.log(result.stdout);
+  } finally {
+    await box.stop();
+  }
+}
+
+main();
+```
+
+### TypeScript 5.2+ (Async Disposal)
+
+```typescript
+import { SimpleBox } from 'acrylmicrovm';
+
+async function main() {
+  await using box = new SimpleBox({ image: 'alpine:latest' });
+  const result = await box.exec('echo', 'Hello!');
+  console.log(result.stdout);
+  // Box automatically stopped when leaving scope
+}
+
+main();
+```
+
+## API Reference
+
+### Remote ACRYL microVMs server (REST)
+
+Connect to a remote ACRYL microVMs server instead of the local runtime.
+Construct an `ApiKeyCredential` and pass it positionally:
+`AcrylMicrovm.rest(url, credential)`.
+
+```typescript
+import { JsAcrylMicrovm, ApiKeyCredential } from '@acryldev/acrylmicrovm';
+
+const rt = JsAcrylMicrovm.rest(
+  'http://localhost:8100',
+  new ApiKeyCredential('your-api-key'),
+);
+const boxes = await rt.listInfo();
+
+// Env discovery — returns null when ACRYLMICROVM_API_KEY is unset:
+const cred = ApiKeyCredential.fromEnv();
+const rt2 = JsAcrylMicrovm.rest('http://localhost:8100', cred ?? undefined);
+```
+
+`ApiKeyCredential` structurally satisfies the exported `Credential`
+interface; functions can type their parameter as `Credential` and
+accept any future credential kind without a signature change.
+
+#### Routing prefix (vendor-agnostic)
+
+Box-scoped requests resolve to `{url}/v1/{prefix}/…`. The
+`v1` segment is hardcoded; `path_prefix` is an opaque, deployment-
+defined routing value that the server tells the client to use via
+`Principal.path_prefix` from `GET /v1/me`. The slot's semantics
+are vendor-specific: acrylmicrovm cloud uses it for the organization
+id; another deployment may use a workspace name, a region+team
+pair, or any other multi-segment value such as `us-east/team-42`.
+
+```typescript
+import { JsAcrylMicrovm, AcrylMicrovmRestOptions, ApiKeyCredential } from '@acryldev/acrylmicrovm';
+
+const rt = JsAcrylMicrovm.rest(new AcrylMicrovmRestOptions({
+  url: 'https://api.webboxes.ai',
+  credential: new ApiKeyCredential('blk_live_…'),
+  pathPrefix: 'acme',   // → requests hit /v1/acme/boxes
+}));
+```
+
+When `pathPrefix` is unset, the client builds URLs without the
+segment (`/v1/boxes/…`) — the canonical shape for single-tenant
+deployments such as the local `acrylmicrovm serve` reference server.
+
+The CLI captures `Principal.path_prefix` at login and caches it
+under the active profile, so subsequent `acrylmicrovm` commands route
+correctly without an extra flag.
+
+### Runtime Registry Options
+
+```typescript
+import { JsAcrylMicrovm } from 'acrylmicrovm';
+
+const runtime = new JsAcrylMicrovm({
+  imageRegistries: [
+    {
+      host: 'registry.example.com',
+      auth: { username: 'user', password: 'password' },
+    },
+    {
+      host: 'registry.local:5000',
+      transport: 'http',
+      search: true,
+    },
+  ],
+});
+```
+
+### SimpleBox
+
+Basic container for command execution.
+
+```typescript
+import { SimpleBox } from 'acrylmicrovm';
+
+const box = new SimpleBox({
+  image: 'python:slim',
+  memoryMib: 512,    // Memory limit in MiB
+  cpus: 2,           // Number of CPU cores
+  name: 'my-box',    // Optional name
+  autoRemove: true,  // Auto-remove on stop (default: true)
+  workingDir: '/app',
+  network: {
+    outbound: {
+      mode: 'enabled',
+      allowNet: ['api.openai.com'],
+    },
+    inbound: {
+      mode: 'disabled',
+    },
+  },
+  // The pre-split shape `network: { mode, allowNet }` still works and
+  // configures the outbound direction. Passing it together with `outbound`
+  // is rejected.
+  advanced: {
+    capabilities: {
+      add: ['NET_ADMIN'],
+      drop: ['NET_RAW'],
+    },
+  },
+  env: { FOO: 'bar' },
+  volumes: [
+    // A host bind (local runtimes only)...
+    { hostPath: '/tmp/data', guestPath: '/data', readOnly: false },
+    // ...or a managed volume, by id or by name (REST runtimes).
+    { managedVolume: 'my-data', guestPath: '/cache' }
+  ],
+  ports: [
+    { hostPort: 8080, guestPort: 80 }
+  ],
+  secrets: [
+    {
+      name: 'openai',
+      value: process.env.OPENAI_API_KEY!,
+      hosts: ['api.openai.com'],
+      headers: { Authorization: 'Bearer {value}' },
+    }
+  ]
+});
+
+// Use `headers: { 'x-goog-api-key': '{value}' }` for a custom target.
+// Use `headers: { Authorization: 'Bot {value}' }` for a custom format.
+// headers is required; omitted, null and empty maps are rejected.
+
+// Execute command
+const result = await box.exec('ls', '-la', '/');
+console.log(result.exitCode, result.stdout, result.stderr);
+
+// Execute with options (cwd, user, timeout)
+const pwdResult = await box.exec('pwd', [], undefined, {
+  cwd: '/tmp',
+  user: 'nobody',
+  timeoutSecs: 30,
+});
+console.log(pwdResult.stdout); // "/tmp\n"
+
+// Get box info
+console.log(box.id);    // ULID
+console.log(box.name);  // Optional name
+const info = await box.info(); // Metadata
+// null means unknown to this handle; [] means no active publications.
+console.log(info.network?.publishedPorts);
+// Local info reads do not query the live network backend; REST info performs a GET.
+const refreshed = await runtime.getInfo(box.id);
+console.log(refreshed?.network?.publishedPorts);
+
+// Cleanup
+await box.stop();
+```
+
+`info()`, `getInfo()`, and `listInfo()` expose `privileged`, the guest mode saved
+at creation. Local metadata reports `true` or `false`; a REST server that omits
+the field produces `undefined`.
+
+### Guest SSH Control
+
+`JsBox` and `SimpleBox` expose `box.ssh` to configure, observe, and disable
+the guest SSH listener.
+
+```typescript
+import { readFile } from 'node:fs/promises';
+
+const status = await box.ssh.configure({
+  listenAddress: '0.0.0.0:2222',
+  hostPrivateKey: await readFile('host_key', 'utf8'), // OpenSSH private key
+  accounts: [
+    {
+      login: 'alice',
+      authorizedKeys: [await readFile('alice.pub', 'utf8')],
+      // Certificate auth instead of authorizedKeys:
+      // ca: { publicKey: caPublicKey, principal: 'alice' },
+    },
+  ],
+});
+// { enabled: true, generation: 1n, listenAddress, hostPublicKey,
+//   hostKeyFingerprint } — generation is a bigint (full u64).
+
+await box.ssh.status();
+await box.ssh.disable();
+await box.ssh.enable(); // reuse saved configuration; requires a running box
+```
+
+See the [Node.js SSH reference](../../docs/reference/nodejs/README.md#guest-ssh-control)
+for configuration types, return values, and errors.
+
+### Runtime Image Management
+
+`runtime.images` holds the images a runtime can boot from: the local cache on
+an embedded runtime, the server's catalog on `JsAcrylMicrovm.rest(...)`. The same
+code runs against either; `pull` is local only (a REST runtime pulls when a
+box is created) and `usage`, `createAlias` and `deleteAlias` are REST only.
+
+```typescript
+import { JsAcrylMicrovm } from "acrylmicrovm";
+
+const runtime = JsAcrylMicrovm.withDefaultConfig();
+
+const images = await runtime.images.list();
+for (const image of images) {
+  console.log(image.repository, image.tag, image.id);
+}
+
+const detail = await runtime.images.get("docker.io/library/alpine");
+console.log(detail.aliases, detail.versions.map((version) => version.digest));
+await runtime.images.remove("docker.io/library/alpine");
+```
+
+`pull` fills a local cache ahead of time. A REST runtime refuses it as
+unsupported, because creating a box there pulls the image:
+
+```typescript
+const pulled = await runtime.images.pull("alpine:latest");
+console.log(pulled.reference, pulled.configDigest, pulled.layerCount);
+```
+
+See [the Node.js reference](../../docs/reference/nodejs/README.md#imagehandle)
+for each method on each runtime.
+
+### Private Registry Logins
+
+On `JsAcrylMicrovm.rest(...)`, `runtime.images.registries` manages the logins the server
+pulls private images with. The password goes up once and is never returned.
+A local runtime throws `unsupported`: pass `imageRegistries` to its options
+instead.
+
+```typescript
+const login = await runtime.images.registries.create({
+  registryHost: "ghcr.io",
+  repositoryPrefix: "acme/", // omit for the whole registry
+  username: "acme-bot",
+  password: process.env.GHCR_TOKEN!,
+});
+const box = await runtime.create({ image: "ghcr.io/acme/private-app:1" });
+// ...
+await runtime.images.registries.remove(login.id); // refused while a box pulls through it
+```
+
+See [the Node.js reference](../../docs/reference/nodejs/README.md#registryhandle).
+
+### Live Execution Inventory
+
+`await box.executions().list()` is available on native `JsBox` and `SimpleBox`.
+It returns `ExecutionInfo[]` from the guest's live inventory, including the
+main process: `executionId` (canonical guest ID), `argv`, `startedAt`
+(Unix milliseconds), `tty`, and `isMainSession`. Completed processes disappear; this
+is not execution history. Listing does not attach or consume output, and never
+boots a stopped box. A stopped/unstarted native box returns an empty list; a
+paused box returns an invalid-state error. An uncreated `SimpleBox` also
+returns an empty list without creating its box.
+
+Use `await box.executions().get(executionId)` for control-only access while
+another client owns output, or `await box.executions().attach(executionId, false)`
+to recover streams without stdin. Both are available on native `JsBox` and
+`SimpleBox`, never start the box, and return a `JsExecution` supporting `kill()`,
+`signal()`, and `wait()`. Only one output reader is permitted.
+
+```typescript
+for (const execution of await box.executions().list()) {
+  console.log(execution.executionId, execution.argv, execution.isMainSession);
+}
+```
+
+### CodeBox
+
+Python code execution sandbox.
+
+```typescript
+import { CodeBox } from 'acrylmicrovm';
+
+const codebox = new CodeBox({
+  image: 'python:slim',  // default
+  memoryMib: 512,
+  cpus: 1
+});
+
+try {
+  // Run Python code
+  const result = await codebox.run(`
+import math
+print(f"Pi is approximately {math.pi}")
+  `);
+  console.log(result);  // Pi is approximately 3.141592653589793
+
+  // Install packages
+  await codebox.installPackage('requests');
+  await codebox.installPackages('numpy', 'pandas');
+
+  // Use installed packages
+  const result2 = await codebox.run(`
+import requests
+response = requests.get('https://api.github.com/zen')
+print(response.text)
+  `);
+  console.log(result2);
+} finally {
+  await codebox.stop();
+}
+```
+
+### BrowserBox
+
+Browser automation with remote debugging.
+
+```typescript
+import { BrowserBox } from 'acrylmicrovm';
+
+const browser = new BrowserBox({
+  browser: 'chromium',  // 'chromium', 'firefox', or 'webkit'
+  memoryMib: 2048,
+  cpus: 2
+});
+
+try {
+  await browser.start();
+
+  // Get CDP endpoint
+  const endpoint = browser.endpoint();
+  console.log(endpoint);  // http://localhost:9222
+
+  // Connect with Puppeteer
+  import puppeteer from 'puppeteer-core';
+  const browserInstance = await puppeteer.connect({ browserURL: endpoint });
+
+  const page = await browserInstance.newPage();
+  await page.goto('https://example.com');
+  const title = await page.title();
+  console.log(title);
+
+  await page.close();
+} finally {
+  await browser.stop();
+}
+```
+
+### ComputerBox
+
+Desktop automation with web access.
+
+```typescript
+import { ComputerBox } from 'acrylmicrovm';
+
+const desktop = new ComputerBox({
+  cpus: 2,
+  memoryMib: 2048,
+  guiHttpPort: 3000,   // default
+  guiHttpsPort: 3001   // default (self-signed cert)
+});
+
+try {
+  // Wait for desktop to be ready
+  await desktop.waitUntilReady(60);
+
+  // Mouse automation
+  await desktop.mouseMove(100, 200);
+  await desktop.leftClick();
+  await desktop.doubleClick();
+  await desktop.rightClick();
+  await desktop.leftClickDrag(100, 100, 200, 200);
+
+  const [x, y] = await desktop.cursorPosition();
+  console.log(`Cursor at: ${x}, ${y}`);
+
+  // Keyboard automation
+  await desktop.type('Hello, World!');
+  await desktop.key('Return');
+  await desktop.key('ctrl+c');
+
+  // Screenshot
+  const screenshot = await desktop.screenshot();
+  console.log(`${screenshot.width}x${screenshot.height} ${screenshot.format}`);
+  // screenshot.data contains base64-encoded PNG
+
+  // Scroll
+  await desktop.scroll(500, 300, 'down', 5);
+
+  // Get screen size
+  const [width, height] = await desktop.getScreenSize();
+  console.log(`Screen: ${width}x${height}`);
+
+  // Access desktop via browser:
+  // HTTP:  http://localhost:3000
+  // HTTPS: https://localhost:3001 (self-signed certificate)
+} finally {
+  await desktop.stop();
+}
+```
+
+### InteractiveBox
+
+Interactive terminal sessions with PTY.
+
+```typescript
+import { InteractiveBox } from 'acrylmicrovm';
+
+const box = new InteractiveBox({
+  image: 'alpine:latest',
+  shell: '/bin/sh',
+  tty: true,  // Auto-detected if undefined
+  memoryMib: 512,
+  cpus: 1
+});
+
+try {
+  await box.start();
+  await box.wait();  // Blocks until shell exits
+} finally {
+  await box.stop();
+}
+```
+
+## Examples
+
+See [../../examples/node/](../../examples/node/) directory for complete examples:
+
+```bash
+# If installed via npm
+npm install @acryldev/acrylmicrovm
+node simplebox.js
+
+# If working from source
+cd ../../sdks/node
+npm install && npm run build
+npm link
+cd ../../examples/node
+npm link @acryldev/acrylmicrovm
+node simplebox.js
+```
+
+## Error Handling
+
+```typescript
+import { SimpleBox, ExecError, TimeoutError, ParseError } from 'acrylmicrovm';
+
+try {
+  const box = new SimpleBox({ image: 'alpine:latest' });
+  await box.exec('false');  // Exit code 1
+} catch (err) {
+  if (err instanceof ExecError) {
+    console.error(`Command failed: ${err.command}`);
+    console.error(`Exit code: ${err.exitCode}`);
+    console.error(`Stderr: ${err.stderr}`);
+  }
+}
+```
+
+A failure the runtime itself reports carries a code that `errorCode(err)`
+returns, such as `not_found` or `invalid_state`; it is `undefined` for any
+other error. See [the Node.js reference](../../docs/reference/nodejs/README.md#errorcodeerr).
+
+## Building from Source
+
+Use Node.js 22 or later for development tooling, as installed by
+`make setup:build`. The built SDK supports Node.js 18 or later.
+
+```bash
+# Clone repository
+git clone https://github.com/acryldev/acrylmicrovm.git
+cd acrylmicrovm
+
+# Install build tools and initialize submodules
+make setup:build
+
+# Build the native bindings and TypeScript, and link examples
+make dev:node
+
+# Check the SDK
+make lint:node fmt:check:node test:unit:node
+
+# Run an example
+cd examples/node
+node simplebox.js
+```
+
+### Maintaining the native bindings
+
+Rust sources in `sdks/node/src/` use the workspace formatter. From the
+repository root, run `make fmt:rust` before committing binding changes and
+`make fmt:check:rust` to reproduce the CI formatting check.
+
+The Rust bindings require `napi` 3.16.1+, `napi-derive` 3.7.0+, and
+`napi-build` 2.6.0+. Update the runtime and macro generator together:
+`napi-derive` selects `napi-derive-backend`, whose generated reference
+conversions call the runtime's class identity and native borrow checks.
+The npm `@napi-rs/cli` builds and packages the addon; its version does not
+select the Rust macro backend.
+
+Keep the `napi8` feature for Node.js 18 compatibility, and commit the Cargo
+lockfile with dependency changes. After rebuilding, run `make test:unit:node`
+and `make test:integration:node` on a VM-capable host to exercise native
+class conversion and asynchronous calls. TypeScript checks alone do not
+exercise the generated Rust bindings. Assess CodeQL findings with a fresh
+scan; a successful build or a dismissed alert does not prove a finding is fixed.
+
+## TypeScript Support
+
+Full TypeScript support included:
+
+```typescript
+import {
+  SimpleBox, CodeBox, BrowserBox, ComputerBox, InteractiveBox,
+  type SimpleBoxOptions,
+  type CodeBoxOptions,
+  type BrowserBoxOptions,
+  type ComputerBoxOptions,
+  type InteractiveBoxOptions,
+  type Secret,
+  type ExecResult,
+  type Screenshot,
+  type BrowserType
+} from 'acrylmicrovm';
+```
+
+## Platform Requirements
+
+### macOS
+- Apple Silicon (ARM64)
+- macOS 12+ (Monterey or later)
+- Hypervisor.framework (built-in)
+
+### Linux
+- x86_64 or ARM64
+- KVM enabled (`/dev/kvm` accessible)
+- User in `kvm` group:
+  ```bash
+  sudo usermod -aG kvm $USER
+  # Logout/login required
+  ```
+
+## Architecture
+
+The SDK uses a dual-layer architecture:
+
+1. **Layer 1 (Rust)**: napi-rs bindings to native ACRYL microVMs runtime
+   - Direct mapping to Rust `acrylmicrovm` crate
+   - Async operations via `env.spawn()` (non-blocking)
+   - Stream handling via async iterators
+
+2. **Layer 2 (TypeScript)**: Convenience wrappers
+   - Specialized box classes (CodeBox, BrowserBox, etc.)
+   - Error class hierarchy
+   - Output collection helpers
+   - TypeScript type definitions
+
+## Performance
+
+- Startup time: < 100ms
+- Overhead vs Python SDK: < 5%
+- Concurrent boxes: Limited by system resources
+- Memory footprint: ~50-100MB per box (depends on image)
+
+## Troubleshooting
+
+**"ACRYL microVMs native extension not found"**
+- Run `npm run build` to compile Rust bindings
+
+**"Image not found"**
+- ACRYL microVMs auto-pulls OCI images on first use
+- Ensure internet connectivity
+
+**"Permission denied" (Linux)**
+- Check KVM access: `ls -l /dev/kvm`
+- Add user to kvm group: `sudo usermod -aG kvm $USER`
+
+**"Unsupported engine"**
+- Only Apple Silicon Macs supported (not Intel)
+- Windows users: Use WSL2 with Linux requirements
+
+## Contributing
+
+See [../../CONTRIBUTING.md](../../CONTRIBUTING.md) for development guidelines.
+
+### Native binding tests
+
+Checkpoint native REST tests run with
+`make test:integration:node FILTER='checkpoint native'`. They use loopback HTTP
+without a VM and are included in native binding coverage. Ordinary unit jobs
+do not build the native module and exclude these integration tests.
+
+From the repository root, run
+`make test:integration:node FILTER='agent namespace'`. The native Box getter test
+obtains a handle from a loopback REST server and checks namespace access without
+starting a VM or sending agent requests. Separate tests reject plain-object and
+prototype-only method receivers before the agent operation runs.
+
+These receiver tests exercise napi-rs callback unwrapping. They do not exercise
+the generated `FromNapiRef` and `FromNapiMutRef` conversions flagged by CodeQL,
+so passing them does not establish that those pointer alerts are false positives.
+The locked
+[napi-rs backend 7.0.0](https://github.com/napi-rs/napi-rs/blob/f89400d99b136c5c8a27818654b91256832b5bd6/crates/backend/src/codegen/struct.rs#L168-L242)
+checks `napi_unwrap`, validates the napi8 class tag, and registers a native borrow
+before constructing either reference. The matching
+[napi 3.16.1 runtime](https://github.com/napi-rs/napi-rs/blob/417375ad5ef1d8cb4c49edf13d2cc6c0204bb5b1/crates/napi/src/bindgen_runtime/native_borrow.rs#L688-L696)
+rejects a null native pointer during borrow acquisition; its error propagates
+before dereference. When reviewing an alert, compare its expanded conversion
+path against these exact locked sources, including the guards between pointer
+initialization and dereference.
+
+## License
+
+Apache 2.0 - See [../../LICENSE](../../LICENSE)
+
+## Related Projects
+
+- [Python SDK](../python/) - Python bindings (Python 3.10+)
+- [C SDK](../c/) - C FFI bindings (early stage)
+- [Core Runtime](../../acrylmicrovm/) - Rust runtime implementation
+
+## Testing secret headers
+
+Run `make coverage:node` from the repository root for the JavaScript unit suite.
+Secret-header boundary tests require the native addon and skip when it is absent,
+so they import the native SDK inside each test rather than during discovery.
+To exercise those checks, first run `make dev:node`, then
+`make test:unit:node FILTER=headers`. All three missing/null/empty-header cases
+must execute and reject creation in this native run; an import failure is not a
+successful validation result.
+
+## Support
+
+- **Issues**: [GitHub Issues](https://github.com/acryldev/acrylmicrovm/issues)
+- **Documentation**: [docs/](../../docs/)
+- **Examples**: [examples/](./examples/)
+
+---
+
+**Made with ❤️ by ACRYL microVMs Labs**
+
+## Service tunnels
+
+Use the built-in address from `node:net` to prepare a service tunnel:
+
+```typescript
+import { SocketAddress } from "node:net";
+
+const tunnel = await box.network.tunnel(
+  new SocketAddress({ address: "127.0.0.1", port: 3000 }),
+  { isPublic: false },
+);
+```
+
+Options default to public; private tunnels require a cloud runtime. IPv6 targets
+use `new SocketAddress({ address: "::1", family: "ipv6", port: 3000 })`.
+The target must have a nonzero port, a loopback or guest IP, and zero flowlabel.
+Bare ports and the old `{ type: "tcp", ... }` target are rejected. Invalid argument
+types can throw synchronously on the native network handle. TCP/Unix listener
+shapes remain available for `tunnel.forward(listen)`.
+See [private tunnels](../../docs/concepts/networking.md#private-cloud-tunnels).

@@ -1,0 +1,169 @@
+# Modified by ACRYL, 2026
+[project]
+name = "acrylmicrovm"
+version = "0.13.1"
+description = "Python bindings for AcrylMicrovm runtime"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Dorian Zheng" }]
+license = "Apache-2.0"
+keywords = ["sandbox", "virtual machine", "vm", "ai agents", "code execution", "isolation", "container", "security", "kvm", "hypervisor"]
+dependencies = []
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Rust",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Security",
+    "Topic :: System :: Emulators",
+]
+
+[project.urls]
+Homepage = "https://github.com/acryldev/acrylmicrovm"
+Documentation = "https://github.com/acryldev/acrylmicrovm/tree/main/docs"
+Repository = "https://github.com/acryldev/acrylmicrovm"
+Issues = "https://github.com/acryldev/acrylmicrovm/issues"
+
+[project.optional-dependencies]
+# `tomli` is needed by `make lint:python` (and other dev tooling) to parse
+# this file. It's stdlib as `tomllib` on Python 3.11+, but the project
+# supports Python 3.10+ — declare the backport explicitly so we don't
+# silently rely on `maturin`/`pytest` pulling it in transitively.
+dev = [
+    "pyelftools>=0.31",
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=6.0",
+    "ruff>=0.4",
+    "tomli>=2.0; python_version < '3.11'",
+]
+sync = ["greenlet>=3.0.0"]
+orchestration = ["cloudpickle>=3.0"]
+
+[dependency-groups]
+dev = [
+    "pyelftools>=0.31",
+    "pytest>=7.0",
+    "pytest-asyncio>=0.21",
+    "pytest-cov>=6.0",
+    "ruff>=0.4",
+    "tomli>=2.0; python_version < '3.11'",
+]
+sync = ["greenlet>=3.0.0"]
+
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[tool.maturin]
+bindings = "pyo3"
+module-name = "acrylmicrovm"
+
+[tool.cibuildwheel]
+# https://cibuildwheel.pypa.io/en/stable/options/#archs
+# Always build for native architecture (default is "auto" which is same)
+archs = ["native"]
+# Build for Python 3.10+
+# build = "cp310-* cp311-* cp312-* cp313-* cp314-*"
+skip = [
+    # Skip musllinux since: cannot produce proc-macro for `async-recursion v1.1.1` as
+    # the target `aarch64-unknown-linux-musl` does not support these crate types".
+    # The dependency is: acrylmicrovm → qcow2-rs → async-recursion
+    "*-musllinux*",
+]
+
+
+# Build ACRYL microVMs runtime before building wheels (runs once per platform)
+# Linux build strategy:
+# - Guest artifacts: Built on Ubuntu host BEFORE container (manylinux lacks musl packages)
+# - Shim binary: Built IN container (needs glibc 2.28 for manylinux compatibility)
+# - Libraries: Built IN container (libkrun, libkrunfw from source)
+before-all = ["""
+    set -ex  # Exit on error, print commands
+
+    # Linux containers share the host cache through cibuildwheel's /host mount.
+    # Use an absolute wrapper: cibuildwheel rebuilds PATH for each Python version.
+    if [ "$(uname)" = Linux ] && [ -n "${ACRYLMICROVM_HOST_SCCACHE_BIN:-}" ]; then
+        # Reuse the host action's checksum-verified release, which PyPI may not publish.
+        install -m 755 "/host$ACRYLMICROVM_HOST_SCCACHE_BIN" /usr/local/bin/sccache
+    elif ! command -v sccache &>/dev/null; then
+        pip install sccache==0.16.0 || echo "WARNING: sccache installation failed"
+    fi
+    # Create a pass-through shim if installation failed, so compilation can continue.
+    # When RUSTC_WRAPPER is set, cargo calls
+    # `sccache /path/to/rustc <args>`. The shim just runs `exec "$@"` which
+    # executes `/path/to/rustc <args>` directly — a no-op wrapper.
+    if ! command -v sccache &>/dev/null; then
+        echo "WARNING: sccache not available, creating pass-through shim"
+        printf '#!/bin/sh\nexec "$@"\n' > /usr/local/bin/sccache
+        chmod +x /usr/local/bin/sccache
+    fi
+    if [ "$(uname)" = Linux ]; then
+        sccache_binary=$(command -v sccache)
+        if [ "$sccache_binary" != /usr/local/bin/sccache ]; then
+            ln -sf "$sccache_binary" /usr/local/bin/sccache
+        fi
+        if [ -n "${ACRYLMICROVM_HOST_SCCACHE_DIR:-}" ]; then
+            ln -s "/host$ACRYLMICROVM_HOST_SCCACHE_DIR" /tmp/acrylmicrovm-sccache
+        fi
+    fi
+
+    # cibuildwheel runs from repository root
+    ACRYLMICROVM_ROOT=$(pwd)
+
+    # Restore pre-built guest artifacts if available (from Ubuntu host)
+    # This is needed because cibuildwheel's tar excludes target/ (.gitignore)
+    # The cache carries only the three finished executables, not compilation intermediates.
+    GUEST_TARGET=$(scripts/util.sh --target)
+    if [ -d ".cache/$GUEST_TARGET" ]; then
+        echo "Restoring guest artifacts from .cache/$GUEST_TARGET"
+        mkdir -p target
+        cp -a ".cache/$GUEST_TARGET" "target/$GUEST_TARGET"
+    fi
+
+    # Run setup script (installs dependencies, such as Rust, Make, etc.)
+    make setup:build
+
+    # Source cargo env (Rust may have just been installed)
+    [ -f "$HOME/.cargo/env" ] && source "$HOME/.cargo/env"
+
+    # Add Go to PATH (setup installs it to /usr/local/go/bin in a subshell)
+    export PATH="/usr/local/go/bin:$PATH"
+    make runtime
+    """]
+
+# Import the compiled extension directly: the package initializer tolerates its absence.
+test-command = "python -c 'from acrylmicrovm.acrylmicrovm import AcrylMicrovm; import acrylmicrovm; print(acrylmicrovm.__version__)'"
+
+[tool.cibuildwheel.macos]
+# Fix "libkrunfw.4.dylib has a minimum target of 14.0" error
+environment = { MACOSX_DEPLOYMENT_TARGET = "14.0", _PYTHON_HOST_PLATFORM = "macosx_14_0_arm64", PATH = "$HOME/.cargo/bin:$PATH", CARGO_INCREMENTAL = "0" }
+
+repair-wheel-command = ""  # Skip auditwheel repair
+
+[tool.cibuildwheel.linux]
+# Use manylinux_2_28 which has newer tooling (Make 4.x required for libkrunfw kernel builds)
+# Default is manylinux_2_28, but explicit for documentation
+# manylinux-x86_64-image = "manylinux_2_28"
+# manylinux-aarch64-image = "manylinux_2_28"
+
+# Set Rust and library paths
+# SKIP_GUEST_BUILD=1: Use the restored acrylmicrovm-guest from the Ubuntu host
+environment = { SKIP_GUEST_BUILD = "1", PATH = "/usr/local/go/bin:$HOME/.cargo/bin:/usr/local/bin:$PATH", PKG_CONFIG_PATH = "/usr/local/lib64/pkgconfig:/usr/local/lib/pkgconfig", LD_LIBRARY_PATH = "/usr/local/lib64:/usr/local/lib", RUSTC_WRAPPER = "/usr/local/bin/sccache", SCCACHE_GHA_ENABLED = "false", SCCACHE_DIR = "/tmp/acrylmicrovm-sccache", SCCACHE_CACHE_SIZE = "1G", SCCACHE_DIRECT = "false", SCCACHE_BASEDIRS = "/project", CARGO_INCREMENTAL = "0" }
+
+# Only file paths cross into the container; compiler results need no remote credentials.
+environment-pass = ["ACRYLMICROVM_HOST_SCCACHE_DIR", "ACRYLMICROVM_HOST_SCCACHE_BIN"]
+
+# Stop the shared-cache server before wheel tests and container teardown.
+before-test = "/usr/local/bin/sccache --stop-server >/dev/null 2>&1 || true"
+
+# Retag wheel for PyPI compliance without bundling libs (we handle runtime deps ourselves)
+# Uses 'wheel tags' to change linux_x86_64 -> manylinux_2_28_x86_64
+repair-wheel-command = "pip install wheel && wheel tags --platform-tag manylinux_2_28_$(uname -m) {wheel} && mv $(dirname {wheel})/*manylinux*.whl {dest_dir}/"
