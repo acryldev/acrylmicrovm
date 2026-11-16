@@ -35,6 +35,7 @@ Complete API documentation for each SDK:
 | **Box API** | [`openapi/box.openapi.yaml`](../../openapi/box.openapi.yaml) | The portable REST contract. Groups: configuration & discovery, authentication, volumes, boxes, box lifecycle, snapshot/portability, execution, files, network, metrics, images, registries |
 | **Agent REST design** | [Agents and turns](../contributing/investigations/2026-10-28-agent-rest-api-design.md) | Nine proposed HTTP operations covering the agent SDK API; no server routes or OpenAPI paths are added yet |
 | **Admin API** | [`openapi/admin.openapi.yaml`](../../openapi/admin.openapi.yaml) | Cloud-only contract for organization members and invitations, 4 paths, meant for the CLI and SDKs, which do not call it yet. Shares the Box API's host and credentials, but uses the hosted service's flat error response; local servers do not serve it |
+| **Hosted API** | [Hosted API](hosted-api.md) | What `api.webboxes.ai` has to implement for the SDKs, CLI and end-to-end suite to work against it, in build order |
 | **Reference server** | [`openapi/reference-server/`](../../openapi/reference-server/README.md) | A partial implementation used as a client test fixture, not a conformance target |
 
 The spec is the contract, not an inventory of any one server, and no
