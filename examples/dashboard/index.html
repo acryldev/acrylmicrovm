@@ -1,0 +1,282 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ACRYL microVMs</title>
+<link rel="icon" href="/logo.png">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.css">
+<script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.js"></script>
+<style>
+  :root {
+    --bg: #0a0d10; --panel: #11161b; --panel-2: #161c22; --line: #232b33; --text: #e8edf2; --muted: #8b97a3;
+    --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --c1: #4fd1e8; --c2: #b48cf2; --c3: #f0a6ca; --c4: #f3c27a;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; align-items: center; gap: 16px; padding: 16px 24px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  header img { width: 40px; height: 40px; }
+  h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+  h1 span { background: linear-gradient(90deg, var(--c1), var(--c2), var(--c3), var(--c4)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .stats { display: flex; gap: 10px; margin-left: auto; flex-wrap: wrap; }
+  .stat { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 12px; font-size: 13px; color: var(--muted); }
+  .stat b { color: var(--text); font-weight: 600; font-family: var(--mono); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; vertical-align: 1px; }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 8px var(--ok); } .dot.bad { background: var(--bad); }
+  main { display: grid; grid-template-columns: minmax(300px, 380px) 1fr; gap: 20px; padding: 20px 24px; height: calc(100vh - 73px); }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; display: flex; flex-direction: column; min-height: 0; }
+  .head { display: flex; align-items: center; gap: 10px; padding: 14px 16px; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .head h2 { font-size: 13px; margin: 0; text-transform: uppercase; letter-spacing: .12em; color: var(--c1); }
+  .head .grow { flex: 1; }
+  select, input, button { font: inherit; color: var(--text); background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 7px 10px; }
+  button { cursor: pointer; } button:hover:not(:disabled) { border-color: var(--c2); } button:disabled { opacity: .5; cursor: default; }
+  button.primary { background: linear-gradient(90deg, #2a7f8f, #6b4fa0); border-color: transparent; font-weight: 600; }
+  button.danger:hover:not(:disabled) { border-color: var(--bad); color: var(--bad); }
+  :focus-visible { outline: 2px solid var(--c1); outline-offset: 2px; }
+  #boxes { overflow: auto; padding: 10px; display: flex; flex-direction: column; gap: 8px; }
+  .box { text-align: left; width: 100%; padding: 12px 14px; border-radius: 10px; background: var(--panel-2); display: grid; grid-template-columns: auto 1fr auto; gap: 2px 12px; align-items: center; }
+  .box.sel { border-color: var(--c2); box-shadow: inset 0 0 0 1px var(--c2); }
+  .box .cube { grid-row: span 2; width: 28px; height: 28px; }
+  .box .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .box .meta { color: var(--muted); font-size: 12px; font-family: var(--mono); grid-column: 2 / 4; }
+  .pill { font-size: 11px; font-family: var(--mono); padding: 2px 8px; border-radius: 99px; border: 1px solid currentColor; }
+  .pill.running { color: var(--ok); } .pill.stopped, .pill.configured { color: var(--muted); } .pill.other { color: var(--warn); }
+  .empty { color: var(--muted); padding: 24px 12px; text-align: center; }
+  .kernels { display: flex; gap: 10px; flex-wrap: wrap; padding: 12px 16px 0; }
+  .kernel { font-family: var(--mono); font-size: 13px; padding: 6px 10px; border-radius: 8px; background: var(--panel-2); border: 1px solid var(--line); }
+  .kernel.guest { border-color: var(--c2); }
+  .presets { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 16px; }
+  .presets button { font-family: var(--mono); font-size: 12px; padding: 5px 10px; }
+  .presets button.danger { border-color: #6b2b2b; }
+  #xterm { flex: 1; min-height: 0; margin: 0 16px; padding: 10px; background: #05070a; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; }
+  .session { display: flex; align-items: center; gap: 10px; padding: 10px 16px 14px; color: var(--muted); font-size: 13px; }
+  .placeholder { margin: auto; color: var(--muted); text-align: center; padding: 40px; max-width: 420px; }
+  #toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); background: #3a1a1a; border: 1px solid var(--bad); padding: 10px 16px; border-radius: 8px; display: none; }
+  @media (max-width: 860px) { main { grid-template-columns: 1fr; height: auto; } section { min-height: 420px; } }
+  @media (prefers-reduced-motion: reduce) { .dot.ok { box-shadow: none; } }
+</style>
+</head>
+<body>
+<header>
+  <img src="/logo.png" alt="">
+  <h1>ACRYL <span>microVMs</span></h1>
+  <div class="stats">
+    <div class="stat"><span class="dot" id="conn"></span><b id="api">connecting</b></div>
+    <div class="stat">boxes running <b id="running">-</b></div>
+    <div class="stat" id="hoststat" hidden>host kernel <b id="hostkernel"></b></div>
+  </div>
+</header>
+<main>
+  <section aria-labelledby="h-boxes">
+    <div class="head">
+      <h2 id="h-boxes">Boxes</h2><span class="grow"></span>
+      <label class="sr" for="image" hidden>Image</label>
+      <select id="image" aria-label="Image">
+        <option>node:slim</option><option>python:slim</option><option>alpine:latest</option>
+      </select>
+      <button class="primary" id="create">New box</button>
+    </div>
+    <div id="boxes" role="list"></div>
+  </section>
+  <section aria-labelledby="h-term" id="term">
+    <div class="placeholder" id="pick">Pick a box on the left, or make a new one. Every box is a small virtual machine with its own Linux kernel.</div>
+  </section>
+</main>
+<div id="toast" role="alert"></div>
+
+<template id="term-tpl">
+  <div class="head">
+    <h2 id="h-term">Box</h2><b id="tname"></b><span class="pill" id="tstatus"></span><span class="grow"></span>
+    <button id="toggle"></button><button class="danger" id="remove">Remove</button>
+  </div>
+  <div class="kernels" id="kernels"></div>
+  <div class="presets" id="presets"></div>
+  <div id="xterm" aria-label="Terminal inside the box"></div>
+  <div class="session"><span class="dot" id="sdot"></span><span id="stext">no shell</span><span class="grow"></span><button id="reconnect" hidden>New shell</button></div>
+</template>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// Presets type into the box's terminal, as if the presenter typed them.
+const PRESETS = [
+  ['ls /', 'ls -la /'],
+  ['which OS?', 'cat /etc/os-release | head -4'],
+  ['kernel', 'uname -a'],
+  ['node', 'node -e "console.log(\'Node\', process.version, \'in a microVM\')"'],
+  ['write a file', 'echo "made inside the box" > ~/hello.txt && ls -la ~ && cat ~/hello.txt'],
+  ['processes', 'ps aux 2>/dev/null | head -15 || ls /proc | head'],
+  ['rm -rf / (only this box)', 'rm -rf /* 2>/dev/null; cat /etc/os-release; node -v', 'danger'],
+];
+let state = { boxes: [] }, selected = null;
+const kernels = {};
+let term = null, fit = null, ws = null, termBox = null;
+
+function cube(status) {
+  const c = status === 'running' ? ['#4fd1e8', '#b48cf2', '#f3c27a'] : ['#3a434c', '#2b3239', '#1f252b'];
+  return `<svg class="cube" viewBox="-14 -16 28 32" aria-hidden="true"><polygon points="0,-14 12,-7 0,0 -12,-7" fill="${c[0]}"/><polygon points="-12,-7 0,0 0,14 -12,7" fill="${c[1]}"/><polygon points="0,0 12,-7 12,7 0,14" fill="${c[2]}"/></svg>`;
+}
+const pillClass = (s) => (s === 'running' || s === 'stopped' || s === 'configured' ? s : 'other');
+const ago = (t) => { const s = Math.max(0, (Date.now() - Date.parse(t)) / 1000); return s < 60 ? `${s | 0}s ago` : s < 3600 ? `${(s / 60) | 0}m ago` : `${(s / 3600) | 0}h ago`; };
+function toast(msg) { const t = $('toast'); t.textContent = msg; t.style.display = 'block'; clearTimeout(toast.t); toast.t = setTimeout(() => (t.style.display = 'none'), 5000); }
+
+async function call(method, url, body) {
+  const r = await fetch(url, { method, headers: body ? { 'content-type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || `HTTP ${r.status}`);
+  return data;
+}
+
+async function refresh() {
+  try {
+    state = await call('GET', '/api/state');
+    $('conn').className = 'dot ok'; $('api').textContent = state.api;
+    if (state.hostKernel) { $('hoststat').hidden = false; $('hostkernel').textContent = state.hostKernel; }
+  } catch { $('conn').className = 'dot bad'; $('api').textContent = 'not reachable'; }
+  render();
+}
+
+function render() {
+  $('running').textContent = state.boxes.filter((b) => b.status === 'running').length;
+  const list = $('boxes');
+  list.innerHTML = '';
+  if (!state.boxes.length) list.innerHTML = '<div class="empty">No boxes yet. Make one with New box.</div>';
+  for (const b of [...state.boxes].sort((x, y) => Date.parse(y.createdAt) - Date.parse(x.createdAt))) {
+    const el = document.createElement('button');
+    el.className = `box${b.id === selected ? ' sel' : ''}`; el.setAttribute('role', 'listitem');
+    el.innerHTML = `${cube(b.status)}<span class="name"></span><span class="pill ${pillClass(b.status)}">${b.status}</span><span class="meta"></span>`;
+    el.querySelector('.name').textContent = b.name || b.id;
+    el.querySelector('.meta').textContent = `${b.image} · ${b.cpus ?? '?'} cpu · ${b.memoryMib ?? '?'} MiB · ${ago(b.createdAt)}`;
+    el.onclick = () => select(b.id);
+    list.append(el);
+  }
+  renderTerm();
+}
+
+const current = () => state.boxes.find((b) => b.id === selected);
+
+function renderTerm() {
+  const b = current();
+  if (!b) {
+    closeShell();
+    if (!$('pick')) $('term').innerHTML = '<div class="placeholder" id="pick">Pick a box on the left, or make a new one. Every box is a small virtual machine with its own Linux kernel.</div>';
+    return;
+  }
+  if (!$('xterm')) {
+    $('term').innerHTML = ''; $('term').append($('term-tpl').content.cloneNode(true));
+    for (const [label, cmd, cls] of PRESETS) {
+      const p = document.createElement('button'); p.textContent = label; p.title = cmd; if (cls) p.className = cls;
+      p.onclick = () => type(cmd); $('presets').append(p);
+    }
+    $('remove').onclick = remove; $('toggle').onclick = toggle; $('reconnect').onclick = () => openShell(b.id);
+  }
+  $('tname').textContent = b.name || b.id;
+  $('tstatus').textContent = b.status; $('tstatus').className = `pill ${pillClass(b.status)}`;
+  $('toggle').textContent = b.status === 'running' ? 'Stop' : 'Start';
+  $('kernels').innerHTML = '';
+  if (kernels[b.id]) {
+    const g = document.createElement('span'); g.className = 'kernel guest'; g.textContent = `box kernel ${kernels[b.id]}`; $('kernels').append(g);
+    if (state.hostKernel) { const h = document.createElement('span'); h.className = 'kernel'; h.textContent = `host kernel ${state.hostKernel}`; $('kernels').append(h); }
+  }
+  const live = ws && ws.readyState === WebSocket.OPEN;
+  for (const el of $('presets').querySelectorAll('button')) el.disabled = !live;
+  if (b.status === 'running' && !ws && termBox !== b.id) openShell(b.id);
+  if (b.status !== 'running' && ws) closeShell();
+}
+
+function session(text, ok) { if ($('stext')) { $('stext').textContent = text; $('sdot').className = `dot${ok ? ' ok' : ''}`; } }
+
+function closeShell() { if (ws) { const w = ws; ws = null; try { w.close(); } catch {} } }
+
+async function openShell(id) {
+  closeShell();
+  termBox = id;
+  if (!term) {
+    term = new Terminal({ fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace', fontSize: 15, cursorBlink: true,
+      theme: { background: '#05070a', foreground: '#e8edf2', cursor: '#4fd1e8', selectionBackground: '#3a2f55' } });
+    fit = new FitAddon.FitAddon(); term.loadAddon(fit);
+    term.onData((d) => { if (ws?.readyState === WebSocket.OPEN) ws.send(new TextEncoder().encode(d)); });
+    term.onResize(({ cols, rows }) => { if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'resize', cols, rows })); });
+    new ResizeObserver(() => { try { fit.fit(); } catch {} }).observe(document.body);
+  }
+  // xterm keeps its element; move it into the freshly rendered panel.
+  if (term.element) $('xterm').append(term.element); else term.open($('xterm'));
+  fit.fit(); term.reset(); $('reconnect').hidden = true;
+  session('opening a shell in the box...', false);
+  try {
+    const { execId } = await call('POST', `/api/boxes/${encodeURIComponent(id)}/shell`);
+    if (termBox !== id) return;
+    const sock = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/api/boxes/${encodeURIComponent(id)}/executions/${encodeURIComponent(execId)}/attach`);
+    sock.binaryType = 'arraybuffer'; ws = sock;
+    sock.onopen = () => {
+      session('shell inside the box', true);
+      sock.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+      term.focus(); renderTerm();
+      if (!kernels[id]) learnKernel(id);
+    };
+    sock.onmessage = (e) => {
+      if (typeof e.data === 'string') {
+        const msg = JSON.parse(e.data);
+        if (msg.type === 'exit') term.write(`\r\n\x1b[2m[shell exited with ${msg.exit_code}]\x1b[0m\r\n`);
+        else if (msg.type === 'error') term.write(`\r\n\x1b[31m${msg.message}\x1b[0m\r\n`);
+        return;
+      }
+      term.write(new Uint8Array(e.data).subarray(1));
+    };
+    sock.onclose = () => {
+      if (ws === sock) ws = null;
+      if (termBox === id) { session('shell closed', false); if ($('reconnect')) $('reconnect').hidden = false; renderTerm(); }
+    };
+  } catch (e) { session(`could not open a shell: ${e.message}`, false); $('reconnect').hidden = false; }
+}
+
+function type(cmd) { if (ws?.readyState === WebSocket.OPEN) { ws.send(new TextEncoder().encode(`${cmd}\r`)); term.focus(); } }
+
+async function learnKernel(id) {
+  try {
+    const r = await fetch(`/api/boxes/${encodeURIComponent(id)}/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ cmd: 'uname -r' }) });
+    let k = '';
+    for (const l of (await r.text()).split('\n')) if (l) { const e = JSON.parse(l); if (e.kind === 'stdout') k += e.text; }
+    if (k.trim()) { kernels[id] = k.trim(); renderTerm(); }
+  } catch {}
+}
+
+function select(id) {
+  if (id === selected) return;
+  closeShell(); termBox = null; selected = id; render();
+}
+
+async function create() {
+  const btn = $('create'); btn.disabled = true; btn.textContent = 'Starting a VM...';
+  try {
+    const name = `demo-${Math.random().toString(36).slice(2, 6)}`;
+    const { id } = await call('POST', '/api/boxes', { image: $('image').value, name });
+    await refresh(); select(id);
+  } catch (e) { toast(`Could not start a box: ${e.message}`); }
+  btn.disabled = false; btn.textContent = 'New box';
+}
+
+async function toggle() {
+  const b = current(); if (!b) return;
+  $('toggle').disabled = true;
+  if (b.status === 'running') { closeShell(); termBox = null; }
+  try { await call('POST', `/api/boxes/${encodeURIComponent(b.id)}/${b.status === 'running' ? 'stop' : 'start'}`); delete kernels[b.id]; }
+  catch (e) { toast(e.message); }
+  termBox = null; $('toggle').disabled = false;
+  await refresh();
+}
+
+async function remove() {
+  const b = current(); if (!b) return;
+  $('remove').disabled = true; closeShell();
+  try { await call('DELETE', `/api/boxes/${encodeURIComponent(b.id)}`); selected = null; termBox = null; }
+  catch (e) { toast(e.message); }
+  await refresh();
+}
+
+$('create').onclick = create;
+refresh(); setInterval(refresh, 2000);
+</script>
+</body>
+</html>
