@@ -11,6 +11,14 @@ between runs, and can be snapshotted, cloned and exported. The engine is a libra
 starts boxes directly, with no daemon and no root. A REST server and a command line are included for the cases
 where you want one.
 
+<p align="center">
+  <a href="https://www.youtube.com/watch?v=hg815xA5614">
+    <img src="docs/assets/demo/dashboard-demo.gif" alt="The ACRYL microVMs dashboard: a list of boxes and a shell inside the selected box" width="800">
+  </a>
+  <br>
+  <sub>The <a href="examples/dashboard">example dashboard</a> with a shell inside a running box. <a href="https://www.youtube.com/watch?v=hg815xA5614">Watch the full demo on YouTube.</a></sub>
+</p>
+
 > **Status: work in progress.** The project was renamed recently. Package names, container images and some git
 > dependencies still resolve to their previous locations, so a fresh build may fail until those are re-created
 > under the new name. Nothing is published to a package registry yet.
