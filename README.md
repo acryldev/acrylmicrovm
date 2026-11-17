@@ -19,9 +19,8 @@ where you want one.
   <sub>The <a href="examples/dashboard">example dashboard</a> with a shell inside a running box. <a href="https://www.youtube.com/watch?v=hg815xA5614">Watch the full demo on YouTube.</a></sub>
 </p>
 
-> **Status: work in progress.** The project was renamed recently. Package names, container images and some git
-> dependencies still resolve to their previous locations, so a fresh build may fail until those are re-created
-> under the new name. Nothing is published to a package registry yet.
+> **Status: work in progress.** Early releases; APIs can still change between versions. The Python SDK and the
+> box images are not published under the new name yet.
 
 ## What you get
 
@@ -48,6 +47,18 @@ where you want one.
 | Windows (under WSL2) | x86_64        | WSL2 with KVM support                |
 
 Intel Macs are not supported.
+
+## Install
+
+```console
+npx acrylmicrovm run --rm alpine:latest echo hello   # the command, prebuilt, from npm
+cargo install acrylmicrovm-cli                        # the same command, built from crates.io
+npm i acrylmicrovm                                    # the Node SDK
+cargo add acrylmicrovm                                # the Rust library
+```
+
+Linux (x86_64, arm64) needs read and write access to `/dev/kvm`; macOS needs Apple Silicon. Prebuilt binaries are
+also on the [releases page](https://github.com/acryldev/acrylmicrovm/releases).
 
 ## A first box
 
