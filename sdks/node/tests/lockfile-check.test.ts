@@ -7,7 +7,7 @@ import { findLockfileProblems } from "../scripts/lockfile-problems.mjs";
 /** A manifest/lock pair that agrees, as `npm install` would leave it. */
 function agreeingPair() {
   const manifest = {
-    name: "@acryldev/acrylmicrovm",
+    name: "acrylmicrovm",
     version: "0.10.0",
     workspaces: ["npm/*"],
     devDependencies: { prettier: "^3.6.2", vitest: "^4.1.8" },

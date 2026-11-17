@@ -26,7 +26,9 @@ describe.skip(
     let tmpDir: string;
 
     beforeAll(async () => {
-      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "acrylmicrovm-snap-test-"));
+      tmpDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "acrylmicrovm-snap-test-"),
+      );
       box = new SimpleBox({
         image: "alpine:latest",
         autoRemove: false,

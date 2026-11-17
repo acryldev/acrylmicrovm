@@ -8,7 +8,7 @@
  * - Multi-browser support
  */
 
-import { BrowserBox } from '@acryldev/acrylmicrovm';
+import { BrowserBox } from 'acrylmicrovm';
 import { chromium, firefox, webkit } from 'playwright-core';
 
 const browserTypes = { chromium, firefox, webkit };

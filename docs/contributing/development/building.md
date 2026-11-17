@@ -69,7 +69,7 @@ Update these together when preparing a release:
 - `Cargo.lock`: the matching workspace package versions.
 - `sdks/python/pyproject.toml`: `project.version`.
 - `sdks/node/package.json` and `package-lock.json`: package version and lockfile root versions.
-- Root `package.json`: the `@acryldev/acrylmicrovm` dependency range.
+- Root `package.json`: the `acrylmicrovm` dependency range.
 
 Select Cargo lock entries by package name: third-party dependencies can share the
 old version number. `acrylmicrovm-test-utils` keeps its independent version. The Go release

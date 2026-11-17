@@ -6,7 +6,7 @@
  *
  * @example
  * ```typescript
- * import { SimpleBox } from '@acryldev/acrylmicrovm';
+ * import { SimpleBox } from 'acrylmicrovm';
  *
  * const box = new SimpleBox({ image: 'alpine:latest' });
  * try {
@@ -95,7 +95,8 @@ class AcrylMicrovmWithBagRest extends (nativeAcrylMicrovm as unknown as {
   }
 }
 
-export const JsAcrylMicrovm = AcrylMicrovmWithBagRest as unknown as AcrylMicrovmConstructor;
+export const JsAcrylMicrovm =
+  AcrylMicrovmWithBagRest as unknown as AcrylMicrovmConstructor;
 export { AcrylMicrovmRestOptions } from "./options.js";
 export type * from "./agents.js";
 export type { CopyOptions } from "./copy.js";

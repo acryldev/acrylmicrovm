@@ -185,7 +185,10 @@ describe(
     beforeAll(() => {
       // Pre-clean any state from a previous run.
       rmSync(TARGET_FILE, { force: true });
-      rmSync("/tmp/acrylmicrovm_host_escape_node", { recursive: true, force: true });
+      rmSync("/tmp/acrylmicrovm_host_escape_node", {
+        recursive: true,
+        force: true,
+      });
       layoutDir = mkdtempSync(join(tmpdir(), "malicious-oci-node-"));
       buildMaliciousOciLayout(layoutDir);
     });

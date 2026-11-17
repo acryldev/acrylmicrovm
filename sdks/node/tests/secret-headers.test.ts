@@ -11,7 +11,8 @@ const nativeBuilt =
 
 describe.skipIf(!nativeBuilt)("secret headers native boundary", () => {
   test("secret headers survive the REST request", async () => {
-    const { JsAcrylMicrovm, AcrylMicrovmRestOptions } = await import("../lib/index.js");
+    const { JsAcrylMicrovm, AcrylMicrovmRestOptions } =
+      await import("../lib/index.js");
     const requests: Record<string, any>[] = [];
     const metadata: unknown[] = [];
     const server = createServer(async (request, response) => {

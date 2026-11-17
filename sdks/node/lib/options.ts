@@ -8,7 +8,7 @@
  *
  * @example
  * ```ts
- * import { JsAcrylMicrovm, AcrylMicrovmRestOptions, ApiKeyCredential } from '@acryldev/acrylmicrovm';
+ * import { JsAcrylMicrovm, AcrylMicrovmRestOptions, ApiKeyCredential } from 'acrylmicrovm';
  *
  * const rt = JsAcrylMicrovm.rest(new AcrylMicrovmRestOptions({
  *   url: 'https://api.example.com',

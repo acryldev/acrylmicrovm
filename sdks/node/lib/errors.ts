@@ -138,7 +138,9 @@ export type AcrylMicrovmErrorCode =
 // The binding throws a failure with its Display text as the message. An async
 // rejection from napi cannot carry a code of its own, so the code is read back
 // off the prefix each variant's Display starts with.
-const DISPLAY_PREFIXES: ReadonlyArray<readonly [string, AcrylMicrovmErrorCode]> = [
+const DISPLAY_PREFIXES: ReadonlyArray<
+  readonly [string, AcrylMicrovmErrorCode]
+> = [
   ["unsupported engine kind", "unsupported"],
   ["unsupported: ", "unsupported"],
   ["engine reported an error: ", "engine_unavailable"],

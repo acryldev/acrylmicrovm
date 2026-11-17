@@ -12,7 +12,7 @@
  *   npm install puppeteer-core
  */
 
-import { BrowserBox } from '@acryldev/acrylmicrovm';
+import { BrowserBox } from 'acrylmicrovm';
 import puppeteer from 'puppeteer-core';
 
 /**

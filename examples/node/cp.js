@@ -2,7 +2,7 @@
 // Demonstrate docker-like cp using the Node SDK (ESM).
 // Run: node cp.js
 
-import { JsAcrylMicrovm } from '@acryldev/acrylmicrovm';
+import { JsAcrylMicrovm } from 'acrylmicrovm';
 import fs from 'fs';
 import path from 'path';
 

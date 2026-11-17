@@ -17,7 +17,10 @@ import { testRegistries } from "./test-registries.js";
 const testHome = mkdtempSync("/tmp/acrylmicrovm-test-node-");
 
 const AcrylMicrovm = getJsAcrylMicrovm();
-AcrylMicrovm.initDefault({ homeDir: testHome, imageRegistries: testRegistries() });
+AcrylMicrovm.initDefault({
+  homeDir: testHome,
+  imageRegistries: testRegistries(),
+});
 
 afterAll(async () => {
   try {

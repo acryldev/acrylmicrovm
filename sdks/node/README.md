@@ -59,7 +59,7 @@ with an unsupported-operation error.
 ## Installation
 
 ```bash
-npm install @acryldev/acrylmicrovm
+npm install acrylmicrovm
 ```
 
 **Requirements:**
@@ -75,7 +75,7 @@ npm install @acryldev/acrylmicrovm
 ### JavaScript
 
 ```javascript
-import { SimpleBox } from '@acryldev/acrylmicrovm';
+import { SimpleBox } from 'acrylmicrovm';
 
 async function main() {
   const box = new SimpleBox({ image: 'alpine:latest' });
@@ -134,7 +134,7 @@ Construct an `ApiKeyCredential` and pass it positionally:
 `AcrylMicrovm.rest(url, credential)`.
 
 ```typescript
-import { JsAcrylMicrovm, ApiKeyCredential } from '@acryldev/acrylmicrovm';
+import { JsAcrylMicrovm, ApiKeyCredential } from 'acrylmicrovm';
 
 const rt = JsAcrylMicrovm.rest(
   'http://localhost:8100',
@@ -162,7 +162,7 @@ id; another deployment may use a workspace name, a region+team
 pair, or any other multi-segment value such as `us-east/team-42`.
 
 ```typescript
-import { JsAcrylMicrovm, AcrylMicrovmRestOptions, ApiKeyCredential } from '@acryldev/acrylmicrovm';
+import { JsAcrylMicrovm, AcrylMicrovmRestOptions, ApiKeyCredential } from 'acrylmicrovm';
 
 const rt = JsAcrylMicrovm.rest(new AcrylMicrovmRestOptions({
   url: 'https://api.webboxes.ai',
@@ -547,7 +547,7 @@ See [../../examples/node/](../../examples/node/) directory for complete examples
 
 ```bash
 # If installed via npm
-npm install @acryldev/acrylmicrovm
+npm install acrylmicrovm
 node simplebox.js
 
 # If working from source
@@ -555,7 +555,7 @@ cd ../../sdks/node
 npm install && npm run build
 npm link
 cd ../../examples/node
-npm link @acryldev/acrylmicrovm
+npm link acrylmicrovm
 node simplebox.js
 ```
 

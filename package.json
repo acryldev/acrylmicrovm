@@ -23,10 +23,10 @@
   },
   "homepage": "https://github.com/acryldev/acrylmicrovm#readme",
   "dependencies": {
-    "@acryldev/acrylmicrovm": "^0.13.1"
+    "acrylmicrovm": "^0.13.1"
   },
   "optionalDependencies": {
-    "@acryldev/acrylmicrovm-darwin-arm64": "^0.2.8",
-    "@acryldev/acrylmicrovm-linux-x64-gnu": "^0.2.8"
+    "acrylmicrovm-darwin-arm64": "^0.2.8",
+    "acrylmicrovm-linux-x64-gnu": "^0.2.8"
   }
 }

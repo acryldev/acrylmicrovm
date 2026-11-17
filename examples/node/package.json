@@ -5,7 +5,7 @@
   "description": "Example scripts for AcrylMicrovm Node.js SDK",
   "type": "module",
   "dependencies": {
-    "@acryldev/acrylmicrovm": "file:../../sdks/node",
+    "acrylmicrovm": "file:../../sdks/node",
     "playwright-core": "1.58.0",
     "puppeteer-core": "^24.36.0"
   },

@@ -8,7 +8,7 @@
  * - Behavior after shutdown (operations fail)
  */
 
-import { JsAcrylMicrovm } from '@acryldev/acrylmicrovm';
+import { JsAcrylMicrovm } from 'acrylmicrovm';
 
 async function main() {
   console.log('=== Runtime Shutdown Example ===\n');

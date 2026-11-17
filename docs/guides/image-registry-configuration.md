@@ -172,7 +172,7 @@ async with acrylmicrovm.SimpleBox(image="alpine", runtime=runtime) as box:
 Pass structured `imageRegistries` to the `JsAcrylMicrovm` constructor.
 
 ```javascript
-import { JsAcrylMicrovm, SimpleBox } from '@acryldev/acrylmicrovm';
+import { JsAcrylMicrovm, SimpleBox } from 'acrylmicrovm';
 
 // Configure a runtime to search ghcr.io first, then docker.io
 const runtime = new JsAcrylMicrovm({

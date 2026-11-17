@@ -8,7 +8,7 @@
  * - Using private/enterprise registries
  */
 
-import { SimpleBox, JsAcrylMicrovm } from '@acryldev/acrylmicrovm';
+import { SimpleBox, JsAcrylMicrovm } from 'acrylmicrovm';
 
 async function exampleCustomRegistries() {
   console.log('\n=== Example: Custom Image Registries ===');

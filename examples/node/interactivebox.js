@@ -8,7 +8,7 @@
  * - Real-time I/O
  */
 
-import { InteractiveBox } from '@acryldev/acrylmicrovm';
+import { InteractiveBox } from 'acrylmicrovm';
 
 async function main() {
   console.log('=== InteractiveBox Example ===\n');

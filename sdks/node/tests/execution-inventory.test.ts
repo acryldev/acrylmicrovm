@@ -3,7 +3,9 @@ import { beforeEach, describe, expect, test, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({ create: vi.fn() }));
 vi.mock("../lib/native.js", () => ({
-  getJsAcrylMicrovm: () => ({ withDefaultConfig: () => ({ create: mocks.create }) }),
+  getJsAcrylMicrovm: () => ({
+    withDefaultConfig: () => ({ create: mocks.create }),
+  }),
 }));
 
 import { SimpleBox } from "../lib/simplebox.js";

@@ -2,7 +2,7 @@
 // Minimal Node SDK e2e smoke driver, called by cases/test_node_entry.py.
 //
 // Imports from the LOCAL sdks/node build (the repo root has a stale
-// @acryldev/acrylmicrovm 0.9.5 install with field-name glitches; we want
+// acrylmicrovm 0.9.5 install with field-name glitches; we want
 // e2e to test current code, not last release).
 //
 // Like the C SDK smoke, this only does create + remove — that exercises

@@ -37,8 +37,8 @@ case "$component" in
         pip install --break-system-packages --only-binary=:all: --force-reinstall "$scratch/$wheel"
         ;;
     node)
-        package="acryldev-acrylmicrovm-${version}.tgz"
-        platform="acryldev-acrylmicrovm-linux-x64-gnu-${version}.tgz"
+        package="acrylmicrovm-${version}.tgz"
+        platform="acrylmicrovm-linux-x64-gnu-${version}.tgz"
         download "$package"
         download "$platform"
         mkdir -p "$root/sdks/node/native"

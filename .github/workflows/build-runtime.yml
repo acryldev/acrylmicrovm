@@ -249,7 +249,8 @@ jobs:
     name: Publish to crates.io
     needs: upload_to_release
     runs-on: ubuntu-latest
-    if: github.event_name == 'release'
+    # First releases are published by hand with the owner's token; set the repo variable PUBLISH_FROM_CI=true and the CARGO_REGISTRY_TOKEN secret to publish from CI.
+    if: github.event_name == 'release' && vars.PUBLISH_FROM_CI == 'true'
     env:
       ACRYLMICROVM_DEPS_STUB: "1"
 

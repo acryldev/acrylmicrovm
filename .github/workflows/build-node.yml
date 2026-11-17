@@ -5,9 +5,9 @@
 # Uses napi-rs for native Rust bindings with platform-specific packages.
 #
 # Package structure:
-# - @acryldev/acrylmicrovm (main package with TypeScript wrappers)
-# - @acryldev/acrylmicrovm-darwin-arm64 (macOS ARM64 native binary)
-# - @acryldev/acrylmicrovm-linux-x64-gnu (Linux x64 glibc native binary)
+# - acrylmicrovm (main package with TypeScript wrappers)
+# - acrylmicrovm-darwin-arm64 (macOS ARM64 native binary)
+# - acrylmicrovm-linux-x64-gnu (Linux x64 glibc native binary)
 #
 # Triggers:
 # - release: When a GitHub release is published
@@ -82,6 +82,8 @@ jobs:
             npm install --silent
             npm run build:native -- --release
             npm run artifacts
+            cargo build -p acrylmicrovm-cli --release
+            node scripts/add-cli-binary.mjs ../../target/release/acrylmicrovm
 
       - name: Build Node.js package (macOS)
         if: runner.os == 'macOS'
@@ -93,6 +95,8 @@ jobs:
           npm install --silent
           npm run build:native -- --release
           npm run artifacts
+          cargo build -p acrylmicrovm-cli --release
+          node scripts/add-cli-binary.mjs ../../target/release/acrylmicrovm
 
           command -v sccache &>/dev/null && sccache --show-stats || true
 
@@ -178,7 +182,8 @@ jobs:
   publish:
     name: Publish to npm
     needs: [ config, build, test ]
-    if: github.event_name == 'release' && github.event.action == 'published'
+    # First releases are published by hand with the owner's token; set the repo variable PUBLISH_FROM_CI=true once npm Trusted Publishing is configured.
+    if: github.event_name == 'release' && github.event.action == 'published' && vars.PUBLISH_FROM_CI == 'true'
     runs-on: ubuntu-latest
     permissions:
       id-token: write   # Required for npm OIDC Trusted Publishing
@@ -231,8 +236,8 @@ jobs:
       # NPM PUBLISH (Trusted Publishing via OIDC - no NPM_TOKEN needed)
       # -------------------------------------------------------------------------
       # IMPORTANT: Publish order matters!
-      # 1. Platform packages first: @acryldev/acrylmicrovm-darwin-arm64, etc.
-      # 2. Main package last: @acryldev/acrylmicrovm
+      # 1. Platform packages first: acrylmicrovm-darwin-arm64, etc.
+      # 2. Main package last: acrylmicrovm
       #
       # The main package has optionalDependencies pointing to platform packages.
       # If we publish main first, npm install will fail because the platform

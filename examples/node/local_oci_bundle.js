@@ -38,7 +38,7 @@
  *    node local_oci_bundle.js /path/to/alpine-bundle
  */
 
-import { JsAcrylMicrovm } from '@acryldev/acrylmicrovm';
+import { JsAcrylMicrovm } from 'acrylmicrovm';
 import * as fs from 'fs';
 import * as path from 'path';
 

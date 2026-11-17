@@ -9,7 +9,7 @@
  * - Proper cleanup
  */
 
-import { SimpleBox } from '@acryldev/acrylmicrovm';
+import { SimpleBox } from 'acrylmicrovm';
 
 async function main() {
   console.log('=== SimpleBox Example ===\n');

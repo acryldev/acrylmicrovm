@@ -9,7 +9,7 @@
  * - Error handling
  */
 
-import { CodeBox } from '@acryldev/acrylmicrovm';
+import { CodeBox } from 'acrylmicrovm';
 
 async function main() {
   console.log('=== CodeBox Example ===\n');

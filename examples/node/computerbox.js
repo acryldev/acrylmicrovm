@@ -10,7 +10,7 @@
  * - Web browser access
  */
 
-import { ComputerBox } from '@acryldev/acrylmicrovm';
+import { ComputerBox } from 'acrylmicrovm';
 import fs from 'fs';
 
 async function main() {

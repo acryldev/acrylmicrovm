@@ -15,7 +15,11 @@
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { JsAcrylMicrovm, AcrylMicrovmRestOptions, type AcrylMicrovm } from "../lib/index.js";
+import {
+  JsAcrylMicrovm,
+  AcrylMicrovmRestOptions,
+  type AcrylMicrovm,
+} from "../lib/index.js";
 import type { JsBox } from "../lib/native-contracts.js";
 import { SimpleBox } from "../lib/simplebox.js";
 import type { SshConfig, SshStatus } from "../lib/simplebox.js";

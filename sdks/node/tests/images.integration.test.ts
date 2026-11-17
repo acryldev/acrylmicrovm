@@ -19,7 +19,10 @@ const testRegistries = [
 
 function newIsolatedRuntime() {
   const homeDir = mkdtempSync("/tmp/acrylmicrovm-test-node-images-");
-  const runtime = new JsAcrylMicrovm({ homeDir, imageRegistries: testRegistries });
+  const runtime = new JsAcrylMicrovm({
+    homeDir,
+    imageRegistries: testRegistries,
+  });
   return { homeDir, runtime };
 }
 

@@ -51,7 +51,7 @@ export interface BrowserBoxOptions extends Omit<
  * ## Usage
  *
  * ```typescript
- * import { BrowserBox } from '@acryldev/acrylmicrovm';
+ * import { BrowserBox } from 'acrylmicrovm';
  * import { chromium } from 'playwright-core';
  *
  * const box = new BrowserBox({ browser: 'chromium' });

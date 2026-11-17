@@ -131,12 +131,12 @@ class ReleaseInstallTest(unittest.TestCase):
         self.assertEqual([call["tool"] for call in calls], ["gh"])
 
     def node_assets(self, manifest=None, javascript="release JavaScript"):
-        self.archive("acryldev-acrylmicrovm-0.13.1.tgz", {
+        self.archive("acrylmicrovm-0.13.1.tgz", {
             "package/package.json": json.dumps(manifest or {"version": "0.13.1"}),
             "package/dist/index.js": javascript,
             "package/native/acrylmicrovm.js": "release loader",
         })
-        self.archive("acryldev-acrylmicrovm-linux-x64-gnu-0.13.1.tgz", {
+        self.archive("acrylmicrovm-linux-x64-gnu-0.13.1.tgz", {
             "package/acrylmicrovm.linux-x64-gnu.node": "release addon",
             "package/package.json": "platform package manifest",
         })

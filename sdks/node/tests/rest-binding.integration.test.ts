@@ -3,7 +3,11 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { describe, expect, test } from "vitest";
-import { JsAcrylMicrovm, AcrylMicrovmRestOptions, errorCode } from "../lib/index.js";
+import {
+  JsAcrylMicrovm,
+  AcrylMicrovmRestOptions,
+  errorCode,
+} from "../lib/index.js";
 
 // `lib/index.ts` exposes the cross-SDK `AcrylMicrovmRestOptions` bag while the
 // native binding takes its own `AcrylMicrovmRestOptions` class (the
@@ -20,7 +24,10 @@ describe("JsAcrylMicrovm.rest options-bag adapter", () => {
 
   test("adapts the AcrylMicrovmRestOptions bag to the native runtime", () => {
     const runtime = JsAcrylMicrovm.rest(
-      new AcrylMicrovmRestOptions({ url: "http://127.0.0.1:1", pathPrefix: "acme" }),
+      new AcrylMicrovmRestOptions({
+        url: "http://127.0.0.1:1",
+        pathPrefix: "acme",
+      }),
     );
     try {
       expect(runtime).toBeDefined();

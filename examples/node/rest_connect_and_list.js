@@ -12,7 +12,7 @@
  *   acrylmicrovm serve --port 8100
  */
 
-import { JsAcrylMicrovm, AcrylMicrovmRestOptions, ApiKeyCredential } from '@acryldev/acrylmicrovm';
+import { JsAcrylMicrovm, AcrylMicrovmRestOptions, ApiKeyCredential } from 'acrylmicrovm';
 
 const SERVER_URL = 'http://localhost:8100';
 const API_KEY = 'local-dev-key'; // reference server accepts any non-empty bearer

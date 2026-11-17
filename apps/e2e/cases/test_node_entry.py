@@ -1,6 +1,6 @@
 # Modified by ACRYL, 2026
 """Node SDK entry-point e2e: builds and runs apps/e2e/sdks/node/e2e_basic.ts
-against the local @acryldev/acrylmicrovm napi build, asserts a successful box
+against the local acrylmicrovm napi build, asserts a successful box
 round-trip + runner journal contains the box id.
 
 Skips cleanly if the Node SDK's napi binding hasn't been built locally

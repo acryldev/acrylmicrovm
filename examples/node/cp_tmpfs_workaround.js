@@ -13,7 +13,7 @@
  * a command running inside the container's mount namespace, which sees tmpfs.
  */
 
-import { SimpleBox } from '@acryldev/acrylmicrovm';
+import { SimpleBox } from 'acrylmicrovm';
 import { writeFileSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';

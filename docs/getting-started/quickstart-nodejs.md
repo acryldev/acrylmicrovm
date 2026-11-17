@@ -5,7 +5,7 @@ Get up and running with ACRYL microVMs Node.js SDK in 5 minutes.
 ## Installation
 
 ```bash
-npm install @acryldev/acrylmicrovm
+npm install acrylmicrovm
 ```
 
 **Requirements:**
@@ -14,7 +14,7 @@ npm install @acryldev/acrylmicrovm
 
 **Verify Installation:**
 ```javascript
-import { SimpleBox } from '@acryldev/acrylmicrovm';
+import { SimpleBox } from 'acrylmicrovm';
 console.log('AcrylMicrovm loaded successfully');
 ```
 
@@ -23,7 +23,7 @@ console.log('AcrylMicrovm loaded successfully');
 Create a file `hello.js`:
 
 ```javascript
-import { SimpleBox } from '@acryldev/acrylmicrovm';
+import { SimpleBox } from 'acrylmicrovm';
 
 async function main() {
   const box = new SimpleBox({ image: 'python:slim' });
@@ -53,7 +53,7 @@ node hello.js
 ## TypeScript 5.2+ (async disposal)
 
 ```typescript
-import { SimpleBox } from '@acryldev/acrylmicrovm';
+import { SimpleBox } from 'acrylmicrovm';
 
 async function main() {
   await using box = new SimpleBox({ image: 'alpine:latest' });
@@ -80,7 +80,7 @@ npm link
 
 # Run examples
 cd ../../examples/node
-npm link @acryldev/acrylmicrovm
+npm link acrylmicrovm
 
 node simplebox.js
 node codebox.js

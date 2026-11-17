@@ -1,12 +1,16 @@
 {
-  "name": "@acryldev/acrylmicrovm",
+  "name": "acrylmicrovm",
   "version": "0.13.1",
-  "description": "AcrylMicrovm - Embeddable micro-VM runtime for secure, isolated code execution",
+  "description": "ACRYL microVMs: run untrusted code in micro-VMs with their own kernel. Node SDK and the acrylmicrovm command.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "acrylmicrovm": "bin/acrylmicrovm.js"
+  },
   "files": [
     "dist",
+    "bin",
     "native/acrylmicrovm.js"
   ],
   "workspaces": [
@@ -20,7 +24,7 @@
       "aarch64-unknown-linux-gnu"
     ],
     "package": {
-      "name": "@acryldev/acrylmicrovm"
+      "name": "acrylmicrovm"
     }
   },
   "scripts": {
@@ -77,5 +81,6 @@
   "engines": {
     "node": ">=18.0.0"
   },
-  "author": "Dorian Zheng <xingzhengde72@gmail.com>"
+  "author": "WebBoxes s.r.o.",
+  "homepage": "https://acryl.dev/acrylmicrovm"
 }

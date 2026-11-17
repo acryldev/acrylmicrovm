@@ -17,7 +17,7 @@
  *   npm run claude -- --demo # Automated multi-turn test
  */
 
-import { JsAcrylMicrovm } from '@acryldev/acrylmicrovm';
+import { JsAcrylMicrovm } from 'acrylmicrovm';
 import * as readline from 'readline';
 
 // Configuration

@@ -8,7 +8,7 @@ If you installed ACRYL microVMs via npm:
 
 ```bash
 # Install AcrylMicrovm
-npm install @acryldev/acrylmicrovm
+npm install acrylmicrovm
 
 # Run examples directly
 node simplebox.js
