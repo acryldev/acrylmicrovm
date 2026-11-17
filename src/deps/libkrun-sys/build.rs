@@ -9,28 +9,28 @@ use std::process::{Command, Stdio};
 // ── Constants ────────────────────────────────────────────────────────────────
 
 // libkrunfw release configuration
-// Source: https://github.com/acryldev/libkrunfw (fork with prebuilt releases)
+// Source: https://github.com/libkrun/libkrunfw (upstream release, LGPL-2.1; the kernel inside is GPL-2.0)
 const LIBKRUNFW_VERSION: &str = "v5.4.0";
 
 // macOS: Download prebuilt kernel.c, compile locally to .dylib
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 const LIBKRUNFW_PREBUILT_URL: &str =
-    "https://github.com/acryldev/libkrunfw/releases/download/v5.4.0/libkrunfw-prebuilt-aarch64.tgz";
+    "https://github.com/libkrun/libkrunfw/releases/download/v5.4.0/libkrunfw-prebuilt-aarch64.tgz";
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const LIBKRUNFW_SHA256: &str = "1d1b848cee7053c3d26915f30312560343a4e382b5b4e83be1d6755939582de6";
+const LIBKRUNFW_SHA256: &str = "1019ba38b04b5f56b4db48baf48f632ad5611a2e3bf9f3a14a1671e2368b73f1";
 
 // Linux: Download pre-compiled .so directly (no build needed)
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const LIBKRUNFW_SO_URL: &str =
-    "https://github.com/acryldev/libkrunfw/releases/download/v5.4.0/libkrunfw-x86_64.tgz";
+    "https://github.com/libkrun/libkrunfw/releases/download/v5.4.0/libkrunfw-x86_64.tgz";
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-const LIBKRUNFW_SHA256: &str = "63df4e4cc99d6c876757fb2f374ce2fee00f3408a1133b2c44600ce0195286b5";
+const LIBKRUNFW_SHA256: &str = "32b7a33dc7dd6c966c59e898a7bceb9b52d5a22e8abc41fba0b587e238eaf22f";
 
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
 const LIBKRUNFW_SO_URL: &str =
-    "https://github.com/acryldev/libkrunfw/releases/download/v5.4.0/libkrunfw-aarch64.tgz";
+    "https://github.com/libkrun/libkrunfw/releases/download/v5.4.0/libkrunfw-aarch64.tgz";
 #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
-const LIBKRUNFW_SHA256: &str = "e52a05f83baf1e0f6d3e58b96837bcd8729820ecea74a55a1903bd47e0505c57";
+const LIBKRUNFW_SHA256: &str = "c600af2b9bce8115ac30f02f38ae01207c6f041de84b58f4732ef62b5ebbc62e";
 
 // Library directory name differs by platform
 #[cfg(target_os = "macos")]

@@ -1,6 +1,6 @@
 # Modified by ACRYL, 2026
 [package]
-name = "e2fsprogs-sys"
+name = "acrylmicrovm-e2fsprogs-sys"
 version.workspace = true
 edition = "2021"
 authors.workspace = true

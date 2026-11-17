@@ -50,12 +50,12 @@ validate_submodules() {
         "$repo_root" \
         "src/deps/libkrun-sys/vendor/libkrun" \
         "src/deps/libkrun-sys/vendor/libkrun" \
-        "https://github.com/acryldev/libkrun.git"
+        "https://github.com/libkrun/libkrun.git"
     validate_submodule \
         "$repo_root" \
         "src/deps/libkrun-sys/vendor/libkrunfw" \
         "src/deps/libkrun-sys/vendor/libkrunfw" \
-        "https://github.com/acryldev/libkrunfw.git"
+        "https://github.com/libkrun/libkrunfw.git"
     validate_submodule \
         "$repo_root" \
         "src/deps/e2fsprogs-sys/vendor/e2fsprogs" \

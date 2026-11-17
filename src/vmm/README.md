@@ -884,7 +884,7 @@ commands do not waive the arm64 prerequisites.
 `virtio::fs::device::Fs::new(tag, shares)` constructs one Linux x86_64 device
 for all exports ([design and stages](https://github.com/acryldev/acrylmicrovm/issues/2274)).
 It ports the FUSE interfaces, dispatcher and Linux file operations from
-[libkrun e12b9b3](https://github.com/acryldev/libkrun/tree/e12b9b3780ffa8df9f3e1797b217d13453479167/src/devices/src/virtio/fs),
+[libkrun e12b9b3](https://github.com/libkrun/libkrun/tree/e12b9b3780ffa8df9f3e1797b217d13453479167/src/devices/src/virtio/fs),
 with the synthetic namespace following
 [OpenVMM 998904f](https://github.com/microsoft/openvmm/blob/998904f2debee98416c5d007a17f05be1b7dad34/vm/devices/virtio/virtiofs/src/aggregate.rs).
 The port keeps its BSD attribution and local license; libkrun stays unchanged.

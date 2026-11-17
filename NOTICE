@@ -30,6 +30,31 @@ Files under other licences that remain in this tree:
   - src/vmm/src/virtio/fs/ is BSD-3-Clause; see the notice below and the
     LICENSE file in that folder.
 
+Native components built into the runtime
+
+Release binaries, the crates.io crates and the npm packages of ACRYL microVMs
+embed the following third-party programs and libraries. They keep their own
+licences; their source is available at the exact commits below.
+
+  - libkrun (Apache-2.0), https://github.com/libkrun/libkrun
+    commit e12b9b3780ffa8df9f3e1797b217d13453479167
+  - libkrunfw v5.4.0 (LGPL-2.1-only), https://github.com/libkrun/libkrunfw
+    commit e0647fa7a3932c4570fb2c0fd483b9f7a382ebdd, used as the prebuilt
+    release files published there. libkrunfw bundles a Linux kernel
+    (linux-6.12.87, GPL-2.0-only, source at https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.87.tar.xz)
+    built with the configuration and patches in that commit of libkrunfw.
+    Licence texts: LICENSE-LGPL-2.1-only and LICENSE-GPL-2.0-only in that
+    repository.
+  - e2fsprogs mke2fs (GPL-2.0), https://github.com/tytso/e2fsprogs
+    commit da631e117dcf8797bfda0f48bdaa05ac0fbcf7af
+  - bubblewrap (LGPL-2.0-or-later), https://github.com/containers/bubblewrap
+    commit 9ca3b05ec787acfb4b17bed37db5719fa777834f
+  - gvisor-tap-vsock v0.8.7 (Apache-2.0),
+    https://github.com/containers/gvisor-tap-vsock
+
+These are separate works that ACRYL microVMs runs or links; the Apache-2.0
+licence of ACRYL microVMs does not change their licences.
+
 Unchanged on purpose: the upstream NOTICE below, every LICENSE file, every
 LICENSES/ folder, and the copyright, patent, trademark and attribution notices
 that the source files already carry.

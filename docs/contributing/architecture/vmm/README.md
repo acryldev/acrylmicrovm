@@ -626,11 +626,11 @@ device patch in libkrunfw:
   and [0010, `allow hijacking sockets`][tsi-hijack]. Unused: the network
   factory always returns gvproxy (`src/acrylmicrovm/src/net/mod.rs:481-484`).
 
-[libkrunfw-patches]: https://github.com/acryldev/libkrunfw/tree/e0647fa7a3932c4570fb2c0fd483b9f7a382ebdd/patches
-[init-death]: https://github.com/acryldev/libkrunfw/blob/e0647fa7a3932c4570fb2c0fd483b9f7a382ebdd/patches/0001-krunfw-Don-t-panic-when-init-dies.patch
-[orderly-reboot]: https://github.com/acryldev/libkrunfw/blob/e0647fa7a3932c4570fb2c0fd483b9f7a382ebdd/patches/0002-krunfw-Ignore-run_cmd-on-orderly-reboot.patch
-[tsi]: https://github.com/acryldev/libkrunfw/blob/e0647fa7a3932c4570fb2c0fd483b9f7a382ebdd/patches/0009-Transparent-Socket-Impersonation-implementation.patch
-[tsi-hijack]: https://github.com/acryldev/libkrunfw/blob/e0647fa7a3932c4570fb2c0fd483b9f7a382ebdd/patches/0010-tsi-allow-hijacking-sockets-tsi_hijack.patch
+[libkrunfw-patches]: https://github.com/libkrun/libkrunfw/tree/e0647fa7a3932c4570fb2c0fd483b9f7a382ebdd/patches
+[init-death]: https://github.com/libkrun/libkrunfw/blob/e0647fa7a3932c4570fb2c0fd483b9f7a382ebdd/patches/0001-krunfw-Don-t-panic-when-init-dies.patch
+[orderly-reboot]: https://github.com/libkrun/libkrunfw/blob/e0647fa7a3932c4570fb2c0fd483b9f7a382ebdd/patches/0002-krunfw-Ignore-run_cmd-on-orderly-reboot.patch
+[tsi]: https://github.com/libkrun/libkrunfw/blob/e0647fa7a3932c4570fb2c0fd483b9f7a382ebdd/patches/0009-Transparent-Socket-Impersonation-implementation.patch
+[tsi-hijack]: https://github.com/libkrun/libkrunfw/blob/e0647fa7a3932c4570fb2c0fd483b9f7a382ebdd/patches/0010-tsi-allow-hijacking-sockets-tsi_hijack.patch
 
 ### Boot path
 

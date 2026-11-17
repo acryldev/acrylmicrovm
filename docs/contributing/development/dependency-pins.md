@@ -1,8 +1,8 @@
 # Dependency pins and a Linux build recipe
 
 The native runtime builds four third-party repositories from source or from a prebuilt release. The pins below are
-the commits the 0.13.1 release was built with. They are not recorded as git links in this repository, and two of
-the repositories have no fork under this organization yet, so a fresh checkout cannot fetch them by itself.
+the commits the 0.13.1 release was built with. They are git submodules pointing at the upstream repositories, so
+`git submodule update --init` fetches them.
 
 | Path | Pinned commit |
 | --- | --- |
@@ -11,10 +11,9 @@ the repositories have no fork under this organization yet, so a fresh checkout c
 | `src/deps/e2fsprogs-sys/vendor/e2fsprogs` | `da631e117dcf8797bfda0f48bdaa05ac0fbcf7af` |
 | `src/deps/bubblewrap-sys/vendor/bubblewrap` | `9ca3b05ec787acfb4b17bed37db5719fa777834f` |
 
-`libkrun-sys/build.rs` also downloads a prebuilt kernel library (checked against a pinned SHA-256) from
-`github.com/acryldev/libkrunfw/releases`, which does not exist yet. Until the libraries are forked and that release
-is re-published, check out the commits above into the vendor folders and point that URL at wherever the release
-file lives.
+`libkrun-sys/build.rs` also downloads the prebuilt kernel library of the upstream libkrunfw v5.4.0 release from
+`github.com/libkrun/libkrunfw/releases`, checked against a pinned SHA-256. Licences of these parts are listed in
+`NOTICE`. They stay until the VMM in `src/vmm` and its own guest kernel replace libkrun and libkrunfw.
 
 ## Verified build, 2026-11-16
 

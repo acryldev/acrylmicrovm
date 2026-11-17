@@ -1,6 +1,6 @@
 # Modified by ACRYL, 2026
 [package]
-name = "libgvproxy-sys"
+name = "acrylmicrovm-libgvproxy-sys"
 version.workspace = true
 edition = "2021"
 authors.workspace = true

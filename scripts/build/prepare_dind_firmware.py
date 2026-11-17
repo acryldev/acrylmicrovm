@@ -25,7 +25,7 @@ def prepare_linux(output: Path):
     kernel = output / LINUX_KERNEL
     if not kernel.exists():
         url = (
-            "https://github.com/acryldev/libkrunfw/releases/download/v5.4.0/"
+            "https://github.com/boxlite-ai/libkrunfw/releases/download/v5.4.0/"
             + LINUX_KERNEL
         )
         partial = kernel.with_suffix(".part")

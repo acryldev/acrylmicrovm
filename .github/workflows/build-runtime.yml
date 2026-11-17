@@ -290,10 +290,10 @@ jobs:
 
           # -sys crates skip verification: vendor sources excluded from package,
           # real build already succeeded in the build job above
-          publish_crate libkrun-sys --no-verify
-          publish_crate e2fsprogs-sys --no-verify
-          publish_crate libgvproxy-sys --no-verify
-          publish_crate bubblewrap-sys --no-verify
+          publish_crate acrylmicrovm-libkrun-sys --no-verify
+          publish_crate acrylmicrovm-e2fsprogs-sys --no-verify
+          publish_crate acrylmicrovm-libgvproxy-sys --no-verify
+          publish_crate acrylmicrovm-bubblewrap-sys --no-verify
 
           # acrylmicrovm-vmm resolves acrylmicrovm-hypervisor from crates.io. Give the
           # index time before publishing the dependent crate.

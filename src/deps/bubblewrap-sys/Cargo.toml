@@ -1,6 +1,6 @@
 # Modified by ACRYL, 2026
 [package]
-name = "bubblewrap-sys"
+name = "acrylmicrovm-bubblewrap-sys"
 version.workspace = true
 edition = "2021"
 authors.workspace = true

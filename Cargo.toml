@@ -27,10 +27,10 @@ acrylmicrovm = { path = "src/acrylmicrovm", version = "0.13.1" }
 acrylmicrovm-shared = { path = "src/shared", version = "0.13.1" }
 acrylmicrovm-hypervisor = { path = "src/hypervisor", version = "0.13.1" }
 acrylmicrovm-vmm = { path = "src/vmm", version = "0.13.1" }
-bubblewrap-sys = { path = "src/deps/bubblewrap-sys", version = "0.13.1" }
-e2fsprogs-sys = { path = "src/deps/e2fsprogs-sys", version = "0.13.1" }
-libgvproxy-sys = { path = "src/deps/libgvproxy-sys", version = "0.13.1" }
-libkrun-sys = { path = "src/deps/libkrun-sys", version = "0.13.1" }
+bubblewrap-sys = { package = "acrylmicrovm-bubblewrap-sys", path = "src/deps/bubblewrap-sys", version = "0.13.1" }
+e2fsprogs-sys = { package = "acrylmicrovm-e2fsprogs-sys", path = "src/deps/e2fsprogs-sys", version = "0.13.1" }
+libgvproxy-sys = { package = "acrylmicrovm-libgvproxy-sys", path = "src/deps/libgvproxy-sys", version = "0.13.1" }
+libkrun-sys = { package = "acrylmicrovm-libkrun-sys", path = "src/deps/libkrun-sys", version = "0.13.1" }
 
 [patch.crates-io]
 # Pull in youki PR #3504 (split intermediate/init readiness channels) which
@@ -41,7 +41,7 @@ libcontainer = { git = "https://github.com/youki-dev/youki", rev = "4b2f0e00a4a1
 [workspace.package]
 version = "0.13.1"
 edition = "2024"
-authors = ["Dorian Zheng <https://github.com/dorianzheng>"]
+authors = ["WebBoxes s.r.o."]
 license = "Apache-2.0"
 rust-version = "1.88"
 

@@ -10,7 +10,7 @@ local SDK deployments.
 
 ## Linux x86_64 firmware
 
-The [libkrunfw v5.4.0 release](https://github.com/acryldev/libkrunfw/releases/tag/v5.4.0)
+The [libkrunfw v5.4.0 release](https://github.com/boxlite-ai/libkrunfw/releases/tag/v5.4.0)
 provides `libkrunfw-kernel-dind-x86_64.bin`. It includes bridge, overlayfs,
 netfilter, IPVS and VXLAN support. Ordinary firmware is a separate asset.
 

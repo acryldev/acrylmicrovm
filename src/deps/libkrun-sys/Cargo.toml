@@ -1,6 +1,6 @@
 # Modified by ACRYL, 2026
 [package]
-name = "libkrun-sys"
+name = "acrylmicrovm-libkrun-sys"
 version.workspace = true
 edition = "2021"
 authors.workspace = true
