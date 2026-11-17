@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo/acrylmicrovm-logo-with-text.png" alt="ACRYL microVMs" width="240">
+</p>
+
 # ACRYL microVMs
 
 Hardware-isolated micro-VMs for running code you do not trust, built to be embedded in your own application.
