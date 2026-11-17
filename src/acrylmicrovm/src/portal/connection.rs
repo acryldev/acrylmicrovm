@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use acrylmicrovm_shared::{BoxTransport, AcrylMicrovmError, AcrylMicrovmResult};
+use acrylmicrovm_shared::{AcrylMicrovmError, AcrylMicrovmResult, BoxTransport};
 use hyper_util::rt::TokioIo;
 use tokio::sync::OnceCell;
 use tonic::transport::{Channel, Endpoint, Uri};

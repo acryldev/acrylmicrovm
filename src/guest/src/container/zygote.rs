@@ -248,7 +248,11 @@ impl Zygote {
     /// `spawn_blocking`.
     ///
     /// A command the image cannot run is `InvalidArgument`.
-    pub fn build_init(&self, spec: InitBuildSpec, fds: Option<[RawFd; 3]>) -> AcrylMicrovmResult<Pid> {
+    pub fn build_init(
+        &self,
+        spec: InitBuildSpec,
+        fds: Option<[RawFd; 3]>,
+    ) -> AcrylMicrovmResult<Pid> {
         let sock = self.sock.lock().unwrap();
         let fd = sock.as_raw_fd();
         send_request(fd, &ZygoteRequest::BuildInit(spec), fds)?;
@@ -372,7 +376,9 @@ fn do_build(spec: BuildSpec, fds: Option<[RawFd; 3]>) -> BuildResult {
         // Preserve the workload's validation/environment behavior while setting
         // terminal attributes in the child before either executor can run.
         let inner: Box<dyn libcontainer::workload::Executor> = match spec.ssh_workload.clone() {
-            Some(workload) => Box::new(crate::service::ssh::AcrylMicrovmWorkloadExecutor::new(workload)),
+            Some(workload) => Box::new(crate::service::ssh::AcrylMicrovmWorkloadExecutor::new(
+                workload,
+            )),
             None => Box::new(libcontainer::workload::default::DefaultExecutor {}),
         };
         builder = builder.with_executor(super::pty::PtyExecutor {
@@ -645,7 +651,9 @@ fn recv_request(sock: RawFd) -> AcrylMicrovmResult<(ZygoteRequest, Option<[RawFd
 
     let bytes = msg.bytes;
     if bytes == 0 {
-        return Err(AcrylMicrovmError::Internal("zygote: peer closed".to_string()));
+        return Err(AcrylMicrovmError::Internal(
+            "zygote: peer closed".to_string(),
+        ));
     }
 
     // Extract SCM_RIGHTS fds before dropping msg (which borrows iov → buf)

@@ -3,8 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
-use async_trait::async_trait;
 use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
+use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use super::{InitCtx, log_task_error, task_start};
@@ -30,10 +30,9 @@ impl PipelineTask<InitCtx> for BootAssetsTask {
         let box_id = task_start(&ctx, task_name).await;
         let (layout, configured) = {
             let ctx = ctx.lock().await;
-            let layout = ctx
-                .layout
-                .clone()
-                .ok_or_else(|| AcrylMicrovmError::Internal("filesystem task must run first".into()))?;
+            let layout = ctx.layout.clone().ok_or_else(|| {
+                AcrylMicrovmError::Internal("filesystem task must run first".into())
+            })?;
             (layout, ctx.config.options.advanced.kernel.clone())
         };
 
@@ -101,7 +100,10 @@ impl BootAssetStore {
         self.stage(configured)
     }
 
-    fn load_current(&self, configured: &KernelOptions) -> AcrylMicrovmResult<Option<PreparedKernel>> {
+    fn load_current(
+        &self,
+        configured: &KernelOptions,
+    ) -> AcrylMicrovmResult<Option<PreparedKernel>> {
         let manifest_path = self.layout.boot_dir().join(MANIFEST_FILE);
         let manifest_bytes = match std::fs::read(&manifest_path) {
             Ok(bytes) => bytes,

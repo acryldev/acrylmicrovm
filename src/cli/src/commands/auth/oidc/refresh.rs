@@ -249,7 +249,10 @@ mod tests {
             p.access_token.as_ref().map(|s| s.expose_secret()),
             Some("AT")
         );
-        assert_eq!(p.oidc_issuer.as_deref(), Some("https://dex.webboxes.ai/dex"));
+        assert_eq!(
+            p.oidc_issuer.as_deref(),
+            Some("https://dex.webboxes.ai/dex")
+        );
         assert_eq!(p.client_id.as_deref(), Some("acrylmicrovm"));
         assert_eq!(p.audience.as_deref(), Some("acrylmicrovm-api"));
     }

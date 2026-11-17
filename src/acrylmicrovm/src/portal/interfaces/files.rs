@@ -5,7 +5,7 @@
 
 use crate::litebox::CopySourceKind;
 use acrylmicrovm_shared::{
-    BoxByteStream, AcrylMicrovmError, AcrylMicrovmResult, DownloadRequest, FilesClient, UploadChunk,
+    AcrylMicrovmError, AcrylMicrovmResult, BoxByteStream, DownloadRequest, FilesClient, UploadChunk,
 };
 use futures::StreamExt;
 use tokio::fs::File;

@@ -1,7 +1,7 @@
 // Modified by ACRYL, 2026
 use super::*;
 use crate::lock::LockGuard;
-use crate::runtime::options::{BoxOptions, AcrylMicrovmOptions};
+use crate::runtime::options::{AcrylMicrovmOptions, BoxOptions};
 use crate::runtime::types::BoxStatus;
 
 async fn watched_box() -> (tempfile::TempDir, Arc<BoxImpl>, BoxWatcher) {

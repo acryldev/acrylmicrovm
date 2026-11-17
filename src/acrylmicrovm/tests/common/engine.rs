@@ -1,7 +1,7 @@
 // Modified by ACRYL, 2026
 //! Explicit engine selection for the M2/M3 matrices; product defaults stay unchanged.
 use acrylmicrovm::experimental::{ExperimentalFeature, RuntimeBuilder, custom_kernel, native_vmm};
-use acrylmicrovm::runtime::options::{BoxOptions, AcrylMicrovmOptions};
+use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, BoxOptions};
 use acrylmicrovm::{AcrylMicrovmRuntime, LiteBox};
 use acrylmicrovm_shared::{AcrylMicrovmError, AcrylMicrovmResult};
 

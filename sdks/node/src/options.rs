@@ -7,7 +7,7 @@ use acrylmicrovm::runtime::advanced_options::{
 };
 use acrylmicrovm::runtime::constants::images;
 use acrylmicrovm::runtime::options::{
-    BoxOptions, AcrylMicrovmOptions, ImageRegistry, ImageRegistryAuth, InboundNetworkConfig,
+    AcrylMicrovmOptions, BoxOptions, ImageRegistry, ImageRegistryAuth, InboundNetworkConfig,
     NetworkMode, NetworkSpec, OutboundNetworkConfig, PortProtocol, PortSpec, RegistryTransport,
     RootfsSpec, Secret, VolumeSpec,
 };
@@ -561,9 +561,11 @@ impl TryFrom<JsBoxOptions> for BoxOptions {
         // Convert image/rootfs_path/checkpoint to RootfsSpec
         let rootfs = match (&js_opts.checkpoint, &js_opts.rootfs_path) {
             (Some(_), _) if js_opts.image.is_some() || js_opts.rootfs_path.is_some() => {
-                return Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                    "checkpoint cannot be combined with image or rootfsPath".into(),
-                ));
+                return Err(
+                    acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
+                        "checkpoint cannot be combined with image or rootfsPath".into(),
+                    ),
+                );
             }
             (Some(checkpoint), _) => RootfsSpec::Checkpoint(checkpoint.clone()),
             (None, Some(path)) if !path.is_empty() => RootfsSpec::RootfsPath(path.clone()),
@@ -948,20 +950,19 @@ mod tests {
     #[test]
     fn rest_options_convert_to_core_fields() {
         let cred = ApiKeyCredential::new("opaque-key".into());
-        let with_auth = acrylmicrovm::AcrylMicrovmRestOptions::from(&JsAcrylMicrovmRestOptions::new(
-            "https://api.example.com".into(),
-            Some(&cred),
-            Some("acme".into()),
-        ));
+        let with_auth =
+            acrylmicrovm::AcrylMicrovmRestOptions::from(&JsAcrylMicrovmRestOptions::new(
+                "https://api.example.com".into(),
+                Some(&cred),
+                Some("acme".into()),
+            ));
         assert_eq!(with_auth.url, "https://api.example.com");
         assert_eq!(with_auth.path_prefix.as_deref(), Some("acme"));
         assert!(with_auth.credential.is_some());
 
-        let unauthenticated = acrylmicrovm::AcrylMicrovmRestOptions::from(&JsAcrylMicrovmRestOptions::new(
-            "http://localhost:8100".into(),
-            None,
-            None,
-        ));
+        let unauthenticated = acrylmicrovm::AcrylMicrovmRestOptions::from(
+            &JsAcrylMicrovmRestOptions::new("http://localhost:8100".into(), None, None),
+        );
         assert_eq!(unauthenticated.url, "http://localhost:8100");
         assert!(unauthenticated.path_prefix.is_none());
         assert!(unauthenticated.credential.is_none());

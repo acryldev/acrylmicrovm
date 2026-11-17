@@ -20,10 +20,10 @@ mod workload;
 pub(crate) use workload::{AcrylMicrovmWorkloadExecutor, SshWorkload};
 
 use crate::service::server::GuestServer;
-use auth::SshAuthorizer;
-use backoff::Backoff;
 use acrylmicrovm_shared::constants::ssh::DRAIN_TIMEOUT;
 use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
+use auth::SshAuthorizer;
+use backoff::Backoff;
 use std::net::{Shutdown, SocketAddr};
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -47,8 +47,8 @@ impl SshConfig {
         let listen_addr = config.listen_address.parse().map_err(|_| {
             AcrylMicrovmError::Config("invalid SSH listen address: expected IP:port".into())
         })?;
-        let authorizer =
-            SshAuthorizer::new(&config).map_err(|error| AcrylMicrovmError::Config(error.to_string()))?;
+        let authorizer = SshAuthorizer::new(&config)
+            .map_err(|error| AcrylMicrovmError::Config(error.to_string()))?;
         // Do not include either the input or decoder errors in diagnostics:
         // neither is required to be free of private key material.
         let host_key = russh::keys::PrivateKey::from_openssh(config.host_private_key.trim())
@@ -295,7 +295,9 @@ impl SshManager {
         Self::live_status(&state)
     }
 
-    pub(crate) async fn shutdown(&self) -> Result<acrylmicrovm_shared::SshStatus, Box<tonic::Status>> {
+    pub(crate) async fn shutdown(
+        &self,
+    ) -> Result<acrylmicrovm_shared::SshStatus, Box<tonic::Status>> {
         let mut state = self.state.lock().await;
         self.stop(&mut state).await?;
         Ok(Self::live_status(&state))

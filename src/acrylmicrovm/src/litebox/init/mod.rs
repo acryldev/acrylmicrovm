@@ -297,10 +297,9 @@ impl BoxBuilder {
                 (disk, None)
             } else {
                 // Starting/Stopped: get disks from rootfs tasks
-                let container_disk = ctx
-                    .container_disk
-                    .take()
-                    .ok_or_else(|| AcrylMicrovmError::Internal("rootfs task must run first".into()))?;
+                let container_disk = ctx.container_disk.take().ok_or_else(|| {
+                    AcrylMicrovmError::Internal("rootfs task must run first".into())
+                })?;
                 (container_disk, ctx.guest_disk.take())
             };
 
@@ -364,7 +363,7 @@ mod plan_tests {
         use crate::litebox::config::ContainerRuntimeConfig;
         use crate::runtime::{
             id::BoxIDMint,
-            options::{BoxOptions, AcrylMicrovmOptions},
+            options::{AcrylMicrovmOptions, BoxOptions},
             rt_impl::RuntimeImpl,
             types::ContainerID,
         };
@@ -574,7 +573,7 @@ mod required_start_safety_tests {
     use crate::litebox::config::ContainerRuntimeConfig;
     use crate::runtime::{
         id::BoxIDMint,
-        options::{BoxOptions, AcrylMicrovmOptions, RootfsSpec},
+        options::{AcrylMicrovmOptions, BoxOptions, RootfsSpec},
         rt_impl::RuntimeImpl,
         types::ContainerID,
     };

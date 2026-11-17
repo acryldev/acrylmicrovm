@@ -17,8 +17,8 @@ use std::net::{SocketAddr, TcpListener, UdpSocket};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use async_trait::async_trait;
 use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
+use async_trait::async_trait;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full};
 use hyper::client::conn::http1;
@@ -138,11 +138,15 @@ impl GvproxyBackend {
                 .header(hyper::header::HOST, "gvproxy")
                 .body(Full::<Bytes>::new(Bytes::from(body.unwrap_or_default())))
                 .map_err(|e| {
-                    AcrylMicrovmError::Network(format!("gvproxy services request build failed: {e}"))
+                    AcrylMicrovmError::Network(format!(
+                        "gvproxy services request build failed: {e}"
+                    ))
                 })?;
 
             let resp = sender.send_request(req).await.map_err(|e| {
-                AcrylMicrovmError::Network(format!("gvproxy services request to {path} failed: {e}"))
+                AcrylMicrovmError::Network(format!(
+                    "gvproxy services request to {path} failed: {e}"
+                ))
             })?;
 
             let status = resp.status().as_u16();
@@ -334,8 +338,8 @@ impl NetworkBackend for GvproxyBackend {
         &self,
         config: &crate::runtime::options::OutboundNetworkConfig,
     ) -> AcrylMicrovmResult<()> {
-        let body =
-            serde_json::to_string(config).map_err(|e| AcrylMicrovmError::Internal(e.to_string()))?;
+        let body = serde_json::to_string(config)
+            .map_err(|e| AcrylMicrovmError::Internal(e.to_string()))?;
         let (status, body) = self
             .request(Method::PUT, "/network/outbound", Some(body))
             .await?;

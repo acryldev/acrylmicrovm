@@ -29,7 +29,9 @@ impl LayerVerifier {
             AcrylMicrovmError::Storage("Invalid diff_id format, expected sha256:".into())
         })?;
         if expected_hash.is_empty() {
-            return Err(AcrylMicrovmError::Storage("Invalid diff_id: empty hash".into()));
+            return Err(AcrylMicrovmError::Storage(
+                "Invalid diff_id: empty hash".into(),
+            ));
         }
         Ok(Self {
             expected_hash: expected_hash.to_string(),

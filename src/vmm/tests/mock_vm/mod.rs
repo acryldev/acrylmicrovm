@@ -324,7 +324,10 @@ impl acrylmicrovm_hypervisor::X86Vcpu for MockVcpu {
         Ok(())
     }
 
-    fn set_boot_registers(&mut self, _state: &acrylmicrovm_hypervisor::X86BootRegisters) -> Result<()> {
+    fn set_boot_registers(
+        &mut self,
+        _state: &acrylmicrovm_hypervisor::X86BootRegisters,
+    ) -> Result<()> {
         self.record(Call::SetBootRegisters { id: self.id });
         Ok(())
     }

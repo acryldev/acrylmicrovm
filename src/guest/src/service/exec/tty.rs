@@ -255,7 +255,10 @@ mod tests {
     use super::*;
     use nix::pty::{openpty, OpenptyResult};
 
-    fn wire_tty(rows: u32, modes: Vec<acrylmicrovm_shared::TtyMode>) -> acrylmicrovm_shared::TtyConfig {
+    fn wire_tty(
+        rows: u32,
+        modes: Vec<acrylmicrovm_shared::TtyMode>,
+    ) -> acrylmicrovm_shared::TtyConfig {
         acrylmicrovm_shared::TtyConfig {
             rows,
             cols: 80,

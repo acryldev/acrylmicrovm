@@ -10,8 +10,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
 use acrylmicrovm::AcrylMicrovmRestOptions;
+use anyhow::{Context, Result, anyhow};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 

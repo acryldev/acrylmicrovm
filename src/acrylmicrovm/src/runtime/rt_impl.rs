@@ -11,7 +11,7 @@ use crate::rootfs::guest::{GuestRootfs, GuestRootfsManager};
 use crate::runtime::id::{BoxID, BoxIDMint};
 use crate::runtime::layout::{BoxFilesystemLayout, FilesystemLayout, FsLayoutConfig};
 use crate::runtime::lock::RuntimeLock;
-use crate::runtime::options::{BoxArchive, BoxOptions, AcrylMicrovmOptions};
+use crate::runtime::options::{AcrylMicrovmOptions, BoxArchive, BoxOptions};
 use crate::runtime::signal_handler::timeout_to_duration;
 use crate::runtime::types::{BoxInfo, BoxState, BoxStatus, ContainerID};
 use crate::vmm::controller::{ShimHandler, VmmHandler};
@@ -241,7 +241,9 @@ impl RuntimeImpl {
     /// without usable virtualization, such as CI runners. Tests using this must
     /// not exercise VM or hypervisor operations.
     #[cfg(any(test, feature = "test-support"))]
-    pub(crate) fn new_for_test(options: AcrylMicrovmOptions) -> AcrylMicrovmResult<SharedRuntimeImpl> {
+    pub(crate) fn new_for_test(
+        options: AcrylMicrovmOptions,
+    ) -> AcrylMicrovmResult<SharedRuntimeImpl> {
         Self::initialize(options, ExperimentalFeatures::default())
     }
 
@@ -651,7 +653,9 @@ impl RuntimeImpl {
         let db_result =
             tokio::task::spawn_blocking(move || this.box_manager.lookup_box(&id_or_name_owned))
                 .await
-                .map_err(|e| AcrylMicrovmError::Internal(format!("spawn_blocking failed: {}", e)))??;
+                .map_err(|e| {
+                    AcrylMicrovmError::Internal(format!("spawn_blocking failed: {}", e))
+                })??;
 
         if let Some((config, state)) = db_result {
             tracing::trace!(
@@ -682,7 +686,10 @@ impl RuntimeImpl {
     /// Get information about a specific box by ID or name (without creating a handle).
     ///
     /// Checks in-memory cache first (for boxes not yet persisted), then database.
-    pub async fn get_info(self: &Arc<Self>, id_or_name: &str) -> AcrylMicrovmResult<Option<BoxInfo>> {
+    pub async fn get_info(
+        self: &Arc<Self>,
+        id_or_name: &str,
+    ) -> AcrylMicrovmResult<Option<BoxInfo>> {
         // Check in-memory cache first (for boxes created but not yet persisted)
         let cached_box = {
             let sync = self.sync_state.read().unwrap();
@@ -711,7 +718,9 @@ impl RuntimeImpl {
         let db_result =
             tokio::task::spawn_blocking(move || this.box_manager.lookup_box(&id_or_name_owned))
                 .await
-                .map_err(|e| AcrylMicrovmError::Internal(format!("spawn_blocking failed: {}", e)))??;
+                .map_err(|e| {
+                    AcrylMicrovmError::Internal(format!("spawn_blocking failed: {}", e))
+                })??;
 
         Ok(db_result.map(|(config, state)| BoxInfo::new(&config, &state)))
     }
@@ -786,7 +795,9 @@ impl RuntimeImpl {
         let db_result =
             tokio::task::spawn_blocking(move || this.box_manager.lookup_box_id(&id_or_name_owned))
                 .await
-                .map_err(|e| AcrylMicrovmError::Internal(format!("spawn_blocking failed: {}", e)))??;
+                .map_err(|e| {
+                    AcrylMicrovmError::Internal(format!("spawn_blocking failed: {}", e))
+                })??;
 
         Ok(db_result.is_some())
     }
@@ -1099,7 +1110,9 @@ impl RuntimeImpl {
             // under lifecycle admission, so resolving it needs no persistence reads.
             return match box_impl.apply_observation(run, event).await {
                 // A missing lock is retryable; only a missing row drops the event.
-                Err(AcrylMicrovmError::NotFound(_)) if self.box_manager.box_by_id(id)?.is_none() => {
+                Err(AcrylMicrovmError::NotFound(_))
+                    if self.box_manager.box_by_id(id)?.is_none() =>
+                {
                     Ok(None)
                 }
                 result => result,
@@ -1934,7 +1947,11 @@ async fn sanitize_local_options(
 
 #[async_trait::async_trait]
 impl super::backend::RuntimeBackend for LocalRuntime {
-    async fn create(&self, options: BoxOptions, name: Option<String>) -> AcrylMicrovmResult<LiteBox> {
+    async fn create(
+        &self,
+        options: BoxOptions,
+        name: Option<String>,
+    ) -> AcrylMicrovmResult<LiteBox> {
         let options = sanitize_local_options(&self.0.experimental_features, options).await?;
         self.0.create(options, name).await
     }
@@ -2010,7 +2027,10 @@ impl super::images::ImageBackend for LocalRuntime {
         self.0.image_manager.list().await
     }
 
-    async fn get_image(&self, name: &str) -> AcrylMicrovmResult<crate::runtime::types::ImageDetail> {
+    async fn get_image(
+        &self,
+        name: &str,
+    ) -> AcrylMicrovmResult<crate::runtime::types::ImageDetail> {
         if self.0.shutdown_token.is_cancelled() {
             return Err(AcrylMicrovmError::Stopped(
                 "Cannot read images: runtime has been shut down".into(),
@@ -2188,7 +2208,10 @@ mod tests {
             .await
             .expect_err("a managed volume has no local backend to resolve against");
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         let message = error.to_string();
         assert!(message.contains("my-data"), "{message}");
         assert!(message.contains("REST runtime"), "{message}");
@@ -2304,7 +2327,10 @@ mod tests {
             .await
             .expect_err("the local runtime shares no typed mounts yet");
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         assert!(error.to_string().contains("typed mounts"), "{error}");
     }
 

@@ -202,7 +202,15 @@ fn agents_inspection_selects_state_or_an_agent_view() {
     }
     for view in ["config", "capabilities", "requests"] {
         let error = try_parse_from([
-            "acrylmicrovm", "agent", "inspect", "box", "--agent", "agent", "--turn", "turn", "--view",
+            "acrylmicrovm",
+            "agent",
+            "inspect",
+            "box",
+            "--agent",
+            "agent",
+            "--turn",
+            "turn",
+            "--view",
             view,
         ])
         .unwrap_err();
@@ -307,7 +315,8 @@ fn agents_parser_rejects_invalid_options_and_missing_targets() {
         ),
     ];
     for (args, expected) in cases {
-        let error = try_parse_from(["acrylmicrovm", "agent"].iter().chain(args.iter())).unwrap_err();
+        let error =
+            try_parse_from(["acrylmicrovm", "agent"].iter().chain(args.iter())).unwrap_err();
         assert_eq!(&error.kind(), expected, "{args:?}");
     }
 }
@@ -404,7 +413,8 @@ fn agents_help_and_completion_include_nine_flat_commands() {
             let create = output
                 .lines()
                 .find(|line| {
-                    line.contains(" -l agent ") && line.contains("__fish_acrylmicrovm_agent_path create")
+                    line.contains(" -l agent ")
+                        && line.contains("__fish_acrylmicrovm_agent_path create")
                 })
                 .unwrap();
             assert!(create.contains("__fish_acrylmicrovm_agent_path create"));
@@ -579,7 +589,9 @@ async fn agents_events_print_every_record_before_the_stream_error() {
     let stream: AgentEventStream = Box::pin(futures::stream::iter([
         event("session.status"),
         event("session.idle"),
-        Err(AcrylMicrovmError::Network("OpenCode event stream ended".into())),
+        Err(AcrylMicrovmError::Network(
+            "OpenCode event stream ended".into(),
+        )),
     ]));
     let mut out = Vec::new();
     let error = print_events(stream, &mut out).await.unwrap_err();

@@ -3,7 +3,6 @@
 //! This module contains all CLI-related code including the main CLI structure,
 //! subcommands, and flag definitions.
 
-use anyhow::Context;
 use acrylmicrovm::experimental::custom_kernel::{KernelFormat, KernelOptions, configure};
 use acrylmicrovm::experimental::{
     EXPERIMENTAL_FEATURES_ENV, ExperimentalFeature, ExperimentalFeatures, RuntimeBuilder,
@@ -12,9 +11,10 @@ use acrylmicrovm::runtime::options::{
     InboundNetworkConfig, NetworkMode, OutboundNetworkConfig, PortProtocol, PortSpec, VolumeSpec,
 };
 use acrylmicrovm::{
-    BoxCommand, BoxOptions, AcrylMicrovmOptions, AcrylMicrovmRestOptions, AcrylMicrovmRuntime,
+    AcrylMicrovmOptions, AcrylMicrovmRestOptions, AcrylMicrovmRuntime, BoxCommand, BoxOptions,
     ContainerCapabilities, ImageRegistry, NetworkRateLimit, NetworkSpec,
 };
+use anyhow::Context;
 use clap::error::ErrorKind;
 use clap::parser::ValueSource;
 use clap::{
@@ -979,18 +979,21 @@ fn without_hidden_arguments(command: Command) -> Command {
     projected
 }
 
-pub(crate) fn experimental_features_from_env() -> acrylmicrovm::AcrylMicrovmResult<ExperimentalFeatures> {
+pub(crate) fn experimental_features_from_env()
+-> acrylmicrovm::AcrylMicrovmResult<ExperimentalFeatures> {
     match std::env::var(EXPERIMENTAL_FEATURES_ENV) {
         Ok(value) => ExperimentalFeatures::parse(&value).map_err(|error| match error {
             acrylmicrovm::AcrylMicrovmError::Config(message) => {
-                acrylmicrovm::AcrylMicrovmError::Config(format!("{EXPERIMENTAL_FEATURES_ENV}: {message}"))
+                acrylmicrovm::AcrylMicrovmError::Config(format!(
+                    "{EXPERIMENTAL_FEATURES_ENV}: {message}"
+                ))
             }
             error => error,
         }),
         Err(std::env::VarError::NotPresent) => Ok(ExperimentalFeatures::default()),
-        Err(std::env::VarError::NotUnicode(_)) => Err(acrylmicrovm::AcrylMicrovmError::Config(format!(
-            "{EXPERIMENTAL_FEATURES_ENV} must contain valid UTF-8"
-        ))),
+        Err(std::env::VarError::NotUnicode(_)) => Err(acrylmicrovm::AcrylMicrovmError::Config(
+            format!("{EXPERIMENTAL_FEATURES_ENV} must contain valid UTF-8"),
+        )),
     }
 }
 
@@ -1049,7 +1052,11 @@ pub struct GlobalFlags {
     /// the same account). Unset → uses the stored context's
     /// path_prefix, then empty (URL skips the segment —
     /// `/v1/boxes/...`). An explicit empty value clears the stored prefix.
-    #[arg(long = "path-prefix", global = true, env = "ACRYLMICROVM_REST_PATH_PREFIX")]
+    #[arg(
+        long = "path-prefix",
+        global = true,
+        env = "ACRYLMICROVM_REST_PATH_PREFIX"
+    )]
     pub path_prefix: Option<String>,
 
     #[arg(skip)]
@@ -1425,7 +1432,10 @@ pub struct KernelFlags {
 }
 
 impl KernelFlags {
-    pub fn require_enabled(&self, features: &ExperimentalFeatures) -> acrylmicrovm::AcrylMicrovmResult<()> {
+    pub fn require_enabled(
+        &self,
+        features: &ExperimentalFeatures,
+    ) -> acrylmicrovm::AcrylMicrovmResult<()> {
         if self.kernel.is_none() {
             return Ok(());
         }
@@ -1781,7 +1791,10 @@ pub struct ManagementFlags {
 }
 
 impl ManagementFlags {
-    pub fn require_enabled(&self, features: &ExperimentalFeatures) -> acrylmicrovm::AcrylMicrovmResult<()> {
+    pub fn require_enabled(
+        &self,
+        features: &ExperimentalFeatures,
+    ) -> acrylmicrovm::AcrylMicrovmResult<()> {
         if !self.nested_virtualization {
             return Ok(());
         }
@@ -1893,8 +1906,20 @@ mod tests {
         command().debug_assert();
 
         for args in [
-            ["acrylmicrovm", "--url", "https://example.test", "run", "alpine"],
-            ["acrylmicrovm", "run", "--url", "https://example.test", "alpine"],
+            [
+                "acrylmicrovm",
+                "--url",
+                "https://example.test",
+                "run",
+                "alpine",
+            ],
+            [
+                "acrylmicrovm",
+                "run",
+                "--url",
+                "https://example.test",
+                "alpine",
+            ],
         ] {
             let cli = parse_projected(&args);
             assert_eq!(cli.global.url.as_deref(), Some("https://example.test"));
@@ -1911,8 +1936,20 @@ mod tests {
         }
 
         for args in [
-            ["acrylmicrovm", "--url", "https://example.test", "auth", "login"],
-            ["acrylmicrovm", "auth", "login", "--url", "https://example.test"],
+            [
+                "acrylmicrovm",
+                "--url",
+                "https://example.test",
+                "auth",
+                "login",
+            ],
+            [
+                "acrylmicrovm",
+                "auth",
+                "login",
+                "--url",
+                "https://example.test",
+            ],
         ] {
             let cli = parse_projected(&args);
             let Commands::Auth(auth) = cli.command else {
@@ -1925,15 +1962,33 @@ mod tests {
         }
 
         for args in [
-            &["acrylmicrovm", "--url", "https://example.test", "auth", "status"][..],
-            &["acrylmicrovm", "auth", "status", "--url", "https://example.test"][..],
+            &[
+                "acrylmicrovm",
+                "--url",
+                "https://example.test",
+                "auth",
+                "status",
+            ][..],
+            &[
+                "acrylmicrovm",
+                "auth",
+                "status",
+                "--url",
+                "https://example.test",
+            ][..],
         ] {
             let cli = parse_projected(args);
             assert_eq!(cli.global.url.as_deref(), Some("https://example.test"));
         }
 
-        let error = try_parse_from(["acrylmicrovm", "auth", "--url", "https://example.test", "status"])
-            .expect_err("leaf-only --url must follow the auth leaf");
+        let error = try_parse_from([
+            "acrylmicrovm",
+            "auth",
+            "--url",
+            "https://example.test",
+            "status",
+        ])
+        .expect_err("leaf-only --url must follow the auth leaf");
         assert_eq!(error.kind(), ErrorKind::UnknownArgument);
     }
 
@@ -2026,7 +2081,16 @@ mod tests {
         (&["acrylmicrovm", "volume", "delete", "volume"], 2, VOLUME),
         (
             &[
-                "acrylmicrovm", "domain", "bind", "demo", "--type", "box", "--box", "b", "--port", "1",
+                "acrylmicrovm",
+                "domain",
+                "bind",
+                "demo",
+                "--type",
+                "box",
+                "--box",
+                "b",
+                "--port",
+                "1",
             ],
             2,
             VOLUME,
@@ -2143,7 +2207,13 @@ mod tests {
                 "exec",
                 "--help",
             ][..],
-            &["acrylmicrovm", "--url", "https://example.test", "help", "serve"][..],
+            &[
+                "acrylmicrovm",
+                "--url",
+                "https://example.test",
+                "help",
+                "serve",
+            ][..],
         ] {
             let error = try_parse_from(args).expect_err("help exits through clap");
             assert_eq!(error.kind(), ErrorKind::DisplayHelp, "{args:?}");
@@ -2199,7 +2269,14 @@ mod tests {
             &["acrylmicrovm", "auth", "login", "--callback-port", "0"][..],
             &["acrylmicrovm", "list", "--quiet", "--format", "json"][..],
             &["acrylmicrovm", "images", "--quiet", "--format", "json"][..],
-            &["acrylmicrovm", "volume", "ls", "--quiet", "--format", "json"][..],
+            &[
+                "acrylmicrovm",
+                "volume",
+                "ls",
+                "--quiet",
+                "--format",
+                "json",
+            ][..],
             &["acrylmicrovm", "serve", "--api-key", ""][..],
         ] {
             assert!(Cli::try_parse_from(args).is_err(), "accepted {args:?}");
@@ -2380,7 +2457,8 @@ mod tests {
     #[test]
     fn fractional_cpus_resource_flags_preserve_numbers() {
         for cpus in ["0.125", "1.5", "2", "2.0", "0", "1000"] {
-            let cli = Cli::try_parse_from(["acrylmicrovm", "run", "--cpus", cpus, "alpine"]).unwrap();
+            let cli =
+                Cli::try_parse_from(["acrylmicrovm", "run", "--cpus", cpus, "alpine"]).unwrap();
             let Commands::Run(run) = cli.command else {
                 panic!("expected run");
             };
@@ -2388,7 +2466,9 @@ mod tests {
             run.resource.apply_to(&mut opts);
             assert_eq!(opts.cpus, Some(cpus.parse().unwrap()));
         }
-        assert!(Cli::try_parse_from(["acrylmicrovm", "run", "--cpus", "invalid", "alpine"]).is_err());
+        assert!(
+            Cli::try_parse_from(["acrylmicrovm", "run", "--cpus", "invalid", "alpine"]).is_err()
+        );
     }
 
     #[test]
@@ -2718,8 +2798,14 @@ mod tests {
 
     #[test]
     fn cli_parses_run_with_inbound_flags() {
-        let cli = Cli::try_parse_from(["acrylmicrovm", "run", "--inbound", "disabled", "alpine:latest"])
-            .expect("parse");
+        let cli = Cli::try_parse_from([
+            "acrylmicrovm",
+            "run",
+            "--inbound",
+            "disabled",
+            "alpine:latest",
+        ])
+        .expect("parse");
         let Commands::Run(args) = cli.command else {
             panic!("expected Run")
         };
@@ -2961,8 +3047,8 @@ mod tests {
 
     #[test]
     fn tunnel_parses_box_and_port() {
-        let cli =
-            Cli::try_parse_from(["acrylmicrovm", "network", "tunnel", "mybox", "3000"]).expect("parse");
+        let cli = Cli::try_parse_from(["acrylmicrovm", "network", "tunnel", "mybox", "3000"])
+            .expect("parse");
         let Commands::Network(network) = cli.command else {
             panic!("expected Commands::Network");
         };
@@ -2984,7 +3070,13 @@ mod tests {
             "unix:/tmp/app.sock",
         ] {
             Cli::try_parse_from([
-                "acrylmicrovm", "network", "tunnel", "mybox", "3000", "--listen", listen,
+                "acrylmicrovm",
+                "network",
+                "tunnel",
+                "mybox",
+                "3000",
+                "--listen",
+                listen,
             ])
             .unwrap_or_else(|error| panic!("{listen} should parse: {error}"));
         }
@@ -3000,7 +3092,13 @@ mod tests {
             "127.0.0.1",
         ] {
             let result = Cli::try_parse_from([
-                "acrylmicrovm", "network", "tunnel", "mybox", "3000", "--listen", listen,
+                "acrylmicrovm",
+                "network",
+                "tunnel",
+                "mybox",
+                "3000",
+                "--listen",
+                listen,
             ]);
             assert!(result.is_err(), "{listen} must be rejected");
         }
@@ -3105,7 +3203,8 @@ mod tests {
     #[test]
     fn volume_get_inspect_alias_parses() {
         for verb in ["get", "inspect"] {
-            let cli = Cli::try_parse_from(["acrylmicrovm", "volume", verb, "vol-123"]).expect("parse");
+            let cli =
+                Cli::try_parse_from(["acrylmicrovm", "volume", verb, "vol-123"]).expect("parse");
             let Commands::Volume(args) = cli.command else {
                 panic!("expected Commands::Volume for {verb}");
             };
@@ -3118,7 +3217,8 @@ mod tests {
 
     #[test]
     fn volume_rm_takes_multiple_ids_and_force() {
-        let cli = Cli::try_parse_from(["acrylmicrovm", "volume", "rm", "-f", "a", "b"]).expect("parse");
+        let cli =
+            Cli::try_parse_from(["acrylmicrovm", "volume", "rm", "-f", "a", "b"]).expect("parse");
         let Commands::Volume(args) = cli.command else {
             panic!("expected Commands::Volume");
         };
@@ -3365,9 +3465,13 @@ mod tests {
 
     #[test]
     fn nested_virtualization_flag_applies_to_box_options() {
-        let cli =
-            Cli::try_parse_from(["acrylmicrovm", "run", "--nested-virtualization", "alpine:latest"])
-                .expect("nested virtualization flag should parse");
+        let cli = Cli::try_parse_from([
+            "acrylmicrovm",
+            "run",
+            "--nested-virtualization",
+            "alpine:latest",
+        ])
+        .expect("nested virtualization flag should parse");
         let Commands::Run(args) = cli.command else {
             panic!("expected run command");
         };

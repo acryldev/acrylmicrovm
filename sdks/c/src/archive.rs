@@ -9,14 +9,16 @@ use std::os::raw::{c_char, c_void};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use acrylmicrovm::{BoxArchive, AcrylMicrovmError, ExportOptions};
+use acrylmicrovm::{AcrylMicrovmError, BoxArchive, ExportOptions};
 use tokio::runtime::Runtime as TokioRuntime;
 
 use crate::box_handle::BoxHandle;
-use crate::error::{AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error};
+use crate::error::{
+    AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error,
+};
 use crate::event_queue::{CBoxExportCb, CRuntimeImportCb, OwnedFfiPtr, RuntimeEvent, push_event};
 use crate::runtime::RuntimeHandle;
-use crate::{CBoxHandle, CAcrylMicrovmError, CAcrylMicrovmRuntime};
+use crate::{CAcrylMicrovmError, CAcrylMicrovmRuntime, CBoxHandle};
 
 // use it to prevent the runtime from being dropped while the import task is running.
 // The runtime is cloned into the task,
@@ -244,7 +246,9 @@ unsafe fn parse_required_string(
 
 fn archive_path_to_c_string(path: &std::path::Path) -> Result<CString, AcrylMicrovmError> {
     CString::new(path.to_string_lossy().as_bytes()).map_err(|_| {
-        AcrylMicrovmError::Internal("exported archive path contains an interior NUL byte".to_string())
+        AcrylMicrovmError::Internal(
+            "exported archive path contains an interior NUL byte".to_string(),
+        )
     })
 }
 

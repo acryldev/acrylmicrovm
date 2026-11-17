@@ -55,7 +55,9 @@ pub(crate) async fn import_box(
     let staging_clone = staging_dir.clone();
     tokio::task::spawn_blocking(move || install_disks(&temp_path, &staging_clone))
         .await
-        .map_err(|e| AcrylMicrovmError::Internal(format!("Import install task panicked: {}", e)))??;
+        .map_err(|e| {
+            AcrylMicrovmError::Internal(format!("Import install task panicked: {}", e))
+        })??;
 
     let litebox = runtime
         // An archive carries the box's options but not what its image resolved
@@ -159,8 +161,9 @@ fn extract_and_validate(
     archive_path: &Path,
     layout: &crate::runtime::layout::FilesystemLayout,
 ) -> AcrylMicrovmResult<(ArchiveManifest, tempfile::TempDir)> {
-    let temp_dir = tempfile::tempdir_in(layout.temp_dir())
-        .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to create temp directory: {}", e)))?;
+    let temp_dir = tempfile::tempdir_in(layout.temp_dir()).map_err(|e| {
+        AcrylMicrovmError::Storage(format!("Failed to create temp directory: {}", e))
+    })?;
 
     extract_archive(archive_path, temp_dir.path())?;
 
@@ -373,7 +376,10 @@ mod tests {
             options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
                 .unwrap_err();
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         assert!(error.to_string().contains("nested virtualization"));
     }
 
@@ -390,7 +396,10 @@ mod tests {
             options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
                 .unwrap_err();
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         assert!(error.to_string().contains("engine selection"));
     }
 
@@ -407,7 +416,10 @@ mod tests {
             options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
                 .unwrap_err();
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         assert!(error.to_string().contains("privileged mode"));
     }
 
@@ -425,7 +437,10 @@ mod tests {
             options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
                 .unwrap_err();
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         assert!(error.to_string().contains("custom kernels"));
     }
 
@@ -442,7 +457,10 @@ mod tests {
             options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
                 .expect_err("untrusted archives must not select server host paths");
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         assert!(error.to_string().contains("volume mounts"));
     }
 
@@ -463,7 +481,10 @@ mod tests {
             options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
                 .expect_err("untrusted archives must not select managed volumes");
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         assert!(error.to_string().contains("volume mounts"));
     }
 
@@ -503,7 +524,10 @@ mod tests {
             options_from_manifest(&v3_manifest(options), ArchiveImportPolicy::UntrustedRemote)
                 .expect_err("untrusted archives must not select a server rootfs path");
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         assert!(error.to_string().contains("host rootfs paths"));
     }
 

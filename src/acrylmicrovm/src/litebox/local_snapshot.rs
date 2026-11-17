@@ -154,7 +154,11 @@ impl LocalSnapshotBackend {
 
 #[async_trait::async_trait]
 impl crate::runtime::backend::SnapshotBackend for LocalSnapshotBackend {
-    async fn create(&self, options: SnapshotOptions, name: &str) -> AcrylMicrovmResult<SnapshotInfo> {
+    async fn create(
+        &self,
+        options: SnapshotOptions,
+        name: &str,
+    ) -> AcrylMicrovmResult<SnapshotInfo> {
         self.snapshot_create(name, options).await
     }
 

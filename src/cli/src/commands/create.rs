@@ -256,8 +256,14 @@ mod tests {
 
     #[test]
     fn create_rejects_image_and_rootfs_together() {
-        let cli = Cli::try_parse_from(["acrylmicrovm", "create", "--rootfs", "/tmp/rootfs", "alpine"])
-            .expect("create image and rootfs should parse");
+        let cli = Cli::try_parse_from([
+            "acrylmicrovm",
+            "create",
+            "--rootfs",
+            "/tmp/rootfs",
+            "alpine",
+        ])
+        .expect("create image and rootfs should parse");
         let Commands::Create(args) = cli.command else {
             panic!("expected create command");
         };

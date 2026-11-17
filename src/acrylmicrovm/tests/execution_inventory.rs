@@ -3,7 +3,7 @@
 mod common;
 
 use acrylmicrovm::runtime::options::AcrylMicrovmOptions;
-use acrylmicrovm::{AttachOptions, BoxCommand, BoxStatus, AcrylMicrovmRuntime};
+use acrylmicrovm::{AcrylMicrovmRuntime, AttachOptions, BoxCommand, BoxStatus};
 use std::time::Duration;
 
 #[tokio::test]
@@ -71,7 +71,9 @@ async fn live_inventory_includes_init_and_recovers_controls_without_reader() {
                 .await
             {
                 Ok(attached) => break attached,
-                Err(acrylmicrovm::AcrylMicrovmError::AlreadyExists(_)) => tokio::task::yield_now().await,
+                Err(acrylmicrovm::AcrylMicrovmError::AlreadyExists(_)) => {
+                    tokio::task::yield_now().await
+                }
                 Err(error) => panic!("reattach failed: {error}"),
             }
         }

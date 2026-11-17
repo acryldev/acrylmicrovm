@@ -7,7 +7,7 @@
 mod common;
 
 use acrylmicrovm::runtime::options::AcrylMicrovmOptions;
-use acrylmicrovm::{AttachOptions, AcrylMicrovmRuntime};
+use acrylmicrovm::{AcrylMicrovmRuntime, AttachOptions};
 
 #[tokio::test]
 async fn started_at_tracks_the_running_lifecycle() {

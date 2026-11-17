@@ -136,7 +136,10 @@ fn failed_reset_keeps_init_alive_for_host_cleanup() {
 fn child() {
     crate::test_syscalls::deny(libc::SYS_sync);
     install_panic_hook();
-    match std::env::var("ACRYLMICROVM_LIFECYCLE_TEST").unwrap().as_str() {
+    match std::env::var("ACRYLMICROVM_LIFECYCLE_TEST")
+        .unwrap()
+        .as_str()
+    {
         "exit" => exit(7),
         "reset-denied" => {
             crate::test_syscalls::deny(libc::SYS_reboot);

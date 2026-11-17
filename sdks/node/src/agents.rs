@@ -121,9 +121,9 @@ impl JsAgentTurn {
 }
 
 fn not_implemented<T>(operation: &str) -> Result<T> {
-    Err(map_err(acrylmicrovm::AcrylMicrovmError::Unsupported(format!(
-        "{operation} is not implemented"
-    ))))
+    Err(map_err(acrylmicrovm::AcrylMicrovmError::Unsupported(
+        format!("{operation} is not implemented"),
+    )))
 }
 
 #[cfg(test)]

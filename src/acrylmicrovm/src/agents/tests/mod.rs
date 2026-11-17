@@ -1,7 +1,7 @@
 // Modified by ACRYL, 2026
 use super::*;
 use crate::litebox::{BoxTunnel, TunnelOptions};
-use crate::{BoxOptions, BoxStatus, AcrylMicrovmOptions, AcrylMicrovmRuntime};
+use crate::{AcrylMicrovmOptions, AcrylMicrovmRuntime, BoxOptions, BoxStatus};
 use std::net::SocketAddr;
 
 /// A network with no tunnels: any operation that reaches the Box fails with
@@ -75,7 +75,10 @@ async fn namespace_rejects_without_starting_box() {
     );
 
     let missing = agents.get("not-a-session").await.err().unwrap();
-    assert!(matches!(missing, AcrylMicrovmError::NotFound(_)), "{missing}");
+    assert!(
+        matches!(missing, AcrylMicrovmError::NotFound(_)),
+        "{missing}"
+    );
     assert_eq!(sandbox.info().await.unwrap().status, BoxStatus::Configured);
 }
 

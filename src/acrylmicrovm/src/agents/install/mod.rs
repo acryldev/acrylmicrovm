@@ -52,7 +52,11 @@ impl AgentInstaller {
 
     /// Copy `host_file` into the share as `agent`, record it, and mount the
     /// agents folder. Returns the folder that holds the binary in the Box.
-    pub(crate) async fn install(&self, agent: &str, host_file: &Path) -> AcrylMicrovmResult<String> {
+    pub(crate) async fn install(
+        &self,
+        agent: &str,
+        host_file: &Path,
+    ) -> AcrylMicrovmResult<String> {
         let _install = self.box_impl.lock_agent_installs().await?;
         let share = AgentShare::new(
             &self.box_impl.layout.mounts_dir(),

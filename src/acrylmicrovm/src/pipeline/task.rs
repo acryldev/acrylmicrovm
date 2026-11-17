@@ -1,8 +1,8 @@
 // Modified by ACRYL, 2026
 //! Generic task trait for pipeline execution.
 
-use async_trait::async_trait;
 use acrylmicrovm_shared::errors::AcrylMicrovmResult;
+use async_trait::async_trait;
 
 /// Trait for tasks that can be executed in a pipeline.
 ///

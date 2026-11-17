@@ -13,8 +13,9 @@ use std::net::Ipv4Addr;
 
 /// Localhost is required even when Guest.Init has no external network config.
 pub(crate) async fn configure_loopback() -> AcrylMicrovmResult<()> {
-    let (connection, handle, _) = rtnetlink::new_connection()
-        .map_err(|e| AcrylMicrovmError::Internal(format!("create loopback netlink connection: {e}")))?;
+    let (connection, handle, _) = rtnetlink::new_connection().map_err(|e| {
+        AcrylMicrovmError::Internal(format!("create loopback netlink connection: {e}"))
+    })?;
     tokio::spawn(connection);
     bring_up_loopback(&handle).await
 }
@@ -133,7 +134,9 @@ pub async fn configure_network() -> AcrylMicrovmResult<()> {
                 Err(e)
             }
         })
-        .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to set default gateway: {}", e)))?;
+        .map_err(|e| {
+            AcrylMicrovmError::Internal(format!("Failed to set default gateway: {}", e))
+        })?;
 
     tracing::info!("✅ Network configured: eth0 is UP at 192.168.127.2/24");
 
@@ -217,7 +220,9 @@ pub async fn configure_network_from_config(
         .up()
         .execute()
         .await
-        .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to bring up {}: {}", interface, e)))?;
+        .map_err(|e| {
+            AcrylMicrovmError::Internal(format!("Failed to bring up {}: {}", interface, e))
+        })?;
 
     // 4. Assign IP address (if provided)
     if let Some(ip_str) = ip {
@@ -270,7 +275,9 @@ pub async fn configure_network_from_config(
                     Err(e)
                 }
             })
-            .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to set default gateway: {}", e)))?;
+            .map_err(|e| {
+                AcrylMicrovmError::Internal(format!("Failed to set default gateway: {}", e))
+            })?;
     }
 
     tracing::info!("✅ Network configured: {} is UP", interface);

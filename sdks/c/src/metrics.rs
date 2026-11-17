@@ -7,7 +7,7 @@ use crate::box_handle::BoxHandle;
 use crate::error::{AcrylMicrovmErrorCode, FFIError, null_pointer_error, write_error};
 use crate::event_queue::{CBoxMetricsCb, CRuntimeMetricsCb, RuntimeEvent, push_event};
 use crate::runtime::RuntimeHandle;
-use crate::{CBoxHandle, CAcrylMicrovmError, CAcrylMicrovmRuntime};
+use crate::{CAcrylMicrovmError, CAcrylMicrovmRuntime, CBoxHandle};
 
 #[repr(C)]
 #[derive(Clone, Copy)]

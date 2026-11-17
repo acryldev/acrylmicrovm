@@ -502,11 +502,15 @@ fn build_default_namespaces(
 }
 
 /// Build a single namespace specification
-fn build_namespace(typ: LinuxNamespaceType) -> AcrylMicrovmResult<oci_spec::runtime::LinuxNamespace> {
+fn build_namespace(
+    typ: LinuxNamespaceType,
+) -> AcrylMicrovmResult<oci_spec::runtime::LinuxNamespace> {
     LinuxNamespaceBuilder::default()
         .typ(typ)
         .build()
-        .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to build {:?} namespace: {}", typ, e)))
+        .map_err(|e| {
+            AcrylMicrovmError::Internal(format!("Failed to build {:?} namespace: {}", typ, e))
+        })
 }
 
 /// Build process specification
@@ -581,7 +585,9 @@ pub(crate) fn build_tty_exec_process(
         .capabilities(capabilities.to_oci()?)
         .no_new_privileges(false)
         .build()
-        .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to build tty exec process: {}", e)))
+        .map_err(|e| {
+            AcrylMicrovmError::Internal(format!("Failed to build tty exec process: {}", e))
+        })
 }
 
 /// Build root filesystem specification
@@ -657,7 +663,8 @@ fn build_linux_spec(
 /// positive memory limit with no swap value writes only `memory.max`. The
 /// empty device list matches `Linux::default()`, so no device rule changes.
 fn build_resources(limits: CgroupLimits) -> AcrylMicrovmResult<LinuxResources> {
-    let err = |e: oci_spec::OciSpecError| AcrylMicrovmError::Internal(format!("cgroup limits: {e}"));
+    let err =
+        |e: oci_spec::OciSpecError| AcrylMicrovmError::Internal(format!("cgroup limits: {e}"));
     let mut resources = LinuxResourcesBuilder::default().devices(Vec::new());
     if limits.cpu_quota_us > 0 {
         let cpu = LinuxCpuBuilder::default()
@@ -707,7 +714,9 @@ fn build_standard_mounts(
             .typ("proc")
             .source("proc")
             .build()
-            .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to build /proc mount: {}", e)))?,
+            .map_err(|e| {
+                AcrylMicrovmError::Internal(format!("Failed to build /proc mount: {}", e))
+            })?,
         // /dev - Device filesystem. Privileged containers keep the same
         // guest-local tmpfs but receive an allow-all device cgroup rule, so
         // device nodes can be explicitly injected or created in the guest.
@@ -717,7 +726,9 @@ fn build_standard_mounts(
             .source("tmpfs")
             .options(dev_mount_options)
             .build()
-            .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to build /dev mount: {}", e)))?,
+            .map_err(|e| {
+                AcrylMicrovmError::Internal(format!("Failed to build /dev mount: {}", e))
+            })?,
         // /dev/pts - Pseudo-terminals
         MountBuilder::default()
             .destination("/dev/pts")
@@ -761,7 +772,9 @@ fn build_standard_mounts(
             .source(mount_override.source)
             .options(mount_override.options)
             .build()
-            .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to build /sys mount: {}", e)))?,
+            .map_err(|e| {
+                AcrylMicrovmError::Internal(format!("Failed to build /sys mount: {}", e))
+            })?,
         // The guest init mounts cgroup2 at /sys/fs/cgroup. It is carried in as
         // a submount of the recursive /sys bind, so it is the `rro` above —
         // not a plain `ro` — that keeps it read-only for an ordinary
@@ -778,7 +791,9 @@ fn build_standard_mounts(
                 "mode=1777".to_string(),
             ])
             .build()
-            .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to build /tmp mount: {}", e)))?,
+            .map_err(|e| {
+                AcrylMicrovmError::Internal(format!("Failed to build /tmp mount: {}", e))
+            })?,
     ];
 
     // After the /sys bind: inside the new cgroup namespace youki mounts a fresh
@@ -816,9 +831,9 @@ fn build_standard_mounts(
                 .destination(*dest)
                 .typ("bind")
                 .source(
-                    source
-                        .to_str()
-                        .ok_or_else(|| AcrylMicrovmError::Internal(format!("Invalid {} path", file)))?,
+                    source.to_str().ok_or_else(|| {
+                        AcrylMicrovmError::Internal(format!("Invalid {} path", file))
+                    })?,
                 )
                 .options(vec!["rbind".to_string(), "rprivate".to_string()])
                 .build()
@@ -927,7 +942,10 @@ mod tests {
             }])
             .unwrap_err();
 
-            assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+            assert!(
+                matches!(error, AcrylMicrovmError::Unsupported(_)),
+                "{error:?}"
+            );
             assert!(error.to_string().contains(expected), "{error}");
         }
     }

@@ -145,8 +145,9 @@ impl BoxStore {
     pub fn update_state(&self, box_id: &str, state: &BoxState) -> AcrylMicrovmResult<()> {
         let conn = self.db.conn();
 
-        let json = serde_json::to_string(state)
-            .map_err(|e| AcrylMicrovmError::Database(format!("Failed to serialize state: {}", e)))?;
+        let json = serde_json::to_string(state).map_err(|e| {
+            AcrylMicrovmError::Database(format!("Failed to serialize state: {}", e))
+        })?;
 
         let rows_affected = db_err!(conn.execute(
             "UPDATE box_state SET status = ?1, pid = ?2, \
@@ -194,12 +195,14 @@ impl BoxStore {
         let tx = db_err!(conn.transaction())?;
 
         // Serialize config
-        let config_json = serde_json::to_string(config)
-            .map_err(|e| AcrylMicrovmError::Database(format!("Failed to serialize config: {}", e)))?;
+        let config_json = serde_json::to_string(config).map_err(|e| {
+            AcrylMicrovmError::Database(format!("Failed to serialize config: {}", e))
+        })?;
 
         // Serialize state
-        let state_json = serde_json::to_string(state)
-            .map_err(|e| AcrylMicrovmError::Database(format!("Failed to serialize state: {}", e)))?;
+        let state_json = serde_json::to_string(state).map_err(|e| {
+            AcrylMicrovmError::Database(format!("Failed to serialize state: {}", e))
+        })?;
 
         // Insert config (name has UNIQUE constraint, will fail on duplicate)
         db_err!(tx.execute(

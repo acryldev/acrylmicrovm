@@ -896,7 +896,8 @@ impl BoxImpl {
                     if state.status.is_active() {
                         crate::runtime::rt_impl::record_main_command_exit(&mut state, &exit_file);
                     } else if state.exit_code.is_none()
-                        && let Some(record) = acrylmicrovm_shared::layout::ExitRecord::read(&exit_file)
+                        && let Some(record) =
+                            acrylmicrovm_shared::layout::ExitRecord::read(&exit_file)
                     {
                         state.exit_code = Some(record.exit_code);
                     } else {
@@ -1017,7 +1018,9 @@ impl BoxImpl {
             temp_tar.to_path_buf(),
             acrylmicrovm_shared::tar::PackContext {
                 follow_symlinks: opts.follow_symlinks,
-                include_parent: !acrylmicrovm_shared::tar::specifies_current_dir(host_src.as_os_str()),
+                include_parent: !acrylmicrovm_shared::tar::specifies_current_dir(
+                    host_src.as_os_str(),
+                ),
             },
         )
         .await?;
@@ -1071,7 +1074,9 @@ impl BoxImpl {
         let live = self.live_state().await?;
 
         if container_src.is_empty() {
-            return Err(AcrylMicrovmError::Config("source path cannot be empty".into()));
+            return Err(AcrylMicrovmError::Config(
+                "source path cannot be empty".into(),
+            ));
         }
 
         // Same as `copy_into`: a refused source and a failed extraction both
@@ -1187,7 +1192,9 @@ impl BoxImpl {
         }
         self.ensure_usable_without_rerunning_main("copy out")?;
         if container_src.is_empty() {
-            return Err(AcrylMicrovmError::Config("source path cannot be empty".into()));
+            return Err(AcrylMicrovmError::Config(
+                "source path cannot be empty".into(),
+            ));
         }
         let cid = self.container_id().to_string();
         let live = self.live_state().await?;
@@ -1242,7 +1249,9 @@ impl BoxImpl {
         let live = self
             .with_operation(async {
                 if self.shutdown_token.is_cancelled() {
-                    return Err(AcrylMicrovmError::Stopped("Box handle has been stopped".into()));
+                    return Err(AcrylMicrovmError::Stopped(
+                        "Box handle has been stopped".into(),
+                    ));
                 }
                 self.ensure_usable_without_rerunning_main("use")?;
                 self.ensure_booted_locked().await
@@ -1268,7 +1277,9 @@ impl BoxImpl {
     async fn ensure_booted(&self) -> AcrylMicrovmResult<&LiveState> {
         self.with_operation(async {
             if self.shutdown_token.is_cancelled() {
-                return Err(AcrylMicrovmError::Stopped("Box handle has been stopped".into()));
+                return Err(AcrylMicrovmError::Stopped(
+                    "Box handle has been stopped".into(),
+                ));
             }
             self.ensure_booted_locked().await
         })
@@ -1879,18 +1890,20 @@ impl crate::runtime::backend::BoxNetworkBackend for BoxImpl {
         .await
     }
 
-    async fn tunnel(&self, target: SocketAddr, options: TunnelOptions) -> AcrylMicrovmResult<BoxTunnel> {
+    async fn tunnel(
+        &self,
+        target: SocketAddr,
+        options: TunnelOptions,
+    ) -> AcrylMicrovmResult<BoxTunnel> {
         if !options.is_public {
             return Err(AcrylMicrovmError::Unsupported(
                 "private tunnels require a cloud runtime".into(),
             ));
         }
-        let network = self
-            .live_state()
-            .await?
-            .network
-            .clone()
-            .ok_or_else(|| AcrylMicrovmError::Unsupported("box networking is disabled".into()))?;
+        let network =
+            self.live_state().await?.network.clone().ok_or_else(|| {
+                AcrylMicrovmError::Unsupported("box networking is disabled".into())
+            })?;
         Ok(BoxTunnel::new(None, move || {
             let network = network.clone();
             async move { BoxConnection::from_fd(network.tunnel(target).await?.into_owned_fd()?) }
@@ -1909,7 +1922,9 @@ mod tests {
     use crate::litebox::config::ContainerRuntimeConfig;
     use crate::net::{NetworkBackendConfig, NetworkBackendFactory};
     use crate::runtime::id::BoxIDMint;
-    use crate::runtime::options::{BoxOptions, AcrylMicrovmOptions, PortProtocol, PortSpec, RootfsSpec};
+    use crate::runtime::options::{
+        AcrylMicrovmOptions, BoxOptions, PortProtocol, PortSpec, RootfsSpec,
+    };
     use crate::runtime::rt_impl::RuntimeImpl;
     use crate::runtime::types::{ContainerID, PublishedPort};
     use crate::util::{PidFileWriter, PidRecord, ShimPidRecord, is_process_alive};

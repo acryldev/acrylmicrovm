@@ -97,12 +97,18 @@ fn context_precedence_matches_docker_including_host_overrides() {
         (&[], &[("ACRYLMICROVM_PROFILE", "staging")], "staging"),
         (
             &[],
-            &[("ACRYLMICROVM_PROFILE", "cloud"), ("ACRYLMICROVM_CONTEXT", "staging")],
+            &[
+                ("ACRYLMICROVM_PROFILE", "cloud"),
+                ("ACRYLMICROVM_CONTEXT", "staging"),
+            ],
             "staging",
         ),
         (
             &[],
-            &[("ACRYLMICROVM_CONTEXT", ""), ("ACRYLMICROVM_PROFILE", "staging")],
+            &[
+                ("ACRYLMICROVM_CONTEXT", ""),
+                ("ACRYLMICROVM_PROFILE", "staging"),
+            ],
             "staging",
         ),
         (
@@ -525,7 +531,11 @@ fn malformed_state_fails_but_help_completion_and_local_commands_are_independent(
     // The local command must reach its own validation, not context initialization.
     cli(&home)
         .env("ACRYLMICROVM_CONTEXT", "missing")
-        .args(["--config", "/missing-acrylmicrovm-context-test.json", "images"])
+        .args([
+            "--config",
+            "/missing-acrylmicrovm-context-test.json",
+            "images",
+        ])
         .assert()
         .failure()
         .stderr(contains("Configuration file not found"));

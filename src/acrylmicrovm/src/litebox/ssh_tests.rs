@@ -8,7 +8,7 @@ use crate::litebox::{
 };
 use crate::runtime::rt_impl::RuntimeImpl;
 use crate::vmm::controller::VmmMetrics;
-use crate::{BoxIDMint, BoxOptions, BoxStatus, AcrylMicrovmOptions, ContainerID};
+use crate::{AcrylMicrovmOptions, BoxIDMint, BoxOptions, BoxStatus, ContainerID};
 use acrylmicrovm_shared as proto;
 use std::sync::Mutex;
 use tonic::{Request, Response, Status};
@@ -323,8 +323,10 @@ async fn ssh_errors_missing_status_and_no_retry() {
             *f.mock.error.lock().unwrap() = Some(code);
             let error = operate(f.ssh.clone(), operation).await.unwrap_err();
             assert!(match code {
-                tonic::Code::InvalidArgument => matches!(error, AcrylMicrovmError::InvalidArgument(_)),
-                tonic::Code::FailedPrecondition => matches!(error, AcrylMicrovmError::InvalidState(_)),
+                tonic::Code::InvalidArgument =>
+                    matches!(error, AcrylMicrovmError::InvalidArgument(_)),
+                tonic::Code::FailedPrecondition =>
+                    matches!(error, AcrylMicrovmError::InvalidState(_)),
                 tonic::Code::Unimplemented => matches!(error, AcrylMicrovmError::Unsupported(_)),
                 _ => matches!(error, AcrylMicrovmError::Rpc(_)),
             });

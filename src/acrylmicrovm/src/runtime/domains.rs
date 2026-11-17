@@ -193,7 +193,11 @@ mod tests {
         async fn list_domains(&self) -> AcrylMicrovmResult<DomainList> {
             unreachable!()
         }
-        async fn bind_domain(&self, domain: &str, target: &DomainTarget) -> AcrylMicrovmResult<Domain> {
+        async fn bind_domain(
+            &self,
+            domain: &str,
+            target: &DomainTarget,
+        ) -> AcrylMicrovmResult<Domain> {
             self.0.lock().unwrap().push(domain.into());
             Ok(Domain {
                 hostname: domain.into(),
@@ -315,7 +319,10 @@ mod tests {
             "a..b",
         ] {
             assert!(
-                matches!(path_segment(domain), Err(AcrylMicrovmError::InvalidArgument(_))),
+                matches!(
+                    path_segment(domain),
+                    Err(AcrylMicrovmError::InvalidArgument(_))
+                ),
                 "{domain:?} was accepted"
             );
         }

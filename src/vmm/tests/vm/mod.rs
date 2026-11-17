@@ -303,7 +303,11 @@ fn a_kvm_guest_reads_the_last_byte_of_the_mapped_layout() {
 
     use crate::memory::MMIO_HOLE_START;
 
-    let vm = bare(config(1, MAX_MEMORY_MIB), acrylmicrovm_hypervisor::KvmVm::new).unwrap();
+    let vm = bare(
+        config(1, MAX_MEMORY_MIB),
+        acrylmicrovm_hypervisor::KvmVm::new,
+    )
+    .unwrap();
     let memory = Arc::clone(vm.ram.memory());
     let last = GuestAddress(MMIO_HOLE_START - 1);
     // mov al,[0xBFFFFFFF]; mov dx,0x3f8; out dx,al; hlt
@@ -442,7 +446,11 @@ fn a_kvm_guest_runs_64_bit_code_with_the_boot_cpu_state() {
     ]);
 
     // Two vCPUs so the topology has a count to check; only vCPU 0 runs.
-    let vm = bare(config(2, MAX_MEMORY_MIB), acrylmicrovm_hypervisor::KvmVm::new).unwrap();
+    let vm = bare(
+        config(2, MAX_MEMORY_MIB),
+        acrylmicrovm_hypervisor::KvmVm::new,
+    )
+    .unwrap();
     let memory = Arc::clone(vm.ram.memory());
     memory.write_slice(&program, GuestAddress(ENTRY)).unwrap();
     memory

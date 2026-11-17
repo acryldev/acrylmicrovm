@@ -439,7 +439,11 @@ impl BoxOptions {
 
 #[async_trait::async_trait]
 impl RuntimeBackend for RestRuntime {
-    async fn create(&self, options: BoxOptions, name: Option<String>) -> AcrylMicrovmResult<LiteBox> {
+    async fn create(
+        &self,
+        options: BoxOptions,
+        name: Option<String>,
+    ) -> AcrylMicrovmResult<LiteBox> {
         // A checkpoint source carries no other option: the server restores
         // the saved box, so this never builds a `CreateBoxRequest`.
         if let Some(checkpoint) = options.checkpoint_source()? {
@@ -778,8 +782,10 @@ mod tests {
     #[tokio::test]
     async fn boxes_pagination_collects_pages_and_encodes_camel_case_token() {
         let (port, server) = json_server(vec![BOXES_PAGE, BOXES_LAST_PAGE]).await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
 
         let boxes = runtime.list_info().await.unwrap();
         assert_eq!(boxes.len(), 2, "list_info must include every server page");
@@ -802,9 +808,10 @@ mod tests {
             r#"{"boxes":[],"next_page_token":""}"#,
         ] {
             let (port, server) = json_server(vec![body]).await;
-            let runtime =
-                RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
-                    .unwrap();
+            let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+                "http://127.0.0.1:{port}"
+            )))
+            .unwrap();
             assert!(runtime.list_info().await.unwrap().is_empty());
             assert_eq!(server.await.unwrap(), ["GET /v1/boxes HTTP/1.1"]);
         }
@@ -814,8 +821,10 @@ mod tests {
             BOXES_LAST_PAGE,
         ])
         .await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let boxes = runtime.list_info().await.unwrap();
         assert_eq!(boxes.len(), 1, "an empty page can still have a next page");
         assert_eq!(boxes[0].name.as_deref(), Some("last"));
@@ -834,9 +843,10 @@ mod tests {
         ] {
             let count = replies.len();
             let (port, server) = json_server(replies).await;
-            let runtime =
-                RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
-                    .unwrap();
+            let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+                "http://127.0.0.1:{port}"
+            )))
+            .unwrap();
             let error = runtime.list_info().await.unwrap_err();
             assert!(matches!(error, AcrylMicrovmError::Internal(_)));
             assert!(error.to_string().contains("repeated a pagination token"));
@@ -851,8 +861,10 @@ mod tests {
             (403, r#"{"error":{"code":"FORBIDDEN","message":"denied"}}"#),
         ])
         .await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         assert!(
             runtime.list_info().await.is_err(),
             "never return a partial list"
@@ -909,8 +921,10 @@ mod tests {
         // A server that does not advertise the feature would accept the create
         // request and drop `advanced`, silently granting default privileges.
         let (port, server) = json_server(vec![r#"{"capabilities":{}}"#]).await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
 
         let error = match RuntimeBackend::create(&runtime, capability_options(), None).await {
             Err(error) => error,
@@ -928,8 +942,10 @@ mod tests {
     #[tokio::test]
     async fn explicit_empty_capabilities_still_require_server_advertisement() {
         let (port, server) = json_server(vec![r#"{"capabilities":{}}"#]).await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
 
         let mut advanced = crate::AdvancedBoxOptions::default();
         advanced
@@ -956,8 +972,10 @@ mod tests {
             BOX_RESPONSE,
         ])
         .await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
 
         RuntimeBackend::create(&runtime, capability_options(), None)
             .await
@@ -972,8 +990,10 @@ mod tests {
     #[tokio::test]
     async fn ordinary_create_does_not_probe_server_capabilities() {
         let (port, server) = exchange_server(vec![(200, BOX_RESPONSE)]).await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
 
         RuntimeBackend::create(&runtime, BoxOptions::default(), None)
             .await
@@ -1002,9 +1022,10 @@ mod tests {
                 r#"{"message":"Import failed","code":"invalid_argument","boxId":"admitted-box"}"#
             };
             let (port, server) = exchange_server(vec![(status, body)]).await;
-            let runtime =
-                RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
-                    .unwrap();
+            let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+                "http://127.0.0.1:{port}"
+            )))
+            .unwrap();
             let error = RuntimeBackend::create(&runtime, checkpoint_options("base"), None)
                 .await
                 .err()
@@ -1024,8 +1045,10 @@ mod tests {
     #[tokio::test]
     async fn create_from_a_checkpoint_sends_only_the_checkpoint_and_name() {
         let (port, server) = exchange_server(vec![(201, BOX_RESPONSE)]).await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
 
         let created =
             RuntimeBackend::create(&runtime, checkpoint_options("base"), Some("worker".into()))
@@ -1045,8 +1068,10 @@ mod tests {
     #[tokio::test]
     async fn create_from_a_checkpoint_without_a_name_sends_only_the_checkpoint() {
         let (port, server) = exchange_server(vec![(201, BOX_RESPONSE)]).await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
 
         RuntimeBackend::create(&runtime, checkpoint_options("base"), None)
             .await
@@ -1065,7 +1090,8 @@ mod tests {
     /// server listens here: a sent request would surface as a transport error.
     #[tokio::test]
     async fn create_from_a_checkpoint_refuses_overrides_and_bad_names_before_any_request() {
-        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new("http://127.0.0.1:1")).unwrap();
+        let runtime =
+            RestRuntime::new(&AcrylMicrovmRestOptions::new("http://127.0.0.1:1")).unwrap();
         let overridden = [
             BoxOptions {
                 cpus: Some(2.0),
@@ -1085,7 +1111,10 @@ mod tests {
                 .await
                 .err()
                 .expect("overrides must be refused");
-            assert!(matches!(error, AcrylMicrovmError::InvalidArgument(_)), "{error}");
+            assert!(
+                matches!(error, AcrylMicrovmError::InvalidArgument(_)),
+                "{error}"
+            );
             assert!(error.to_string().contains("inherits"), "{error}");
         }
         for (checkpoint, name) in [("bad/key", None), ("base", Some("bad/name".to_owned()))] {
@@ -1105,8 +1134,10 @@ mod tests {
     #[tokio::test]
     async fn exec_user_requires_server_advertisement() {
         let (port, server) = json_server(vec![BOX_RESPONSE, r#"{"capabilities":{}}"#]).await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let sandbox = RuntimeBackend::get(&runtime, "named")
             .await
             .unwrap()
@@ -1128,8 +1159,10 @@ mod tests {
     #[tokio::test]
     async fn exec_user_requires_capabilities_object() {
         let (port, server) = json_server(vec![BOX_RESPONSE, "{}"]).await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let sandbox = RuntimeBackend::get(&runtime, "named")
             .await
             .unwrap()
@@ -1159,8 +1192,10 @@ mod tests {
             (200, r#"{"capabilities":{}}"#),
         ])
         .await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let sandbox = RuntimeBackend::get(&runtime, "named")
             .await
             .unwrap()
@@ -1212,9 +1247,10 @@ mod tests {
 
         for (user, replies) in cases {
             let (port, server) = exchange_server(replies.to_vec()).await;
-            let runtime =
-                RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
-                    .unwrap();
+            let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+                "http://127.0.0.1:{port}"
+            )))
+            .unwrap();
             let sandbox = RuntimeBackend::get(&runtime, "named")
                 .await
                 .unwrap()
@@ -1255,8 +1291,10 @@ mod tests {
     #[tokio::test]
     async fn inspection_uses_the_shared_box_routes() {
         let (port, server) = json_server(vec![BOX_RESPONSE, BOX_RESPONSE]).await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
 
         let found = RuntimeBackend::get(&runtime, "named").await.expect("get");
         let info = RuntimeBackend::get_info(&runtime, "named")
@@ -1359,7 +1397,10 @@ mod tests {
             .err()
             .expect("REST host bind mounts must be rejected before network I/O");
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         assert!(error.to_string().contains("host bind mounts"));
         assert!(
             !error.to_string().contains("/tmp/secrets"),
@@ -1385,7 +1426,10 @@ mod tests {
             .err()
             .expect("typed mounts must be refused before network I/O");
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         assert!(error.to_string().contains("typed mounts"), "{error}");
     }
 
@@ -1411,7 +1455,10 @@ mod tests {
             .err()
             .expect("read-only managed volumes must be rejected before network I/O");
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         assert!(error.to_string().contains("read-only"), "{error}");
     }
 
@@ -1446,7 +1493,8 @@ mod tests {
     #[tokio::test]
     async fn create_rejects_client_supplied_sandbox_security() {
         let options = AcrylMicrovmRestOptions::new("http://localhost:1");
-        let runtime = crate::AcrylMicrovmRuntime::rest(options).expect("failed to create REST runtime");
+        let runtime =
+            crate::AcrylMicrovmRuntime::rest(options).expect("failed to create REST runtime");
         for cpus in [None, Some(2.0), Some(0.125)] {
             let mut box_options = BoxOptions {
                 cpus,
@@ -1464,7 +1512,10 @@ mod tests {
                 let error = result
                     .err()
                     .expect("a client must not choose the remote server's sandbox policy");
-                assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error}");
+                assert!(
+                    matches!(error, AcrylMicrovmError::Unsupported(_)),
+                    "{error}"
+                );
                 assert!(error.to_string().contains("sandbox security"), "{error}");
             }
         }
@@ -1514,8 +1565,10 @@ mod tests {
     #[tokio::test]
     async fn privileged_omitted_and_false_keep_the_existing_create_request() {
         let (port, server) = capture_server(vec![(200, BOX_RESPONSE), (200, BOX_RESPONSE)]).await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let mut options = BoxOptions {
             rootfs: crate::RootfsSpec::Image("alpine:3.21".into()),
             detach: true,
@@ -1551,8 +1604,10 @@ mod tests {
     #[tokio::test]
     async fn secret_headers_preserve_explicit_templates_on_create() {
         let (port, server) = capture_server(vec![(200, BOX_RESPONSE), (200, BOX_RESPONSE)]).await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let mut options = BoxOptions {
             rootfs: crate::RootfsSpec::Image("alpine:3.21".into()),
             secrets: vec![crate::Secret {
@@ -1620,8 +1675,10 @@ mod tests {
             (200, r#"{"capabilities":{"privileged_enabled":false}}"#),
         ])
         .await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let mut opts = BoxOptions::default();
         opts.advanced.set_privileged(true);
         RuntimeBackend::create(&runtime, opts.clone(), None)
@@ -1663,9 +1720,10 @@ mod tests {
                 body["privileged"] = reported.into();
                 let response = Box::leak(body.to_string().into_boxed_str());
                 let (port, server) = json_server(vec![response]).await;
-                let runtime =
-                    RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
-                        .unwrap();
+                let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+                    "http://127.0.0.1:{port}"
+                )))
+                .unwrap();
                 let mut options = BoxOptions::default();
                 options.advanced.set_privileged(requested);
                 let result =
@@ -1697,9 +1755,10 @@ mod tests {
     async fn privileged_reuse_rejects_unknown_mode_but_get_still_reads_it() {
         for requested in [false, true] {
             let (port, server) = json_server(vec![BOX_RESPONSE, BOX_RESPONSE]).await;
-            let runtime =
-                RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
-                    .unwrap();
+            let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+                "http://127.0.0.1:{port}"
+            )))
+            .unwrap();
             assert!(
                 RuntimeBackend::get(&runtime, "named")
                     .await
@@ -1727,9 +1786,10 @@ mod tests {
             }
             let response = Box::leak(body.to_string().into_boxed_str());
             let (port, server) = json_server(vec![response]).await;
-            let runtime =
-                RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
-                    .unwrap();
+            let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+                "http://127.0.0.1:{port}"
+            )))
+            .unwrap();
             let info = RuntimeBackend::get_info(&runtime, "named")
                 .await
                 .unwrap()
@@ -1751,8 +1811,10 @@ mod tests {
             (200, BOX_RESPONSE),
         ])
         .await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let mut options = BoxOptions::default();
         options.advanced.set_privileged(true);
         let (_, created) = RuntimeBackend::get_or_create(&runtime, options, Some("named".into()))
@@ -1921,8 +1983,10 @@ mod tests {
     }
 
     fn images_on(port: u16) -> crate::runtime::ImageHandle {
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         crate::runtime::ImageHandle::new(Arc::new(runtime), None)
     }
 
@@ -1994,7 +2058,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, AcrylMicrovmError::InvalidState(_)), "{error}");
+        assert!(
+            matches!(error, AcrylMicrovmError::InvalidState(_)),
+            "{error}"
+        );
         assert!(error.to_string().contains("b1"), "{error}");
     }
 
@@ -2071,7 +2138,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, AcrylMicrovmError::InvalidArgument(_)), "{error}");
+        assert!(
+            matches!(error, AcrylMicrovmError::InvalidArgument(_)),
+            "{error}"
+        );
         assert!(error.to_string().contains("not a version"), "{error}");
     }
 
@@ -2111,7 +2181,10 @@ mod tests {
             )
             .await
             .unwrap_err();
-        assert!(matches!(error, AcrylMicrovmError::AlreadyExists(_)), "{error}");
+        assert!(
+            matches!(error, AcrylMicrovmError::AlreadyExists(_)),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -2150,7 +2223,10 @@ mod tests {
     async fn images_pull_is_unsupported_without_a_request() {
         let error = images_on(1).pull("alpine:latest").await.unwrap_err();
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error}"
+        );
     }
 
     /// A tagged reference is refused before a request is sent, so the server
@@ -2162,7 +2238,10 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, AcrylMicrovmError::InvalidArgument(_)), "{error}");
+        assert!(
+            matches!(error, AcrylMicrovmError::InvalidArgument(_)),
+            "{error}"
+        );
     }
 
     const LOGIN_ID: &str = "0aaa0000-0000-4000-8000-000000000001";
@@ -2171,12 +2250,14 @@ mod tests {
     const LOGIN_WITH_PASSWORD: &str = r#"{"password":"echoed-by-a-broken-server","id":"0aaa0000-0000-4000-8000-000000000001","registry_host":"ghcr.io","repository_prefix":"acme/","username":"acme-bot","created_by":null,"created_at":"2026-01-02T03:04:05.000Z"}"#;
 
     fn registries_on(port: u16) -> crate::runtime::RegistryHandle {
-        crate::AcrylMicrovmRuntime::rest(AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
-            .unwrap()
-            .images()
-            .unwrap()
-            .registries()
-            .unwrap()
+        crate::AcrylMicrovmRuntime::rest(AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap()
+        .images()
+        .unwrap()
+        .registries()
+        .unwrap()
     }
 
     fn new_login() -> crate::runtime::NewRegistryCredential {
@@ -2286,7 +2367,10 @@ mod tests {
 
         let error = registries_on(port).create(&new_login()).await.unwrap_err();
 
-        assert!(matches!(error, AcrylMicrovmError::AlreadyExists(_)), "{error}");
+        assert!(
+            matches!(error, AcrylMicrovmError::AlreadyExists(_)),
+            "{error}"
+        );
     }
 
     /// A deployment without private registries answers 501 with a code, so the
@@ -2301,7 +2385,10 @@ mod tests {
 
         let error = registries_on(port).create(&new_login()).await.unwrap_err();
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -2327,7 +2414,10 @@ mod tests {
 
         let error = registries_on(port).remove(LOGIN_ID).await.unwrap_err();
 
-        assert!(matches!(error, AcrylMicrovmError::InvalidState(_)), "{error}");
+        assert!(
+            matches!(error, AcrylMicrovmError::InvalidState(_)),
+            "{error}"
+        );
         assert!(error.to_string().contains("box-1"), "{error}");
     }
 
@@ -2337,7 +2427,10 @@ mod tests {
     async fn registries_remove_refuses_an_id_that_is_not_a_uuid_without_a_request() {
         let error = registries_on(1).remove("../images").await.unwrap_err();
 
-        assert!(matches!(error, AcrylMicrovmError::InvalidArgument(_)), "{error}");
+        assert!(
+            matches!(error, AcrylMicrovmError::InvalidArgument(_)),
+            "{error}"
+        );
     }
 
     /// Domains are organization routes: listed at `/domains`, bound and
@@ -2354,8 +2447,10 @@ mod tests {
             (204, ""),
         ])
         .await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let target = DomainTarget::Box {
             box_ref: "web-a".into(),
             port: 3000,
@@ -2387,8 +2482,10 @@ mod tests {
               {"hostname":"shop.apps.example","url":"https://shop.apps.example","target":{"type":"app","app":"shop-id"}}
             ], "limit":2,"used":2,"remaining":0,"min_length":5
         }"#)]).await;
-        let runtime =
-            RestRuntime::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let runtime = RestRuntime::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let held = runtime.list_domains().await.unwrap();
         assert_eq!(held.domains[0].hostname, "demo.apps.example");
         assert_eq!(

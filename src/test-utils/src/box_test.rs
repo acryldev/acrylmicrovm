@@ -16,8 +16,8 @@
 //! }
 //! ```
 
-use acrylmicrovm::runtime::options::{BoxOptions, AcrylMicrovmOptions, RootfsSpec};
-use acrylmicrovm::{BoxCommand, AcrylMicrovmRuntime, ExecResult, LiteBox};
+use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, BoxOptions, RootfsSpec};
+use acrylmicrovm::{AcrylMicrovmRuntime, BoxCommand, ExecResult, LiteBox};
 use futures::StreamExt as _;
 
 use crate::home::PerTestBoxHome;

@@ -92,8 +92,9 @@ impl BaseDiskStore {
     ///
     /// Serializes `BaseDisk` to JSON and extracts queryable columns.
     pub(crate) fn insert(&self, disk: &BaseDisk) -> AcrylMicrovmResult<()> {
-        let json = serde_json::to_string(disk)
-            .map_err(|e| AcrylMicrovmError::Database(format!("Failed to serialize BaseDisk: {}", e)))?;
+        let json = serde_json::to_string(disk).map_err(|e| {
+            AcrylMicrovmError::Database(format!("Failed to serialize BaseDisk: {}", e))
+        })?;
         let conn = self.db.conn();
         db_err!(conn.execute(
             "INSERT INTO base_disk \
@@ -129,7 +130,10 @@ impl BaseDiskStore {
     }
 
     /// Find a base disk by its file path.
-    pub(crate) fn find_by_base_path(&self, base_path: &str) -> AcrylMicrovmResult<Option<BaseDiskInfo>> {
+    pub(crate) fn find_by_base_path(
+        &self,
+        base_path: &str,
+    ) -> AcrylMicrovmResult<Option<BaseDiskInfo>> {
         let conn = self.db.conn();
         let result = db_err!(
             conn.query_row(
@@ -229,7 +233,11 @@ impl BaseDiskStore {
     /// Record that `box_id` depends on `base_disk_id`.
     ///
     /// Idempotent: INSERT OR IGNORE on the composite primary key.
-    pub(crate) fn add_ref(&self, base_disk_id: &BaseDiskID, box_id: &str) -> AcrylMicrovmResult<()> {
+    pub(crate) fn add_ref(
+        &self,
+        base_disk_id: &BaseDiskID,
+        box_id: &str,
+    ) -> AcrylMicrovmResult<()> {
         let conn = self.db.conn();
         db_err!(conn.execute(
             "INSERT OR IGNORE INTO base_disk_ref (base_disk_id, box_id) VALUES (?1, ?2)",
@@ -241,7 +249,10 @@ impl BaseDiskStore {
     /// Remove all refs for a box and return the affected base_disk_ids.
     ///
     /// Used during box deletion to know which bases may become orphaned.
-    pub(crate) fn remove_all_refs_for_box(&self, box_id: &str) -> AcrylMicrovmResult<Vec<BaseDiskID>> {
+    pub(crate) fn remove_all_refs_for_box(
+        &self,
+        box_id: &str,
+    ) -> AcrylMicrovmResult<Vec<BaseDiskID>> {
         let conn = self.db.conn();
 
         // Collect affected base_disk_ids BEFORE deleting.
@@ -280,7 +291,10 @@ impl BaseDiskStore {
     }
 
     /// List all box IDs that depend on `base_disk_id`.
-    pub(crate) fn dependent_boxes(&self, base_disk_id: &BaseDiskID) -> AcrylMicrovmResult<Vec<String>> {
+    pub(crate) fn dependent_boxes(
+        &self,
+        base_disk_id: &BaseDiskID,
+    ) -> AcrylMicrovmResult<Vec<String>> {
         let conn = self.db.conn();
         let mut stmt =
             db_err!(conn.prepare("SELECT box_id FROM base_disk_ref WHERE base_disk_id = ?1"))?;

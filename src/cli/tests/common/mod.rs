@@ -3,8 +3,8 @@
 
 pub mod serve;
 
-use assert_cmd::Command;
 use acrylmicrovm_test_utils::home::PerTestBoxHome;
+use assert_cmd::Command;
 use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;

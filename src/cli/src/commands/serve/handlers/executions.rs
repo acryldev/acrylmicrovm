@@ -972,9 +972,9 @@ mod tests {
 
     use super::{ATTACH_PEER_CLOSE_WAIT, StdinPolicy};
 
+    use acrylmicrovm::AcrylMicrovmRuntime;
     use axum::extract::ws::WebSocketUpgrade;
     use axum::routing::get;
-    use acrylmicrovm::AcrylMicrovmRuntime;
     use futures::{SinkExt, StreamExt};
     use tokio::sync::RwLock;
 

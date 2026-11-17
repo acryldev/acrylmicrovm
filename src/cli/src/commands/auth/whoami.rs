@@ -6,8 +6,8 @@
 //! from), `whoami` makes one authenticated request so it can show the
 //! server-resolved identity, organization, and scopes.
 
-use anyhow::{Context, Result, anyhow};
 use acrylmicrovm::{AcrylMicrovmError, AcrylMicrovmRestOptions, AcrylMicrovmRuntime};
+use anyhow::{Context, Result, anyhow};
 use secrecy::SecretString;
 
 use crate::cli::GlobalFlags;

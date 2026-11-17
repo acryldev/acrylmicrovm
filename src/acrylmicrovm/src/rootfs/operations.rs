@@ -74,7 +74,9 @@ pub fn mount_overlayfs_from_layers(
                 .ok_or_else(|| AcrylMicrovmError::Storage("Invalid target path".into()))?,
         ])
         .output()
-        .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to execute mount command: {}", e)))?;
+        .map_err(|e| {
+            AcrylMicrovmError::Storage(format!("Failed to execute mount command: {}", e))
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);

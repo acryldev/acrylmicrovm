@@ -6,9 +6,11 @@ use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use anyhow::{Context, Result, bail};
 use acrylmicrovm::runtime::layout::{FilesystemLayout, FsLayoutConfig};
-use acrylmicrovm::{AcrylMicrovmRestOptions, AcrylMicrovmRuntime, LiteBox, SshAccount, SshConfig, SshStatus};
+use acrylmicrovm::{
+    AcrylMicrovmRestOptions, AcrylMicrovmRuntime, LiteBox, SshAccount, SshConfig, SshStatus,
+};
+use anyhow::{Context, Result, bail};
 use nix::NixPath;
 use sha2::{Digest, Sha256};
 

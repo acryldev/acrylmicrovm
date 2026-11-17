@@ -1,7 +1,7 @@
 // Modified by ACRYL, 2026
 use std::sync::Arc;
 
-use acrylmicrovm::{BoxArchive, BoxOptions, AcrylMicrovmOptions, AcrylMicrovmRuntime};
+use acrylmicrovm::{AcrylMicrovmOptions, AcrylMicrovmRuntime, BoxArchive, BoxOptions};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -10,7 +10,7 @@ use crate::domains::JsDomainHandle;
 use crate::images::JsImageHandle;
 use crate::info::JsBoxInfo;
 use crate::metrics::JsRuntimeMetrics;
-use crate::options::{JsBoxOptions, JsAcrylMicrovmRestOptions, JsOptions, js_options_into_core};
+use crate::options::{JsAcrylMicrovmRestOptions, JsBoxOptions, JsOptions, js_options_into_core};
 use crate::util::map_err;
 use crate::volumes::JsVolumeHandle;
 

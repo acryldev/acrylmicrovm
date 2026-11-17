@@ -15,8 +15,8 @@ mod common;
 
 use std::time::Duration;
 
-use acrylmicrovm::BoxCommand;
 use acrylmicrovm::AcrylMicrovmRuntime;
+use acrylmicrovm::BoxCommand;
 use acrylmicrovm::runtime::options::AcrylMicrovmOptions;
 
 #[tokio::test]

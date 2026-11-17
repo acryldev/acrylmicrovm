@@ -468,7 +468,7 @@ mod tests {
     fn cleanup_guard_drop_persists_failed_state_and_keeps_record() {
         use crate::litebox::config::{BoxConfig, ContainerRuntimeConfig};
         use crate::runtime::id::BoxID;
-        use crate::runtime::options::{BoxOptions, AcrylMicrovmOptions, RootfsSpec};
+        use crate::runtime::options::{AcrylMicrovmOptions, BoxOptions, RootfsSpec};
         use crate::runtime::rt_impl::RuntimeImpl;
         use crate::runtime::types::{BoxState, BoxStatus, ContainerID};
         use crate::vmm::VmmKind;
@@ -507,8 +507,9 @@ mod tests {
         // Capture the Display string from production's AcrylMicrovmError so the
         // assertion below is on data routed through production code, not on
         // a literal the test body invented.
-        let err =
-            AcrylMicrovmError::Engine("Box CL84LvGx7RBE failed to start: timeout after 30s".to_string());
+        let err = AcrylMicrovmError::Engine(
+            "Box CL84LvGx7RBE failed to start: timeout after 30s".to_string(),
+        );
         let err_display = err.to_string();
 
         {

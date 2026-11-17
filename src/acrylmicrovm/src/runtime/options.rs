@@ -781,11 +781,13 @@ impl BoxOptions {
         // run on a different platform from the server.
         self.cpu_count()?;
         if self.removes_on_stop() && self.detach {
-            return Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                "remove-on-stop is incompatible with detach=true. Detached boxes should use \
+            return Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
+                    "remove-on-stop is incompatible with detach=true. Detached boxes should use \
                  auto_delete=0 (or deprecated auto_remove=false) for manual lifecycle control."
-                    .to_string(),
-            ));
+                        .to_string(),
+                ),
+            );
         }
 
         #[cfg(not(target_os = "linux"))]
@@ -801,19 +803,23 @@ impl BoxOptions {
         }
 
         if matches!(self.network, NetworkSpec::Disabled) && !self.ports.is_empty() {
-            return Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                "ports require network.outbound.mode=\"enabled\"".to_string(),
-            ));
+            return Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
+                    "ports require network.outbound.mode=\"enabled\"".to_string(),
+                ),
+            );
         }
 
         let rate_limit = &self.advanced.network_rate_limit;
         rate_limit.validate()?;
         if matches!(self.network, NetworkSpec::Disabled) && !rate_limit.is_unlimited() {
-            return Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                "advanced.network_rate_limit requires network.outbound.mode=\"enabled\" — \
+            return Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
+                    "advanced.network_rate_limit requires network.outbound.mode=\"enabled\" — \
                  there is no interface to shape when the network is disabled"
-                    .to_string(),
-            ));
+                        .to_string(),
+                ),
+            );
         }
 
         // Wire conversions already reject this (the InboundNetworkConfig
@@ -821,11 +827,13 @@ impl BoxOptions {
         // them at create. See try_from for the rationale.
         if matches!(&self.inbound_network, NetworkSpec::Enabled { allow_net } if !allow_net.is_empty())
         {
-            return Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                "inbound.allow_net is not supported yet; remove it \
+            return Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
+                    "inbound.allow_net is not supported yet; remove it \
                  (inbound access is controlled by mode only)"
-                    .to_string(),
-            ));
+                        .to_string(),
+                ),
+            );
         }
 
         // `advanced.security.network_enabled` reads like a guest-networking
@@ -839,13 +847,15 @@ impl BoxOptions {
         if !self.advanced.security.network_enabled
             && matches!(self.network, NetworkSpec::Enabled { .. })
         {
-            return Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                "advanced.security.network_enabled=false does not disable guest networking — \
+            return Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
+                    "advanced.security.network_enabled=false does not disable guest networking — \
                  it only drops the host sandbox's network grants. Set network.mode=\"disabled\" \
                  to create a box with no network interface, or leave \
                  advanced.security.network_enabled at its default."
-                    .to_string(),
-            ));
+                        .to_string(),
+                ),
+            );
         }
 
         for port in &self.ports {
@@ -1186,9 +1196,11 @@ impl std::str::FromStr for MountType {
         match value {
             "volume" => Ok(Self::Volume),
             "bind" => Ok(Self::Bind),
-            _ => Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                format!("unknown mount type {value:?}; expected \"volume\" or \"bind\""),
-            )),
+            _ => Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(format!(
+                    "unknown mount type {value:?}; expected \"volume\" or \"bind\""
+                )),
+            ),
         }
     }
 }
@@ -1265,9 +1277,7 @@ impl MountSpec {
         let mount_type = self.mount_type;
         let target = &self.target;
         let invalid = |message: String| {
-            Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                message,
-            ))
+            Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(message))
         };
 
         if !target.starts_with('/') {
@@ -1316,12 +1326,12 @@ impl std::str::FromStr for NetworkMode {
         match value.to_ascii_lowercase().as_str() {
             "enabled" => Ok(Self::Enabled),
             "disabled" => Ok(Self::Disabled),
-            _ => Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                format!(
+            _ => Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(format!(
                     "invalid network mode {:?}. Expected \"enabled\" or \"disabled\".",
                     value
-                ),
-            )),
+                )),
+            ),
         }
     }
 }
@@ -1375,11 +1385,11 @@ impl OutboundNetworkConfig {
                     })
             };
             if !valid {
-                return Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                    format!(
+                return Err(
+                    acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(format!(
                         "invalid allow_net rule: {rule:?}; expected a hostname, wildcard hostname, IPv4 or IPv4 CIDR"
-                    ),
-                ));
+                    )),
+                );
             }
         }
         Ok(())
@@ -1408,13 +1418,13 @@ impl TryFrom<OutboundNetworkConfig> for NetworkSpec {
             NetworkMode::Enabled => Ok(Self::Enabled {
                 allow_net: config.allow_net,
             }),
-            NetworkMode::Disabled if !config.allow_net.is_empty() => {
-                Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
+            NetworkMode::Disabled if !config.allow_net.is_empty() => Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
                     "network.outbound.mode=\"disabled\" is incompatible with allow_net. \
                      Remove allow_net or use mode=\"enabled\"."
                         .to_string(),
-                ))
-            }
+                ),
+            ),
             NetworkMode::Disabled => Ok(Self::Disabled),
         }
     }
@@ -1429,11 +1439,13 @@ impl TryFrom<InboundNetworkConfig> for NetworkSpec {
         // caller a box that is fully open while they believe it is
         // restricted. Reject under either mode; lift once enforcement lands.
         if !config.allow_net.is_empty() {
-            return Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                "inbound.allow_net is not supported yet; remove it \
+            return Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
+                    "inbound.allow_net is not supported yet; remove it \
                  (inbound access is controlled by mode only)"
-                    .to_string(),
-            ));
+                        .to_string(),
+                ),
+            );
         }
         Ok(match config.mode {
             NetworkMode::Enabled => Self::Enabled {
@@ -1577,9 +1589,11 @@ impl PortSpec {
     /// publication planning both go through it, so they can never disagree.
     pub(crate) fn validate_publishable(&self) -> AcrylMicrovmResult<SocketAddr> {
         if self.guest_port == 0 {
-            return Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                "guest port must be in range 1-65535".to_string(),
-            ));
+            return Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
+                    "guest port must be in range 1-65535".to_string(),
+                ),
+            );
         }
         if matches!(self.protocol, PortProtocol::Udp) {
             return Err(acrylmicrovm_shared::errors::AcrylMicrovmError::Unsupported(
@@ -2326,7 +2340,10 @@ mod tests {
                 for result in [options.sanitize(), options.sanitize_persisted()] {
                     if fractional && (!cfg!(target_os = "linux") || !jailer_enabled) {
                         let error = result.expect_err("fractional CPUs need local host support");
-                        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error}");
+                        assert!(
+                            matches!(error, AcrylMicrovmError::Unsupported(_)),
+                            "{error}"
+                        );
                         let requirement = if cfg!(target_os = "linux") {
                             "jailer"
                         } else {

@@ -17,7 +17,9 @@ use acrylmicrovm::runtime::{
     NewRegistryCredential, RegistryCredential, RegistryHandle as CoreRegistryHandle,
 };
 
-use crate::error::{AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error};
+use crate::error::{
+    AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error,
+};
 use crate::event_queue::{
     CBoxRegistryCreateCb, CBoxRegistryListCb, CBoxRegistryRemoveCb, EventQueue, OwnedFfiPtr,
     RuntimeEvent, push_event,
@@ -244,7 +246,9 @@ pub unsafe extern "C" fn acrylmicrovm_registry_free(handle: *mut CAcrylMicrovmRe
 /// `credential` must be null or a pointer this library handed out that has
 /// not been freed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn acrylmicrovm_free_registry_credential(credential: *mut CRegistryCredential) {
+pub unsafe extern "C" fn acrylmicrovm_free_registry_credential(
+    credential: *mut CRegistryCredential,
+) {
     unsafe { free_registry_credential(credential) }
 }
 
@@ -255,7 +259,9 @@ pub unsafe extern "C" fn acrylmicrovm_free_registry_credential(credential: *mut 
 /// `list` must be null or a pointer this library handed out that has not been
 /// freed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn acrylmicrovm_free_registry_credential_list(list: *mut CRegistryCredentialList) {
+pub unsafe extern "C" fn acrylmicrovm_free_registry_credential_list(
+    list: *mut CRegistryCredentialList,
+) {
     unsafe { free_registry_credential_list(list) }
 }
 

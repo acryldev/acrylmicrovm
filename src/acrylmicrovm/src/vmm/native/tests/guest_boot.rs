@@ -11,7 +11,10 @@ fn guest_root(test_box: &TestBox) -> crate::disk::Disk {
     for path in ["dev", "proc", "sys", "tmp", "var/tmp", "run"] {
         fs::create_dir_all(root.join(path)).unwrap();
     }
-    for (variable, name) in [("VMM_GUEST", "acrylmicrovm-guest"), ("VMM_GUEST_PROBE", "init")] {
+    for (variable, name) in [
+        ("VMM_GUEST", "acrylmicrovm-guest"),
+        ("VMM_GUEST_PROBE", "init"),
+    ] {
         let source = std::env::var_os(variable).unwrap_or_else(|| panic!("set {variable}"));
         let destination = root.join(name);
         fs::copy(source, &destination).unwrap();

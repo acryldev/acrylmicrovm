@@ -41,7 +41,7 @@ use crate::network::{
     PyTunnelOptions,
 };
 use crate::options::{
-    PyAccessToken, PyApiKeyCredential, PyBoxOptions, PyAcrylMicrovmRestOptions, PyCopyOptions,
+    PyAccessToken, PyAcrylMicrovmRestOptions, PyApiKeyCredential, PyBoxOptions, PyCopyOptions,
     PyImageRegistry, PyInboundNetworkSpec, PyNetworkSpec, PyOptions, PyOutboundNetworkSpec,
     PySecret,
 };

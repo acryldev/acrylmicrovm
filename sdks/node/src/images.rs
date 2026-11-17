@@ -3,7 +3,9 @@ use crate::registries::JsRegistryHandle;
 use std::sync::Arc;
 
 use acrylmicrovm::ImageHandle;
-use acrylmicrovm::runtime::types::{ImageAliasEvent, ImageDetail, ImageInfo, ImageUsage, ImageVersion};
+use acrylmicrovm::runtime::types::{
+    ImageAliasEvent, ImageDetail, ImageInfo, ImageUsage, ImageVersion,
+};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 

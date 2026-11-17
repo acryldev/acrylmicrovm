@@ -158,7 +158,9 @@ impl<'a> LayerExtractor<'a> {
                 .map_err(|e| AcrylMicrovmError::Storage(format!("Tar read entry error: {}", e)))?;
             let raw_path = entry
                 .path()
-                .map_err(|e| AcrylMicrovmError::Storage(format!("Tar parse header path error: {}", e)))?
+                .map_err(|e| {
+                    AcrylMicrovmError::Storage(format!("Tar parse header path error: {}", e))
+                })?
                 .into_owned();
             let normalized = match SafeRoot::normalize(&raw_path) {
                 Some(p) => p,
@@ -184,7 +186,9 @@ impl<'a> LayerExtractor<'a> {
             let link_name = if matches!(entry_type, EntryType::Link | EntryType::Symlink) {
                 entry
                     .link_name()
-                    .map_err(|e| AcrylMicrovmError::Storage(format!("Tar read link name error: {}", e)))?
+                    .map_err(|e| {
+                        AcrylMicrovmError::Storage(format!("Tar read link name error: {}", e))
+                    })?
                     .map(|p| p.into_owned())
             } else {
                 None
@@ -498,7 +502,11 @@ impl<'a> LayerExtractor<'a> {
                     other => other,
                 }
                 .map_err(|e| {
-                    AcrylMicrovmError::Storage(format!("Failed to remove {}: {}", path.display(), e))
+                    AcrylMicrovmError::Storage(format!(
+                        "Failed to remove {}: {}",
+                        path.display(),
+                        e
+                    ))
                 })
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -825,7 +833,12 @@ fn read_xattrs<R: Read>(entry: &mut Entry<R>) -> AcrylMicrovmResult<Vec<(String,
     let extensions = match entry.pax_extensions() {
         Ok(Some(exts)) => exts,
         Ok(None) => return Ok(xattrs),
-        Err(e) => return Err(AcrylMicrovmError::Storage(format!("PAX parse error: {}", e))),
+        Err(e) => {
+            return Err(AcrylMicrovmError::Storage(format!(
+                "PAX parse error: {}",
+                e
+            )));
+        }
     };
 
     for ext in extensions {
@@ -968,7 +981,12 @@ fn apply_xattrs(
     Ok(())
 }
 
-fn apply_times(path: &Path, entry_type: EntryType, atime: u64, mtime: u64) -> AcrylMicrovmResult<()> {
+fn apply_times(
+    path: &Path,
+    entry_type: EntryType,
+    atime: u64,
+    mtime: u64,
+) -> AcrylMicrovmResult<()> {
     let atime = bound_time(unix_time(atime));
     let mtime = bound_time(unix_time(mtime));
     let atime_ft = FileTime::from_system_time(atime);

@@ -20,8 +20,8 @@ use crate::pipeline::PipelineTask;
 use crate::runtime::options::PortSpec;
 use crate::runtime::types::PublishedPort;
 use crate::util::{PidFileReader, ShimPidRecord};
-use async_trait::async_trait;
 use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -431,10 +431,9 @@ impl PipelineTask<InitCtx> for PortPublishTask {
 
         let (requested, pid_path, backend, mode) = {
             let mut ctx = ctx.lock().await;
-            let layout = ctx
-                .layout
-                .as_ref()
-                .ok_or_else(|| AcrylMicrovmError::Internal("filesystem task must run first".into()))?;
+            let layout = ctx.layout.as_ref().ok_or_else(|| {
+                AcrylMicrovmError::Internal("filesystem task must run first".into())
+            })?;
             (
                 ctx.config.options.ports.clone(),
                 layout.pid_file_path(),
@@ -558,7 +557,11 @@ mod tests {
             Ok(forward)
         }
 
-        async fn unexpose(&self, local: &str, _protocol: TransportProtocol) -> AcrylMicrovmResult<()> {
+        async fn unexpose(
+            &self,
+            local: &str,
+            _protocol: TransportProtocol,
+        ) -> AcrylMicrovmResult<()> {
             self.unexposed.lock().unwrap().push(local.to_string());
             self.active
                 .lock()

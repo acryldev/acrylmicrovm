@@ -24,11 +24,13 @@ fn long_running_opts() -> BoxOptions {
 /// session, so a control and its subject cannot share one.
 async fn stdin_is_available(options: AttachOptions) -> bool {
     let home = acrylmicrovm_test_utils::home::PerTestBoxHome::new();
-    let runtime = acrylmicrovm::AcrylMicrovmRuntime::new(acrylmicrovm::runtime::options::AcrylMicrovmOptions {
-        home_dir: home.path.clone(),
-        image_registries: common::test_registries(),
-        ..Default::default()
-    })
+    let runtime = acrylmicrovm::AcrylMicrovmRuntime::new(
+        acrylmicrovm::runtime::options::AcrylMicrovmOptions {
+            home_dir: home.path.clone(),
+            image_registries: common::test_registries(),
+            ..Default::default()
+        },
+    )
     .expect("create runtime");
 
     let handle = runtime

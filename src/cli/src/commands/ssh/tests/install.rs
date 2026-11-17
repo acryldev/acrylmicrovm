@@ -224,7 +224,12 @@ fn include_path_with_spaces_quotes_glob_chars_and_percent_is_literal() {
         .commit(&stanza("dev", "actual-box"))
         .unwrap();
     assert!(effective(&home, "dev").contains("hostname actual-box\n"));
-    assert_eq!(fs::read_dir(home.join(".acryl/microvm/ssh")).unwrap().count(), 2);
+    assert_eq!(
+        fs::read_dir(home.join(".acryl/microvm/ssh"))
+            .unwrap()
+            .count(),
+        2
+    );
 }
 
 /// An obsolete percent-escaped prefix can be repaired without editing user bytes.

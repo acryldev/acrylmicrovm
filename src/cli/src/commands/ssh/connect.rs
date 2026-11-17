@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow, bail};
 use acrylmicrovm::{LiteBox, SocketAddress, SshStatus, TunnelForwarder};
+use anyhow::{Context, Result, anyhow, bail};
 use futures::FutureExt;
 use nix::errno::Errno;
 use nix::sys::signal::{Signal as UnixSignal, kill};

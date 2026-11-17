@@ -5,8 +5,8 @@ use std::io::Write;
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result, anyhow};
 use acrylmicrovm::{BoxTunnel, SocketAddress, TunnelOptions};
+use anyhow::{Context, Result, anyhow};
 use clap::Args;
 
 use crate::cli::GlobalFlags;
@@ -115,7 +115,9 @@ pub(crate) async fn forward_until_interrupted(
         .forward_with_bound(listen, |address| {
             println!("{address}");
             std::io::stdout().flush().map_err(|error| {
-                acrylmicrovm::AcrylMicrovmError::Internal(format!("flush tunnel listener address: {error}"))
+                acrylmicrovm::AcrylMicrovmError::Internal(format!(
+                    "flush tunnel listener address: {error}"
+                ))
             })?;
             announce(address);
             Ok(())

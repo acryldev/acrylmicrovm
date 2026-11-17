@@ -75,8 +75,9 @@ pub fn load_or_generate(ca_dir: &Path) -> AcrylMicrovmResult<MitmCa> {
             <= (now + CA_RENEW_BEFORE).unix_timestamp() as u64
             || validity.not_before.to_unix_duration().as_secs() > now.unix_timestamp() as u64
         {
-            let key = KeyPair::from_pem(&key_pem)
-                .map_err(|e| AcrylMicrovmError::Network(format!("Failed to parse MITM CA key: {e}")))?;
+            let key = KeyPair::from_pem(&key_pem).map_err(|e| {
+                AcrylMicrovmError::Network(format!("Failed to parse MITM CA key: {e}"))
+            })?;
             cert_pem = generate_with_key(key)?.cert_pem;
             // Keeping the key makes renewal a single atomic certificate replacement.
             write_ca_cert(&cert_path, &cert_pem)?;
@@ -288,7 +289,12 @@ fn write_private_key(path: &Path, contents: &str) -> AcrylMicrovmResult<()> {
 }
 
 #[cfg(unix)]
-fn write_persisted_file(path: &Path, contents: &str, mode: u32, label: &str) -> AcrylMicrovmResult<()> {
+fn write_persisted_file(
+    path: &Path,
+    contents: &str,
+    mode: u32,
+    label: &str,
+) -> AcrylMicrovmResult<()> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     let parent = path.parent().ok_or_else(|| {
@@ -311,7 +317,9 @@ fn write_persisted_file(path: &Path, contents: &str, mode: u32, label: &str) -> 
             .mode(mode)
             .custom_flags(libc::O_NOFOLLOW)
             .open(&tmp_path)
-            .map_err(|e| AcrylMicrovmError::Network(format!("Failed to open {label} temp file: {e}")))?;
+            .map_err(|e| {
+                AcrylMicrovmError::Network(format!("Failed to open {label} temp file: {e}"))
+            })?;
 
         file.set_permissions(std::fs::Permissions::from_mode(mode))
             .map_err(|e| {

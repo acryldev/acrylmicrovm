@@ -424,14 +424,17 @@ fn dir_copy(src_dir: &Path, dst_dir: &Path, options: CopyMountOptions) -> AcrylM
 /// never land on (or follow) an inherited symlink. Matches containers/storage
 /// `drivers/copy/copy_linux.go:77`, which opens layer files with `O_EXCL` too.
 fn copy_regular_file(src: &Path, dst: &Path, metadata: &fs::Metadata) -> AcrylMicrovmResult<()> {
-    let mut reader = fs::File::open(src)
-        .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to open {}: {}", src.display(), e)))?;
+    let mut reader = fs::File::open(src).map_err(|e| {
+        AcrylMicrovmError::Storage(format!("Failed to open {}: {}", src.display(), e))
+    })?;
     let mut writer = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(metadata.mode() & 0o7777)
         .open(dst)
-        .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to create {}: {}", dst.display(), e)))?;
+        .map_err(|e| {
+            AcrylMicrovmError::Storage(format!("Failed to create {}: {}", dst.display(), e))
+        })?;
 
     std::io::copy(&mut reader, &mut writer).map_err(|e| {
         AcrylMicrovmError::Storage(format!(
@@ -538,7 +541,9 @@ fn set_times(path: &Path, atime: SystemTime, mtime: SystemTime) -> AcrylMicrovmR
         FileTime::from_system_time(atime),
         FileTime::from_system_time(mtime),
     )
-    .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to set times on {}: {}", path.display(), e)))
+    .map_err(|e| {
+        AcrylMicrovmError::Storage(format!("Failed to set times on {}: {}", path.display(), e))
+    })
 }
 
 /// Set access and modification times on a symlink (does NOT follow symlinks)
@@ -568,11 +573,11 @@ pub(crate) fn set_symlink_times(
 pub(crate) fn create_fifo(path: &Path, mode: u32) -> AcrylMicrovmResult<()> {
     use std::ffi::CString;
 
-    let c_path = CString::new(
-        path.to_str()
-            .ok_or_else(|| AcrylMicrovmError::Storage(format!("Invalid path: {}", path.display())))?,
-    )
-    .map_err(|e| AcrylMicrovmError::Storage(format!("Invalid path: {}", e)))?;
+    let c_path =
+        CString::new(path.to_str().ok_or_else(|| {
+            AcrylMicrovmError::Storage(format!("Invalid path: {}", path.display()))
+        })?)
+        .map_err(|e| AcrylMicrovmError::Storage(format!("Invalid path: {}", e)))?;
 
     unsafe {
         if libc::mkfifo(c_path.as_ptr(), mode) != 0 {

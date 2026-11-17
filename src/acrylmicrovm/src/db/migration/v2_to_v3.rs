@@ -20,7 +20,11 @@ impl Migration for AddNameColumn {
         "Add name column to box_config"
     }
 
-    fn run(&self, conn: &Connection, _home_dir: Option<&std::path::Path>) -> AcrylMicrovmResult<()> {
+    fn run(
+        &self,
+        conn: &Connection,
+        _home_dir: Option<&std::path::Path>,
+    ) -> AcrylMicrovmResult<()> {
         db_err!(conn.execute_batch("ALTER TABLE box_config ADD COLUMN name TEXT;"))?;
         db_err!(conn.execute_batch(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_box_config_name_unique ON box_config(name);"

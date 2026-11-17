@@ -19,7 +19,7 @@ mod common;
 
 use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, CloneOptions, ExportOptions};
 use acrylmicrovm::runtime::types::BoxStatus;
-use acrylmicrovm::{BoxCommand, AcrylMicrovmRuntime, LiteBox, SnapshotOptions};
+use acrylmicrovm::{AcrylMicrovmRuntime, BoxCommand, LiteBox, SnapshotOptions};
 use tempfile::TempDir;
 use tokio_stream::StreamExt;
 
@@ -1682,7 +1682,10 @@ async fn test_export_archive_has_acrylmicrovm_extension() {
 
     assert!(archive.path().exists());
     assert!(
-        archive.path().extension().is_some_and(|e| e == "acrylmicrovm"),
+        archive
+            .path()
+            .extension()
+            .is_some_and(|e| e == "acrylmicrovm"),
         "archive should have .acrylmicrovm extension"
     );
     assert!(
@@ -2871,8 +2874,18 @@ async fn test_export_produces_deterministic_extension() {
         .await
         .unwrap();
 
-    assert!(archive1.path().extension().is_some_and(|e| e == "acrylmicrovm"));
-    assert!(archive2.path().extension().is_some_and(|e| e == "acrylmicrovm"));
+    assert!(
+        archive1
+            .path()
+            .extension()
+            .is_some_and(|e| e == "acrylmicrovm")
+    );
+    assert!(
+        archive2
+            .path()
+            .extension()
+            .is_some_and(|e| e == "acrylmicrovm")
+    );
 
     let _ = runtime.shutdown(Some(common::TEST_SHUTDOWN_TIMEOUT)).await;
 }

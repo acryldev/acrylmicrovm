@@ -168,13 +168,13 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::{Arc, Mutex};
 
+    use acrylmicrovm::AcrylMicrovmRuntime;
+    use acrylmicrovm::runtime::types::{ImageAliasEvent, ImageVersion};
     use axum::Router;
     use axum::extract::{Path, State};
     use axum::http::StatusCode;
     use axum::response::{IntoResponse, Response};
     use axum::routing::{delete, get};
-    use acrylmicrovm::AcrylMicrovmRuntime;
-    use acrylmicrovm::runtime::types::{ImageAliasEvent, ImageVersion};
     use chrono::{TimeZone, Utc};
     use serde_json::{Value, json};
     use tokio::sync::RwLock;

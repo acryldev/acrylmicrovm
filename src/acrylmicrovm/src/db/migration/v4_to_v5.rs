@@ -20,7 +20,11 @@ impl Migration for AddSnapshots {
         "Add snapshots table (legacy)"
     }
 
-    fn run(&self, conn: &Connection, _home_dir: Option<&std::path::Path>) -> AcrylMicrovmResult<()> {
+    fn run(
+        &self,
+        conn: &Connection,
+        _home_dir: Option<&std::path::Path>,
+    ) -> AcrylMicrovmResult<()> {
         db_err!(conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS snapshots (

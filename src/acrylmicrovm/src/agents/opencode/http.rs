@@ -67,7 +67,11 @@ impl Client {
     /// POST a body that carries a client-chosen ID OpenCode deduplicates, so a
     /// request whose response was lost can be repeated once without a second
     /// admission. Only transport failures are retried.
-    pub(super) async fn post_idempotent(&self, path: &str, body: &Value) -> AcrylMicrovmResult<Value> {
+    pub(super) async fn post_idempotent(
+        &self,
+        path: &str,
+        body: &Value,
+    ) -> AcrylMicrovmResult<Value> {
         match self.json(Method::POST, path, Some(body)).await {
             Err(AcrylMicrovmError::Network(_)) => self.json(Method::POST, path, Some(body)).await,
             outcome => outcome,
@@ -106,7 +110,12 @@ impl Client {
         Ok(ReceiverStream::new(receiver))
     }
 
-    async fn json(&self, method: Method, path: &str, body: Option<&Value>) -> AcrylMicrovmResult<Value> {
+    async fn json(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+    ) -> AcrylMicrovmResult<Value> {
         let exchange = async {
             let response = self.send(method.clone(), path, body).await?;
             let status = response.status();
@@ -251,7 +260,9 @@ impl EventParser {
         {
             let end = self.searched + offset;
             let line = std::str::from_utf8(&self.pending[start..end])
-                .map_err(|_| AcrylMicrovmError::Internal("OpenCode sent a non-UTF-8 event line".into()))?
+                .map_err(|_| {
+                    AcrylMicrovmError::Internal("OpenCode sent a non-UTF-8 event line".into())
+                })?
                 .trim_end_matches('\r');
             start = end + 1;
             self.searched = start;
@@ -259,7 +270,9 @@ impl EventParser {
                 if !self.data.is_empty() {
                     let data = std::mem::take(&mut self.data);
                     events.push(serde_json::from_str(&data).map_err(|error| {
-                        AcrylMicrovmError::Internal(format!("OpenCode sent an invalid event: {error}"))
+                        AcrylMicrovmError::Internal(format!(
+                            "OpenCode sent an invalid event: {error}"
+                        ))
                     })?);
                 }
             } else if let Some(value) = line.strip_prefix("data:") {

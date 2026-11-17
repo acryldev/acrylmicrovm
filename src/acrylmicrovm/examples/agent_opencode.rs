@@ -16,9 +16,11 @@
 //! OpenCode configuration in `OPENCODE_CONFIG_CONTENT`; the Box reaches the
 //! host as `host.acrylmicrovm.internal`.
 
-use acrylmicrovm::agents::{AgentCreateOptions, AgentEventsOptions, AgentSendOptions, AgentWaitOptions};
+use acrylmicrovm::agents::{
+    AgentCreateOptions, AgentEventsOptions, AgentSendOptions, AgentWaitOptions,
+};
 use acrylmicrovm::runtime::options::{BoxOptions, RootfsSpec};
-use acrylmicrovm::{BoxCommand, AcrylMicrovmRuntime, CopyOptions};
+use acrylmicrovm::{AcrylMicrovmRuntime, BoxCommand, CopyOptions};
 use futures::StreamExt;
 use std::io::Write;
 

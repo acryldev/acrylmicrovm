@@ -1,11 +1,11 @@
 // Modified by ACRYL, 2026
 use super::super::{AppState, error_from_acrylmicrovm, get_or_fetch_box};
+use acrylmicrovm::runtime::options::{InboundNetworkConfig, OutboundNetworkConfig};
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
     response::{IntoResponse, Response},
 };
-use acrylmicrovm::runtime::options::{InboundNetworkConfig, OutboundNetworkConfig};
 use std::sync::Arc;
 
 // `Response` is wide enough to trip clippy's `result_large_err`; see
@@ -13,7 +13,9 @@ use std::sync::Arc;
 #[allow(clippy::result_large_err)]
 fn policy_body<T>(body: Result<Json<T>, JsonRejection>) -> Result<T, Response> {
     body.map(|Json(policy)| policy).map_err(|error| {
-        error_from_acrylmicrovm(&acrylmicrovm::AcrylMicrovmError::InvalidArgument(error.body_text()))
+        error_from_acrylmicrovm(&acrylmicrovm::AcrylMicrovmError::InvalidArgument(
+            error.body_text(),
+        ))
     })
 }
 

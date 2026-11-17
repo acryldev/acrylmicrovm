@@ -4,7 +4,7 @@
 mod common;
 
 use acrylmicrovm::runtime::id::{BoxID, BoxIDMint};
-use acrylmicrovm::runtime::options::{BoxOptions, AcrylMicrovmOptions};
+use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, BoxOptions};
 use acrylmicrovm::runtime::types::BoxStatus;
 use common::TestRuntime as AcrylMicrovmRuntime;
 
@@ -587,7 +587,8 @@ async fn multiple_boxes_persist_and_recover_without_lock_errors() {
             image_registries: common::test_registries(),
             ..Default::default()
         };
-        let runtime = AcrylMicrovmRuntime::new(options).expect("Failed to create runtime after restart");
+        let runtime =
+            AcrylMicrovmRuntime::new(options).expect("Failed to create runtime after restart");
 
         // All boxes should be recovered from database
         let boxes = runtime.list_info().await.unwrap();

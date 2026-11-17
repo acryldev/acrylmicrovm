@@ -23,7 +23,9 @@ use acrylmicrovm::agents::{
     AgentWaitOptions,
 };
 use acrylmicrovm::runtime::options::{BoxOptions, RootfsSpec};
-use acrylmicrovm::{BoxCommand, AcrylMicrovmError, AcrylMicrovmOptions, AcrylMicrovmRuntime, CopyOptions, LiteBox};
+use acrylmicrovm::{
+    AcrylMicrovmError, AcrylMicrovmOptions, AcrylMicrovmRuntime, BoxCommand, CopyOptions, LiteBox,
+};
 use futures::StreamExt;
 use std::time::Duration;
 
@@ -34,7 +36,9 @@ const WAIT: AgentWaitOptions = AgentWaitOptions {
 
 /// A started Box with OpenCode and a provider config pointing at the fake model.
 /// The Box environment sets a conflicting `OPENCODE_PASSWORD` on purpose.
-async fn opencode_box(home: &common::home::PerTestBoxHome) -> (AcrylMicrovmRuntime, LiteBox, ModelLog) {
+async fn opencode_box(
+    home: &common::home::PerTestBoxHome,
+) -> (AcrylMicrovmRuntime, LiteBox, ModelLog) {
     let binary = std::env::var(BINARY_ENV).unwrap_or_else(|_| panic!("set {BINARY_ENV}"));
     let (model_port, log) = start_fake_model().await;
 
@@ -749,7 +753,10 @@ async fn a_failed_mount_after_a_restart_is_reported_and_retried() {
     // agents call reports the mount error.
     run(&sandbox, "touch /opt/acrylmicrovm/agents/blocker").await;
     let error = sandbox.agents().get(&agent_id).await.err().unwrap();
-    assert!(error.to_string().contains("/opt/acrylmicrovm/agents"), "{error}");
+    assert!(
+        error.to_string().contains("/opt/acrylmicrovm/agents"),
+        "{error}"
+    );
     assert_eq!(agent_mounts(&sandbox).await, "0");
 
     run(&sandbox, "rm /opt/acrylmicrovm/agents/blocker").await;

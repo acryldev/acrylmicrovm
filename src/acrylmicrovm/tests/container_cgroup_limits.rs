@@ -16,7 +16,7 @@
 
 mod common;
 
-use acrylmicrovm::runtime::options::{BoxOptions, AcrylMicrovmOptions, RootfsSpec};
+use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, BoxOptions, RootfsSpec};
 use acrylmicrovm::{BoxCommand, LiteBox};
 use futures::StreamExt;
 

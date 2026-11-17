@@ -75,9 +75,9 @@ fn main() -> AcrylMicrovmResult<()> {
     let config_json = {
         use std::io::Read;
         let mut buf = String::new();
-        std::io::stdin()
-            .read_to_string(&mut buf)
-            .map_err(|e| AcrylMicrovmError::Engine(format!("Failed to read config from stdin: {e}")))?;
+        std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+            AcrylMicrovmError::Engine(format!("Failed to read config from stdin: {e}"))
+        })?;
         buf
     };
 

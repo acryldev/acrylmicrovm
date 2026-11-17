@@ -209,8 +209,11 @@ impl SshBox {
                 acrylmicrovm_rest_options_new(base_url.as_ptr(), options.as_mut_ptr(), &mut error);
             assert_eq!(code, AcrylMicrovmErrorCode::Ok);
             let options = options.assume_init();
-            let code =
-                acrylmicrovm_rest_runtime_new_with_options(options, runtime.as_mut_ptr(), &mut error);
+            let code = acrylmicrovm_rest_runtime_new_with_options(
+                options,
+                runtime.as_mut_ptr(),
+                &mut error,
+            );
             acrylmicrovm_rest_options_free(options);
             assert_eq!(code, AcrylMicrovmErrorCode::Ok);
             let runtime = runtime.assume_init();

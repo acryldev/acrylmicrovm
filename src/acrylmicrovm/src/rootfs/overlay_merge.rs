@@ -251,7 +251,10 @@ impl<'a> OverlayMerge<'a> {
 /// Only a regular file can be a marker: the walk uses `follow_links(false)`, so
 /// `file_type` is the entry's own type and a directory or symlink named
 /// `.wh.foo` stays content.
-fn marker_of<'a>(entry: &walkdir::DirEntry, name: &'a str) -> AcrylMicrovmResult<Option<Whiteout<'a>>> {
+fn marker_of<'a>(
+    entry: &walkdir::DirEntry,
+    name: &'a str,
+) -> AcrylMicrovmResult<Option<Whiteout<'a>>> {
     if !entry.file_type().is_file() {
         return Ok(None);
     }
@@ -279,8 +282,9 @@ fn remove_nofollow(path: &Path) -> AcrylMicrovmResult<()> {
     } else {
         fs::remove_file(path)
     };
-    removed
-        .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to remove {}: {}", path.display(), e)))
+    removed.map_err(|e| {
+        AcrylMicrovmError::Storage(format!("Failed to remove {}: {}", path.display(), e))
+    })
 }
 
 /// Ensure a real directory at `dst`, replacing a file or symlink in the way.
@@ -307,14 +311,17 @@ fn place_dir(dst: &Path) -> AcrylMicrovmResult<()> {
 fn place_regular(src: &Path, dst: &Path, meta: &fs::Metadata) -> AcrylMicrovmResult<()> {
     remove_nofollow(dst)?;
 
-    let mut reader = fs::File::open(src)
-        .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to open {}: {}", src.display(), e)))?;
+    let mut reader = fs::File::open(src).map_err(|e| {
+        AcrylMicrovmError::Storage(format!("Failed to open {}: {}", src.display(), e))
+    })?;
     let mut writer = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(meta.mode() & 0o7777)
         .open(dst)
-        .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to create {}: {}", dst.display(), e)))?;
+        .map_err(|e| {
+            AcrylMicrovmError::Storage(format!("Failed to create {}: {}", dst.display(), e))
+        })?;
 
     io::copy(&mut reader, &mut writer).map_err(|e| {
         AcrylMicrovmError::Storage(format!(

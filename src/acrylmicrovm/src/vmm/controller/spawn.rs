@@ -72,7 +72,9 @@ impl<'a> ShimSpawner<'a> {
         };
         let security = &self.options.advanced.security;
         if !security.jailer_enabled {
-            return Err(AcrylMicrovmError::Engine("CPU limit requires the jailer".into()));
+            return Err(AcrylMicrovmError::Engine(
+                "CPU limit requires the jailer".into(),
+            ));
         }
         // Best-effort, like cgroup setup and membership: a host without a
         // delegated CPU controller must still be able to start the Box.

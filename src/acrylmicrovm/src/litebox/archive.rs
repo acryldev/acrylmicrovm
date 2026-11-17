@@ -120,9 +120,9 @@ pub(crate) fn build_zstd_tar_archive(
     let encoder = builder
         .into_inner()
         .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to finalize tar: {}", e)))?;
-    encoder
-        .finish()
-        .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to finish zstd compression: {}", e)))?;
+    encoder.finish().map_err(|e| {
+        AcrylMicrovmError::Storage(format!("Failed to finish zstd compression: {}", e))
+    })?;
 
     Ok(())
 }
@@ -134,7 +134,9 @@ fn append_archive_files<W: Write>(
 ) -> AcrylMicrovmResult<()> {
     builder
         .append_path_with_name(manifest_path, MANIFEST_FILENAME)
-        .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to add manifest to archive: {}", e)))?;
+        .map_err(|e| {
+            AcrylMicrovmError::Storage(format!("Failed to add manifest to archive: {}", e))
+        })?;
 
     builder
         .append_path_with_name(container_disk, disk_filenames::CONTAINER_DISK)
@@ -182,8 +184,9 @@ pub(crate) fn extract_archive(archive_path: &Path, dest_dir: &Path) -> AcrylMicr
     })?;
 
     if magic == ZSTD_MAGIC {
-        let decoder = zstd::Decoder::new(file)
-            .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to create zstd decoder: {}", e)))?;
+        let decoder = zstd::Decoder::new(file).map_err(|e| {
+            AcrylMicrovmError::Storage(format!("Failed to create zstd decoder: {}", e))
+        })?;
         unpack_file_members(decoder, dest_dir)
     } else {
         unpack_file_members(file, dest_dir)
@@ -229,8 +232,9 @@ fn unpack_file_members<R: std::io::Read>(reader: R, dest_dir: &Path) -> AcrylMic
         .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to read archive: {}", e)))?;
 
     for entry in entries {
-        let mut entry = entry
-            .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to read archive member: {}", e)))?;
+        let mut entry = entry.map_err(|e| {
+            AcrylMicrovmError::Storage(format!("Failed to read archive member: {}", e))
+        })?;
 
         let entry_type = entry.header().entry_type();
         if !carries_file_contents(entry_type) {

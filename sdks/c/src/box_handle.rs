@@ -13,8 +13,8 @@ use std::sync::Arc;
 
 use tokio::runtime::Runtime as TokioRuntime;
 
-use acrylmicrovm::BoxID;
 use acrylmicrovm::AcrylMicrovmError;
+use acrylmicrovm::BoxID;
 use acrylmicrovm::litebox::LiteBox;
 
 use crate::error::{AcrylMicrovmErrorCode, FFIError, null_pointer_error, write_error};
@@ -25,7 +25,7 @@ use crate::event_queue::{
 use crate::options::OptionsHandle;
 use crate::runtime::RuntimeHandle;
 use crate::util::c_str_to_string;
-use crate::{CBoxHandle, CAcrylMicrovmError, CAcrylMicrovmOptions, CAcrylMicrovmRuntime};
+use crate::{CAcrylMicrovmError, CAcrylMicrovmOptions, CAcrylMicrovmRuntime, CBoxHandle};
 
 /// Opaque handle to a running box.
 ///
@@ -337,7 +337,9 @@ unsafe fn attach_box(
                     });
                     Ok(crate::event_queue::OwnedFfiPtr::new(boxed))
                 }
-                Ok(None) => Err(AcrylMicrovmError::NotFound(format!("Box not found: {id_str}"))),
+                Ok(None) => Err(AcrylMicrovmError::NotFound(format!(
+                    "Box not found: {id_str}"
+                ))),
                 Err(e) => Err(e),
             };
             push_event(

@@ -207,8 +207,9 @@ fn components(destination: &Path) -> AcrylMicrovmResult<Vec<CString>> {
 }
 
 fn c_string(value: &OsStr) -> AcrylMicrovmResult<CString> {
-    CString::new(value.as_bytes())
-        .map_err(|_| AcrylMicrovmError::InvalidArgument(format!("path has a NUL byte: {:?}", value)))
+    CString::new(value.as_bytes()).map_err(|_| {
+        AcrylMicrovmError::InvalidArgument(format!("path has a NUL byte: {:?}", value))
+    })
 }
 
 /// Whether the child blocks before it joins the namespace. Only tests block,
@@ -583,9 +584,9 @@ impl Report {
             Some(Stage::JoinNamespace) => Err(AcrylMicrovmError::Storage(format!(
                 "join the mount namespace of {target}: {errno}"
             ))),
-            Some(Stage::CreateMountPoint) => {
-                Err(AcrylMicrovmError::Storage(format!("create {place}: {errno}")))
-            }
+            Some(Stage::CreateMountPoint) => Err(AcrylMicrovmError::Storage(format!(
+                "create {place}: {errno}"
+            ))),
             Some(Stage::OpenMountPoint) | Some(Stage::ListMountPoint) => {
                 Err(AcrylMicrovmError::Storage(format!("read {place}: {errno}")))
             }
@@ -718,7 +719,10 @@ mod tests {
         };
 
         let error = attacher.reap_straggler().unwrap_err();
-        assert!(matches!(error, AcrylMicrovmError::InvalidState(_)), "{error}");
+        assert!(
+            matches!(error, AcrylMicrovmError::InvalidState(_)),
+            "{error}"
+        );
 
         // Once it has exited, the next attach reaps it and goes ahead.
         let pidfd = attacher.straggler.as_ref().unwrap();
@@ -841,7 +845,10 @@ mod tests {
             )
             .unwrap_err();
 
-        assert!(matches!(error, AcrylMicrovmError::InvalidState(_)), "{error}");
+        assert!(
+            matches!(error, AcrylMicrovmError::InvalidState(_)),
+            "{error}"
+        );
         let seen = holder.view(destination.path());
         assert_eq!(
             fs::read(seen.join("image-file")).unwrap(),
@@ -868,7 +875,10 @@ mod tests {
             )
             .unwrap_err();
 
-        assert!(matches!(error, AcrylMicrovmError::InvalidState(_)), "{error}");
+        assert!(
+            matches!(error, AcrylMicrovmError::InvalidState(_)),
+            "{error}"
+        );
         assert!(
             !root.path().join("elsewhere/agents").exists(),
             "nothing was created through the link"

@@ -526,7 +526,9 @@ mod spawn_failure_tests {
     fn spawn_failure_keeps_invalid_argument_class() {
         let response = spawn_failure_response(
             "exec-1",
-            acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument("User 'x' not found".into()),
+            acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
+                "User 'x' not found".into(),
+            ),
         );
         assert_eq!(
             response.error.as_ref().expect("error").reason,

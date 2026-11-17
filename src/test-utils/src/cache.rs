@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use acrylmicrovm::AcrylMicrovmRuntime;
-use acrylmicrovm::runtime::options::{BoxOptions, AcrylMicrovmOptions, RootfsSpec};
+use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, BoxOptions, RootfsSpec};
 
 use tempfile::TempDir;
 
@@ -250,8 +250,10 @@ impl SharedResources {
     fn snapshot_db(&self, warm_home: &Path) {
         let cache_db = self.dir.join("db");
         std::fs::create_dir_all(&cache_db).expect("create target/acrylmicrovm-test/db");
-        if let Err(e) = std::fs::copy(warm_home.join("db/acrylmicrovm.db"), cache_db.join("acrylmicrovm.db"))
-        {
+        if let Err(e) = std::fs::copy(
+            warm_home.join("db/acrylmicrovm.db"),
+            cache_db.join("acrylmicrovm.db"),
+        ) {
             eprintln!("[test] warn: failed to copy cached DB: {e}");
         }
     }

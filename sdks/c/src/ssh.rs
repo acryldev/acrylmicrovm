@@ -203,7 +203,9 @@ enum SshOp {
 /// `config_json` must be null or point to a NUL-terminated string that stays
 /// readable and unchanged for this call. The result owns its data, so nothing
 /// borrowed from `config_json` outlives the call.
-unsafe fn copy_ssh_config(config_json: *const c_char) -> Result<SshConfig, acrylmicrovm::AcrylMicrovmError> {
+unsafe fn copy_ssh_config(
+    config_json: *const c_char,
+) -> Result<SshConfig, acrylmicrovm::AcrylMicrovmError> {
     if config_json.is_null() {
         return Err(null_pointer_error("config_json"));
     }

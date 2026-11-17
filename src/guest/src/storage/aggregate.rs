@@ -265,19 +265,25 @@ mod tests {
         Volume {
             mount_point: target.into(),
             container_id: String::new(),
-            source: Some(volume::Source::Virtiofs(acrylmicrovm_shared::VirtiofsSource {
-                tag: tag.into(),
-                device_tag: "acrylmicrovm".into(),
-                export_key: key.into(),
-                read_only: false,
-            })),
+            source: Some(volume::Source::Virtiofs(
+                acrylmicrovm_shared::VirtiofsSource {
+                    tag: tag.into(),
+                    device_tag: "acrylmicrovm".into(),
+                    export_key: key.into(),
+                    read_only: false,
+                },
+            )),
         }
     }
 
     #[test]
     fn one_root_routes_exports_and_preserves_logical_destinations() {
         let mounts = plan(&[
-            share(acrylmicrovm_shared::constants::mount_tags::SHARED, "shared", ""),
+            share(
+                acrylmicrovm_shared::constants::mount_tags::SHARED,
+                "shared",
+                "",
+            ),
             share("vol0", "vol0", "/data"),
         ])
         .unwrap();
@@ -344,7 +350,11 @@ mod tests {
     #[test]
     fn failure_unwinds_bindings_before_root_and_reports_cleanup_errors() {
         let mounts = plan(&[
-            share(acrylmicrovm_shared::constants::mount_tags::SHARED, "shared", ""),
+            share(
+                acrylmicrovm_shared::constants::mount_tags::SHARED,
+                "shared",
+                "",
+            ),
             share("vol0", "vol0", "/data"),
         ])
         .unwrap();
@@ -362,7 +372,9 @@ mod tests {
             },
             |path| {
                 undone.push(path.to_path_buf());
-                Err(AcrylMicrovmError::Storage("injected cleanup failure".into()))
+                Err(AcrylMicrovmError::Storage(
+                    "injected cleanup failure".into(),
+                ))
             },
         )
         .unwrap_err();
@@ -534,14 +546,21 @@ mod tests {
         };
         let mounts = plan(&[
             legacy,
-            share(acrylmicrovm_shared::constants::mount_tags::SHARED, "shared", ""),
+            share(
+                acrylmicrovm_shared::constants::mount_tags::SHARED,
+                "shared",
+                "",
+            ),
         ])
         .unwrap();
         assert!(matches!(mounts[0], Mount::Root { .. }));
         assert!(matches!(mounts[1], Mount::Bind { .. }));
         assert!(matches!(mounts[2], Mount::Legacy { .. }));
         let owned = execute(&mounts, |_| Ok(()), |_| Ok(())).unwrap();
-        assert_eq!(owned.last().unwrap(), Path::new("/run/acrylmicrovm/shared/disk"));
+        assert_eq!(
+            owned.last().unwrap(),
+            Path::new("/run/acrylmicrovm/shared/disk")
+        );
         let mut failing = mounts;
         failing.push(Mount::Legacy {
             index: 9,
@@ -595,7 +614,11 @@ mod tests {
 
     #[test]
     fn legacy_mounts_keep_their_original_dispatch() {
-        let mut vol = share(acrylmicrovm_shared::constants::mount_tags::SHARED, "shared", "");
+        let mut vol = share(
+            acrylmicrovm_shared::constants::mount_tags::SHARED,
+            "shared",
+            "",
+        );
         if let Some(volume::Source::Virtiofs(fs)) = &mut vol.source {
             fs.device_tag.clear();
             fs.export_key.clear();

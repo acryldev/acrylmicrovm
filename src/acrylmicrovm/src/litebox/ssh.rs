@@ -3,7 +3,9 @@
 
 use std::{fmt, sync::Arc, time::Duration};
 
-use acrylmicrovm_shared::{self as proto, AcrylMicrovmError, AcrylMicrovmResult, constants::ssh::DRAIN_TIMEOUT};
+use acrylmicrovm_shared::{
+    self as proto, AcrylMicrovmError, AcrylMicrovmResult, constants::ssh::DRAIN_TIMEOUT,
+};
 use serde::{Deserialize, Serialize};
 
 use super::box_impl::BoxImpl;
@@ -281,9 +283,13 @@ fn config_to_proto(config: SshConfig) -> proto::SshConfig {
 }
 
 /// Reject a missing status instead of treating an incomplete reply as disabled SSH.
-fn status_from_proto(name: &str, status: Option<proto::SshStatus>) -> AcrylMicrovmResult<SshStatus> {
-    let status = status
-        .ok_or_else(|| AcrylMicrovmError::Internal(format!("SSH {name}: response missing status")))?;
+fn status_from_proto(
+    name: &str,
+    status: Option<proto::SshStatus>,
+) -> AcrylMicrovmResult<SshStatus> {
+    let status = status.ok_or_else(|| {
+        AcrylMicrovmError::Internal(format!("SSH {name}: response missing status"))
+    })?;
     Ok(SshStatus {
         enabled: status.enabled,
         generation: status.generation,

@@ -1,7 +1,7 @@
 // Modified by ACRYL, 2026
 use std::sync::Arc;
 
-use acrylmicrovm::{BoxArchive, BoxOptions, AcrylMicrovmOptions, AcrylMicrovmRuntime};
+use acrylmicrovm::{AcrylMicrovmOptions, AcrylMicrovmRuntime, BoxArchive, BoxOptions};
 use pyo3::prelude::*;
 
 use crate::box_handle::PyBox;
@@ -9,7 +9,7 @@ use crate::domains::PyDomainHandle;
 use crate::images::PyImageHandle;
 use crate::info::PyBoxInfo;
 use crate::metrics::PyRuntimeMetrics;
-use crate::options::{PyBoxOptions, PyAcrylMicrovmRestOptions, PyOptions};
+use crate::options::{PyAcrylMicrovmRestOptions, PyBoxOptions, PyOptions};
 use crate::util::map_err;
 use crate::volumes::PyVolumeHandle;
 

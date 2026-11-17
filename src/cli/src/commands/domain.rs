@@ -9,8 +9,8 @@
 
 use std::io::Write;
 
-use anyhow::{Context, Result};
 use acrylmicrovm::{Domain, DomainTarget};
+use anyhow::{Context, Result};
 use clap::{Args, Subcommand, ValueEnum};
 use serde::Serialize;
 use tabled::Tabled;

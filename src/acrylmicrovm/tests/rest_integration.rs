@@ -14,12 +14,14 @@
 #![cfg(feature = "rest")]
 
 use acrylmicrovm::{
-    BoxCommand, BoxOptions, AcrylMicrovmRestOptions, AcrylMicrovmRuntime, CloneOptions, ExportOptions,
+    AcrylMicrovmRestOptions, AcrylMicrovmRuntime, BoxCommand, BoxOptions, CloneOptions,
+    ExportOptions,
 };
 
 /// Create a REST-backed runtime pointing at the reference server.
 fn rest_runtime() -> AcrylMicrovmRuntime {
-    let url = std::env::var("ACRYLMICROVM_REST_URL").unwrap_or_else(|_| "http://localhost:8080".into());
+    let url =
+        std::env::var("ACRYLMICROVM_REST_URL").unwrap_or_else(|_| "http://localhost:8080".into());
     let api_key = std::env::var("ACRYLMICROVM_API_KEY").unwrap_or_else(|_| "test-key".into());
     AcrylMicrovmRuntime::rest(AcrylMicrovmRestOptions::new(&url).with_api_key(api_key))
         .expect("failed to create REST runtime")

@@ -24,9 +24,9 @@ use crate::vmm::{Entrypoint, InstanceSpec, PreparedKernel, VmmKind};
 use crate::volumes::{
     ContainerMount, ContainerVolumeManager, GuestVolumeManager, stage_single_file,
 };
-use async_trait::async_trait;
 use acrylmicrovm_shared::BoxTransport;
 use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
+use async_trait::async_trait;
 use std::path::PathBuf;
 
 pub struct VmmSpawnTask;

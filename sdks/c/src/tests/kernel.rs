@@ -17,9 +17,15 @@ fn kernel_path_setter_validates_and_copies_the_path() {
         assert_eq!((*advanced).options.kernel.as_ref().unwrap().path, path);
         for (invalid, expected) in [
             (ptr::null(), AcrylMicrovmErrorCode::InvalidArgument),
-            (c"/kernel-\xff".as_ptr(), AcrylMicrovmErrorCode::InvalidArgument),
+            (
+                c"/kernel-\xff".as_ptr(),
+                AcrylMicrovmErrorCode::InvalidArgument,
+            ),
             (c"relative/kernel".as_ptr(), AcrylMicrovmErrorCode::Config),
-            (c"/missing/kernel.bin".as_ptr(), AcrylMicrovmErrorCode::Config),
+            (
+                c"/missing/kernel.bin".as_ptr(),
+                AcrylMicrovmErrorCode::Config,
+            ),
         ] {
             assert_eq!(
                 acrylmicrovm_advanced_options_set_kernel_path(advanced, invalid, &mut error),
@@ -66,7 +72,9 @@ fn kernel_runtime_constructor_applies_the_feature_gate() {
             assert!(!handle.is_null());
             let mut options = acrylmicrovm::BoxOptions::default();
             options.advanced.kernel = Some(
-                acrylmicrovm::experimental::custom_kernel::KernelOptions::new("/missing/kernel.bin"),
+                acrylmicrovm::experimental::custom_kernel::KernelOptions::new(
+                    "/missing/kernel.bin",
+                ),
             );
             let error = (*handle)
                 .tokio_rt

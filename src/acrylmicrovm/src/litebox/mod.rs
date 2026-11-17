@@ -207,7 +207,9 @@ impl LiteBox {
         let dst = container_dst.to_string();
         Box::pin(async move {
             let backend = backend.map_err(|_| {
-                AcrylMicrovmError::Unsupported("streaming copy-in requires the local backend".into())
+                AcrylMicrovmError::Unsupported(
+                    "streaming copy-in requires the local backend".into(),
+                )
             })?;
             backend.copy_in_stream(stream, dst, source, opts).await
         })
@@ -231,7 +233,9 @@ impl LiteBox {
         let src = container_src.to_string();
         Box::pin(async move {
             let backend = backend.map_err(|_| {
-                AcrylMicrovmError::Unsupported("streaming copy-out requires the local backend".into())
+                AcrylMicrovmError::Unsupported(
+                    "streaming copy-out requires the local backend".into(),
+                )
             })?;
             backend.copy_out_stream(src, opts).await
         })
@@ -284,7 +288,11 @@ impl LiteBox {
     }
 
     /// Export this box as a portable `.acrylmicrovm` archive.
-    pub async fn export(&self, options: ExportOptions, dest: &Path) -> AcrylMicrovmResult<BoxArchive> {
+    pub async fn export(
+        &self,
+        options: ExportOptions,
+        dest: &Path,
+    ) -> AcrylMicrovmResult<BoxArchive> {
         self.box_backend.export_box(options, dest).await
     }
 }

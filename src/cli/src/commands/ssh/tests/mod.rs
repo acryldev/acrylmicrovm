@@ -6,11 +6,11 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
+use acrylmicrovm::SshStatus;
 use axum::body::Bytes;
 use axum::extract::{OriginalUri, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{IntoResponse, Response};
-use acrylmicrovm::SshStatus;
 use clap::error::ErrorKind;
 
 use super::{SshArgs, tunnel_target};

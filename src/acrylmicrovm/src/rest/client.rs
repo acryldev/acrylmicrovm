@@ -131,7 +131,9 @@ impl ApiClient {
             .timeout(std::time::Duration::from_secs(300))
             .connect_timeout(std::time::Duration::from_secs(300))
             .build()
-            .map_err(|e| AcrylMicrovmError::Config(format!("failed to create HTTP client: {}", e)))?;
+            .map_err(|e| {
+                AcrylMicrovmError::Config(format!("failed to create HTTP client: {}", e))
+            })?;
         let tunnel_connector = hyper_rustls::HttpsConnectorBuilder::new()
             .with_native_roots()
             .map_err(|e| AcrylMicrovmError::Config(format!("failed to load TLS roots: {e}")))?
@@ -220,7 +222,10 @@ impl ApiClient {
     /// useless when the schema drifts between client and server. The body
     /// is bounded to 4 KiB so a runaway HTML error page can't blow up
     /// terminal output.
-    async fn send_json<T: DeserializeOwned>(&self, builder: RequestBuilder) -> AcrylMicrovmResult<T> {
+    async fn send_json<T: DeserializeOwned>(
+        &self,
+        builder: RequestBuilder,
+    ) -> AcrylMicrovmResult<T> {
         let builder = self.authorize(builder).await?;
         let resp = builder.send().await.map_err(transport_error)?;
 
@@ -340,7 +345,11 @@ impl ApiClient {
         })
     }
 
-    pub async fn post_no_content<B: Serialize>(&self, path: &str, body: &B) -> AcrylMicrovmResult<()> {
+    pub async fn post_no_content<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> AcrylMicrovmResult<()> {
         let builder = self.http.post(self.url(path)).json(body);
         self.send_no_content(builder).await
     }
@@ -354,7 +363,11 @@ impl ApiClient {
         self.send_json(builder).await
     }
 
-    pub async fn put_no_content<B: Serialize>(&self, path: &str, body: &B) -> AcrylMicrovmResult<()> {
+    pub async fn put_no_content<B: Serialize>(
+        &self,
+        path: &str,
+        body: &B,
+    ) -> AcrylMicrovmResult<()> {
         self.send_no_content(self.http.put(self.url(path)).json(body))
             .await
     }
@@ -398,7 +411,11 @@ impl ApiClient {
         self.send_json(builder).await
     }
 
-    pub async fn delete_with_query(&self, path: &str, query: &[(&str, &str)]) -> AcrylMicrovmResult<()> {
+    pub async fn delete_with_query(
+        &self,
+        path: &str,
+        query: &[(&str, &str)],
+    ) -> AcrylMicrovmResult<()> {
         let builder = self.http.delete(self.url(path)).query(query);
         self.send_no_content(builder).await
     }
@@ -457,8 +474,9 @@ impl ApiClient {
         request.headers_mut().extend(client_identity_headers());
 
         if let Some(bearer) = self.current_bearer().await? {
-            let value = HeaderValue::from_str(&format!("Bearer {}", bearer))
-                .map_err(|e| AcrylMicrovmError::Internal(format!("WS auth header invalid: {}", e)))?;
+            let value = HeaderValue::from_str(&format!("Bearer {}", bearer)).map_err(|e| {
+                AcrylMicrovmError::Internal(format!("WS auth header invalid: {}", e))
+            })?;
             request.headers_mut().insert("Authorization", value);
         }
 
@@ -510,9 +528,9 @@ impl ApiClient {
         if let Some(token) = self.current_bearer().await? {
             request = request.header("X-AcrylMicrovm-Authorization", format!("Bearer {token}"));
         }
-        let request = request
-            .body(Empty::<bytes::Bytes>::new())
-            .map_err(|e| AcrylMicrovmError::Internal(format!("CONNECT request build failed: {e}")))?;
+        let request = request.body(Empty::<bytes::Bytes>::new()).map_err(|e| {
+            AcrylMicrovmError::Internal(format!("CONNECT request build failed: {e}"))
+        })?;
         let response = tokio::time::timeout(TUNNEL_SETUP_TIMEOUT, sender.send_request(request))
             .await
             .map_err(|_| AcrylMicrovmError::Network("CONNECT response timed out".into()))?
@@ -794,7 +812,9 @@ fn map_ws_error(err: tokio_tungstenite::tungstenite::Error) -> AcrylMicrovmError
             } else {
                 body
             }),
-            401 | 403 => AcrylMicrovmError::Config(format!("WS auth rejected ({}): {}", status, body)),
+            401 | 403 => {
+                AcrylMicrovmError::Config(format!("WS auth rejected ({}): {}", status, body))
+            }
             // No WS-specific meaning — 5xx included: read it like any other
             // REST reply, envelope, flat body, or bare status alike. A
             // refusal the server names (`invalid_argument` on a 400,
@@ -826,8 +846,8 @@ mod tests {
     use super::*;
     use crate::rest::credential::{AccessToken, Credential};
     use crate::rest::error::map_http_body;
-    use async_trait::async_trait;
     use acrylmicrovm_shared::errors::AcrylMicrovmError;
+    use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -871,7 +891,10 @@ mod tests {
             .unwrap();
         let requests = server.await.unwrap();
         for request in &requests {
-            assert!(request.contains("x-acrylmicrovm-source: sdk\r\n"), "{request}");
+            assert!(
+                request.contains("x-acrylmicrovm-source: sdk\r\n"),
+                "{request}"
+            );
             assert!(
                 request.contains(&format!(
                     "x-acrylmicrovm-sdk-version: {}\r\n",
@@ -908,7 +931,8 @@ mod tests {
                 .unwrap()
         });
         let client = ApiClient::new(
-            &AcrylMicrovmRestOptions::new(format!("http://{address}")).with_api_key("test-only-key"),
+            &AcrylMicrovmRestOptions::new(format!("http://{address}"))
+                .with_api_key("test-only-key"),
         )
         .unwrap();
         let _stream = client.connect_ws("/boxes/box-1/attach").await.unwrap();
@@ -989,7 +1013,8 @@ mod tests {
 
     #[test]
     fn empty_post_request_explicitly_declares_zero_content_length() {
-        let client = unauthenticated_client(AcrylMicrovmRestOptions::new("https://api.example.com"));
+        let client =
+            unauthenticated_client(AcrylMicrovmRestOptions::new("https://api.example.com"));
         let request = client
             .empty_post_request("/boxes/box1/start")
             .build()
@@ -1018,8 +1043,10 @@ mod tests {
             finish_body_rx,
         ));
 
-        let client =
-            ApiClient::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let client = ApiClient::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let request = client
             .authorized_request(Method::GET, "/boxes/box1/files")
             .await
@@ -1052,8 +1079,10 @@ mod tests {
             finish_body_rx,
         ));
 
-        let client =
-            ApiClient::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let client = ApiClient::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let control_request =
             tokio::spawn(async move { client.get::<serde_json::Value>("/slow").await });
 
@@ -1098,8 +1127,10 @@ mod tests {
             socket.write_all(&payload).await.unwrap();
         });
 
-        let client =
-            ApiClient::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let client = ApiClient::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let mut stream = client
             .connect_box_network_tunnel(&format!("http://127.0.0.1:{port}"))
             .await
@@ -1140,9 +1171,10 @@ mod tests {
                 .unwrap();
             String::from_utf8(headers).unwrap()
         });
-        let client =
-            ApiClient::new(&AcrylMicrovmRestOptions::new(uri.clone()).with_api_key("tunnel-test-key"))
-                .unwrap();
+        let client = ApiClient::new(
+            &AcrylMicrovmRestOptions::new(uri.clone()).with_api_key("tunnel-test-key"),
+        )
+        .unwrap();
         let _stream = client.connect_box_network_tunnel(&uri).await.unwrap();
         let headers = server.await.unwrap().to_ascii_lowercase();
         assert!(
@@ -1193,9 +1225,10 @@ mod tests {
                 socket.write_all(reply.as_bytes()).await.unwrap();
             });
 
-            let client =
-                ApiClient::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")))
-                    .unwrap();
+            let client = ApiClient::new(&AcrylMicrovmRestOptions::new(format!(
+                "http://127.0.0.1:{port}"
+            )))
+            .unwrap();
             let err = client
                 .connect_box_network_tunnel(&format!("http://127.0.0.1:{port}"))
                 .await
@@ -1242,8 +1275,10 @@ mod tests {
             let _ = socket.write_all(reply.as_bytes()).await;
         });
 
-        let client =
-            ApiClient::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let client = ApiClient::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let err = client
             .connect_box_network_tunnel(&format!("http://127.0.0.1:{port}"))
             .await
@@ -1380,8 +1415,10 @@ mod tests {
                 .unwrap();
         });
 
-        let client =
-            ApiClient::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let client = ApiClient::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         let descriptor = client.prepare_box_tunnel("box1", 8080, true).await.unwrap();
 
         assert_eq!(descriptor.uri, "http://127.0.0.1:9/tunnel");
@@ -1492,8 +1529,10 @@ mod tests {
             }
         });
 
-        let client =
-            ApiClient::new(&AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+        let client = ApiClient::new(&AcrylMicrovmRestOptions::new(format!(
+            "http://127.0.0.1:{port}"
+        )))
+        .unwrap();
         client.require_linux_capabilities_enabled().await.unwrap();
         let second = client.require_linux_capabilities_enabled().await;
         server.abort();
@@ -1588,8 +1627,8 @@ mod tests {
         // Multi-segment prefix per spec — internal `/` characters are
         // preserved (allowReserved: true on the path parameter). Unlocks
         // region+team / catalog routing for vendors that need it.
-        let opts =
-            AcrylMicrovmRestOptions::new("https://api.example.com").with_path_prefix("us-east/team-42");
+        let opts = AcrylMicrovmRestOptions::new("https://api.example.com")
+            .with_path_prefix("us-east/team-42");
         let client = unauthenticated_client(opts);
         assert_eq!(
             client.url("/boxes"),

@@ -2,7 +2,7 @@
 use crate::cli::{GlobalFlags, ProcessFlags};
 use crate::terminal::StreamManager;
 use crate::util::to_shell_exit_code;
-use acrylmicrovm::{BoxCommand, AcrylMicrovmRuntime, LiteBox};
+use acrylmicrovm::{AcrylMicrovmRuntime, BoxCommand, LiteBox};
 use clap::Args;
 
 #[derive(Args, Debug)]

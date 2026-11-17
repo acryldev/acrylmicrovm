@@ -6,7 +6,7 @@
 
 use crate::litebox::{BoxCommand, ExecResult};
 use acrylmicrovm_shared::{
-    AttachRequest, AcrylMicrovmError, AcrylMicrovmResult, ExecOutput, ExecRequest, ExecStdin,
+    AcrylMicrovmError, AcrylMicrovmResult, AttachRequest, ExecOutput, ExecRequest, ExecStdin,
     ExecutionClient, KillRequest, WaitRequest, WaitResponse, exec_output,
 };
 use tokio::sync::mpsc;
@@ -185,7 +185,9 @@ impl ExecutionInterface {
         };
         let stream = response
             .map_err(|status| match status.code() {
-                tonic::Code::AlreadyExists => AcrylMicrovmError::AlreadyExists(status.message().into()),
+                tonic::Code::AlreadyExists => {
+                    AcrylMicrovmError::AlreadyExists(status.message().into())
+                }
                 tonic::Code::NotFound => AcrylMicrovmError::SessionReaped(status.message().into()),
                 _ => status.into(),
             })?

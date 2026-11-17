@@ -122,7 +122,12 @@ async fn test_export_import_roundtrip() {
         .expect("Failed to export box");
 
     assert!(archive.path().exists());
-    assert!(archive.path().extension().is_some_and(|e| e == "acrylmicrovm"));
+    assert!(
+        archive
+            .path()
+            .extension()
+            .is_some_and(|e| e == "acrylmicrovm")
+    );
 
     let imported = runtime
         .import_box(archive, Some("imported-box".to_string()))
@@ -260,7 +265,12 @@ async fn test_export_running_box() {
 
     // Archive is valid
     assert!(archive.path().exists());
-    assert!(archive.path().extension().is_some_and(|e| e == "acrylmicrovm"));
+    assert!(
+        archive
+            .path()
+            .extension()
+            .is_some_and(|e| e == "acrylmicrovm")
+    );
 
     // Source still works after export
     let cmd = BoxCommand::new("echo").args(["after-export"]);

@@ -936,8 +936,14 @@ fn carried_linux_statfs_allocation_seek_copy_and_xattrs_use_real_files() {
         fs::metadata(directory.0.join("target")).unwrap().len(),
         4096
     );
-    fs.setxattr(ctx(), source.inode, c"user.acrylmicrovm", b"value\0bytes", 0)
-        .unwrap();
+    fs.setxattr(
+        ctx(),
+        source.inode,
+        c"user.acrylmicrovm",
+        b"value\0bytes",
+        0,
+    )
+    .unwrap();
     match fs
         .getxattr(ctx(), source.inode, c"user.acrylmicrovm", 0)
         .unwrap()

@@ -288,9 +288,11 @@ impl SecurityOptions {
         match name.trim().to_ascii_lowercase().as_str() {
             "enable" | "enabled" | "on" => Ok(Self::enabled()),
             "disable" | "disabled" | "off" => Ok(Self::disabled()),
-            other => Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                format!("unknown security setting {other:?}; expected one of enable|disable"),
-            )),
+            other => Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(format!(
+                    "unknown security setting {other:?}; expected one of enable|disable"
+                )),
+            ),
         }
     }
 
@@ -618,12 +620,12 @@ impl ContainerCapabilities {
             return Ok(());
         }
 
-        Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-            format!(
+        Err(
+            acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(format!(
                 "box '{box_name}' already exists with a different capability policy; reuse it \
                  with the same advanced.capabilities, or create a box under a new name"
-            ),
-        ))
+            )),
+        )
     }
 }
 
@@ -650,18 +652,22 @@ fn validate_capability_names(
         }
 
         if name.is_empty() {
-            return Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                format!("empty Linux capability in {option}"),
-            ));
+            return Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(format!(
+                    "empty Linux capability in {option}"
+                )),
+            );
         }
         let mut bytes = name.bytes();
         let starts_with_letter = bytes.next().is_some_and(|byte| byte.is_ascii_uppercase());
         let has_valid_tail =
             bytes.all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_');
         if !starts_with_letter || !has_valid_tail {
-            return Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                format!("malformed Linux capability in {option}: {capability}"),
-            ));
+            return Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(format!(
+                    "malformed Linux capability in {option}: {capability}"
+                )),
+            );
         }
     }
 
@@ -710,13 +716,13 @@ impl NetworkRateLimit {
             if let Some(kbps) = kbps
                 && kbps > Self::MAX_KBPS
             {
-                return Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                    format!(
+                return Err(
+                    acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(format!(
                         "advanced.network_rate_limit.{field} must be at most {} kbps \
                          (got {kbps})",
                         Self::MAX_KBPS
-                    ),
-                ));
+                    )),
+                );
             }
         }
         Ok(())
@@ -901,9 +907,12 @@ impl AdvancedBoxOptions {
         capabilities: Option<ContainerCapabilities>,
     ) -> acrylmicrovm_shared::errors::AcrylMicrovmResult<()> {
         if self.resolved.load(std::sync::atomic::Ordering::Relaxed) {
-            return Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                "capabilities cannot be changed after these options have been resolved".to_string(),
-            ));
+            return Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
+                    "capabilities cannot be changed after these options have been resolved"
+                        .to_string(),
+                ),
+            );
         }
         self.capabilities = capabilities;
         Ok(())
@@ -931,11 +940,13 @@ impl AdvancedBoxOptions {
         match &self.capabilities {
             None => Ok(()),
             Some(caps) if caps.is_privileged_capability_shape() => Ok(()),
-            Some(_) => Err(acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
-                "privileged mode cannot be combined with an explicit capabilities override, \
+            Some(_) => Err(
+                acrylmicrovm_shared::errors::AcrylMicrovmError::InvalidArgument(
+                    "privileged mode cannot be combined with an explicit capabilities override, \
                  including an explicitly empty one — leave capabilities unspecified instead"
-                    .to_string(),
-            )),
+                        .to_string(),
+                ),
+            ),
         }
     }
 

@@ -1,6 +1,6 @@
 // Modified by ACRYL, 2026
-use anyhow::Result;
 use acrylmicrovm::Execution;
+use anyhow::Result;
 use futures::StreamExt;
 use nix::sys::signal::Signal;
 use nix::sys::termios::{

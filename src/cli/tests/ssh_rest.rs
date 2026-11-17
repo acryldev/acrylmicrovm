@@ -18,8 +18,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use acrylmicrovm::{
-    BoxOptions, BoxStatus, AcrylMicrovmError, AcrylMicrovmRestOptions, AcrylMicrovmRuntime, RootfsSpec,
-    SshAccount, SshConfig, SshStatus,
+    AcrylMicrovmError, AcrylMicrovmRestOptions, AcrylMicrovmRuntime, BoxOptions, BoxStatus,
+    RootfsSpec, SshAccount, SshConfig, SshStatus,
 };
 use common::serve::ServeChild;
 
@@ -94,7 +94,8 @@ async fn ssh_rest_journey() {
     let keys = tempfile::tempdir().expect("key directory");
     let config = local_key_config(keys.path());
 
-    let runtime = AcrylMicrovmRuntime::rest(AcrylMicrovmRestOptions::new(serve.url())).expect("rest runtime");
+    let runtime =
+        AcrylMicrovmRuntime::rest(AcrylMicrovmRestOptions::new(serve.url())).expect("rest runtime");
     let sandbox = runtime
         .create(
             BoxOptions {
@@ -146,7 +147,10 @@ async fn ssh_rest_journey() {
         .configure(invalid)
         .await
         .expect_err("invalid configuration must be rejected");
-    assert!(matches!(error, AcrylMicrovmError::InvalidArgument(_)), "{error}");
+    assert!(
+        matches!(error, AcrylMicrovmError::InvalidArgument(_)),
+        "{error}"
+    );
     let intact = sandbox
         .ssh()
         .status()
@@ -201,9 +205,10 @@ async fn ssh_rest_auth_errors_and_startup_gates() {
         auto_delete: Some(0),
         ..Default::default()
     };
-    let runtime =
-        AcrylMicrovmRuntime::rest(AcrylMicrovmRestOptions::new(serve.url()).with_api_key("expected-key"))
-            .expect("rest runtime");
+    let runtime = AcrylMicrovmRuntime::rest(
+        AcrylMicrovmRestOptions::new(serve.url()).with_api_key("expected-key"),
+    )
+    .expect("rest runtime");
 
     // The route is behind the key like every other box route.
     let http = reqwest::Client::new();
@@ -282,7 +287,10 @@ async fn ssh_rest_auth_errors_and_startup_gates() {
         .configure(config.clone())
         .await
         .expect_err("explicit main command must refuse implicit start");
-    assert!(matches!(error, AcrylMicrovmError::InvalidState(_)), "{error}");
+    assert!(
+        matches!(error, AcrylMicrovmError::InvalidState(_)),
+        "{error}"
+    );
     let info = explicit.info().await.unwrap();
     assert_eq!(info.status, BoxStatus::Configured);
     assert!(

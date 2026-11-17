@@ -225,9 +225,10 @@ mod tests {
         tokio_rt: &tokio::runtime::Runtime,
         url: &str,
     ) -> (acrylmicrovm::AcrylMicrovmRuntime, JsNetworkHandle) {
-        let runtime =
-            acrylmicrovm::AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(url.to_string()))
-                .unwrap();
+        let runtime = acrylmicrovm::AcrylMicrovmRuntime::rest(
+            acrylmicrovm::AcrylMicrovmRestOptions::new(url.to_string()),
+        )
+        .unwrap();
         let litebox = tokio_rt.block_on(runtime.get("box1")).unwrap().unwrap();
         let network = JsNetworkHandle {
             handle: Arc::new(litebox),

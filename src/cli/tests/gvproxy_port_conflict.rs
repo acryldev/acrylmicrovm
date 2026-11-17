@@ -84,7 +84,9 @@ fn gvproxy_port_conflict_fails_fast_with_named_error() {
     // second iteration.
     let mut failures: Vec<&'static str> = Vec::new();
     if output.status.success() {
-        failures.push("L1 [acrylmicrovm rc != 0]: acrylmicrovm returned success despite host-port conflict");
+        failures.push(
+            "L1 [acrylmicrovm rc != 0]: acrylmicrovm returned success despite host-port conflict",
+        );
     }
     if !stderr.contains("/services/forwarder/expose") {
         failures
@@ -170,8 +172,9 @@ fn gvproxy_privileged_port_fails_fast_with_named_error() {
 
     let mut failures: Vec<&'static str> = Vec::new();
     if output.status.success() {
-        failures
-            .push("L1 [acrylmicrovm rc != 0]: acrylmicrovm returned success despite privileged-port bind");
+        failures.push(
+            "L1 [acrylmicrovm rc != 0]: acrylmicrovm returned success despite privileged-port bind",
+        );
     }
     if !stderr.contains("/services/forwarder/expose") {
         failures

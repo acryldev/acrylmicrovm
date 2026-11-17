@@ -446,8 +446,10 @@ async fn serve_over(
     api_key: Option<&str>,
 ) -> (String, Arc<AppState>, tokio::task::JoinHandle<()>) {
     let state = Arc::new(AppState {
-        runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone()))
-            .expect("rest runtime"),
+        runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+            upstream.url.clone(),
+        ))
+        .expect("rest runtime"),
         boxes: RwLock::new(HashMap::new()),
         executions: RwLock::new(HashMap::new()),
         api_key: api_key.map(str::to_string),

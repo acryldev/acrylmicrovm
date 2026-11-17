@@ -2,7 +2,7 @@
 use crate::container::Container;
 use crate::layout::GuestLayout;
 use crate::service::exec::registry::ExecutionRegistry;
-use acrylmicrovm_shared::{BoxTransport, AcrylMicrovmResult};
+use acrylmicrovm_shared::{AcrylMicrovmResult, BoxTransport};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -88,7 +88,11 @@ impl GuestServer {
     ///
     /// If `notify_uri` is provided, connects to that URI after the server
     /// is ready to serve, signaling readiness to the host.
-    pub async fn run(self, listen_uri: String, notify_uri: Option<String>) -> AcrylMicrovmResult<()> {
+    pub async fn run(
+        self,
+        listen_uri: String,
+        notify_uri: Option<String>,
+    ) -> AcrylMicrovmResult<()> {
         info!("Starting tonic gRPC server");
 
         // Parse the listen URI to determine transport type
@@ -106,10 +110,14 @@ impl GuestServer {
         server.ssh_manager.attach_guest(&server);
 
         let server_builder = Server::builder()
-            .add_service(acrylmicrovm_shared::ContainerServer::from_arc(server.clone()))
+            .add_service(acrylmicrovm_shared::ContainerServer::from_arc(
+                server.clone(),
+            ))
             .add_service(acrylmicrovm_shared::GuestServer::from_arc(server.clone()))
             .add_service(acrylmicrovm_shared::SshServer::from_arc(server.clone()))
-            .add_service(acrylmicrovm_shared::ExecutionServer::from_arc(server.clone()))
+            .add_service(acrylmicrovm_shared::ExecutionServer::from_arc(
+                server.clone(),
+            ))
             .add_service(acrylmicrovm_shared::FilesServer::from_arc(server.clone()));
 
         match transport {

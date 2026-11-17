@@ -46,7 +46,12 @@ async fn workload_keeps_its_endpoint_and_credentials_after_another_process_switc
         ),
     )
     .unwrap();
-    let arguments = ["acrylmicrovm", "--home", home.path().to_str().unwrap(), "list"];
+    let arguments = [
+        "acrylmicrovm",
+        "--home",
+        home.path().to_str().unwrap(),
+        "list",
+    ];
     let mut cli = crate::cli::try_parse_from(arguments).unwrap();
     initialize(&mut cli).unwrap();
     assert!(cli.global.targets_rest().unwrap());

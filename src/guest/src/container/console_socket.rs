@@ -98,7 +98,9 @@ impl ConsoleSocket {
             Some(&mut cmsg_space),
             MsgFlags::empty(),
         )
-        .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to receive PTY master FD: {}", e)))?;
+        .map_err(|e| {
+            AcrylMicrovmError::Internal(format!("Failed to receive PTY master FD: {}", e))
+        })?;
 
         // Extract FD from control messages
         for cmsg in msg.cmsgs().into_iter().flatten() {

@@ -13,8 +13,9 @@ pub(super) struct Backend {
 
 impl Backend {
     pub(super) fn open(root: &Path) -> AcrylMicrovmResult<Self> {
-        let inner = pathrs::Root::open(root)
-            .map_err(|e| AcrylMicrovmError::Storage(format!("pathrs open {}: {}", root.display(), e)))?;
+        let inner = pathrs::Root::open(root).map_err(|e| {
+            AcrylMicrovmError::Storage(format!("pathrs open {}: {}", root.display(), e))
+        })?;
         Ok(Self {
             root: inner,
             root_path: root.to_path_buf(),

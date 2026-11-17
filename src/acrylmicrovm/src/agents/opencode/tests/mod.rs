@@ -35,8 +35,9 @@ impl BoxNetworkBackend for ScriptedServer {
             let response = response.lock().unwrap().take();
             let requests = Arc::clone(&requests);
             async move {
-                let response = response
-                    .ok_or_else(|| AcrylMicrovmError::Network("no scripted response left".into()))?;
+                let response = response.ok_or_else(|| {
+                    AcrylMicrovmError::Network("no scripted response left".into())
+                })?;
                 let (client, mut server) = UnixStream::pair()?;
                 tokio::spawn(async move {
                     let request = read_request(&mut server).await;

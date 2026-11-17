@@ -5,8 +5,8 @@
 
 use super::{InitCtx, log_task_error, task_start};
 use crate::pipeline::PipelineTask;
-use async_trait::async_trait;
 use acrylmicrovm_shared::errors::AcrylMicrovmResult;
+use async_trait::async_trait;
 
 pub struct FilesystemTask;
 

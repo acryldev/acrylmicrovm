@@ -57,7 +57,10 @@ impl PipelineExecutor {
     ///
     /// Generic over:
     /// - `Ctx`: Shared pipeline context (use interior mutability for writes)
-    pub async fn execute<Ctx>(pipeline: Pipeline<Ctx>, ctx: Ctx) -> AcrylMicrovmResult<PipelineMetrics>
+    pub async fn execute<Ctx>(
+        pipeline: Pipeline<Ctx>,
+        ctx: Ctx,
+    ) -> AcrylMicrovmResult<PipelineMetrics>
     where
         Ctx: Clone,
     {
@@ -76,10 +79,12 @@ impl PipelineExecutor {
                             let name = task.name().to_string();
                             let task_start = Instant::now();
                             task.run(ctx).await?;
-                            Ok::<TaskMetrics, acrylmicrovm_shared::errors::AcrylMicrovmError>(TaskMetrics {
-                                name,
-                                duration_ms: task_start.elapsed().as_millis(),
-                            })
+                            Ok::<TaskMetrics, acrylmicrovm_shared::errors::AcrylMicrovmError>(
+                                TaskMetrics {
+                                    name,
+                                    duration_ms: task_start.elapsed().as_millis(),
+                                },
+                            )
                         }
                     });
                     // Every started task may own side effects that require an
@@ -125,8 +130,8 @@ impl PipelineExecutor {
 mod tests {
     use super::*;
     use crate::pipeline::PipelineTask;
-    use async_trait::async_trait;
     use acrylmicrovm_shared::errors::AcrylMicrovmError;
+    use async_trait::async_trait;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::sync::Barrier;
@@ -146,7 +151,9 @@ mod tests {
             ctx: ParallelTestContext,
         ) -> acrylmicrovm_shared::errors::AcrylMicrovmResult<()> {
             ctx.started.wait().await;
-            Err(AcrylMicrovmError::Internal("parallel task failed".to_string()))
+            Err(AcrylMicrovmError::Internal(
+                "parallel task failed".to_string(),
+            ))
         }
 
         fn name(&self) -> &str {

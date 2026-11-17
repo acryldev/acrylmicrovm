@@ -15,7 +15,7 @@
 
 use acrylmicrovm::runtime::advanced_options::{AdvancedBoxOptions, SecurityOptions};
 use acrylmicrovm::runtime::options::{BoxOptions, NetworkSpec, RootfsSpec};
-use acrylmicrovm::{BoxCommand, AcrylMicrovmRuntime};
+use acrylmicrovm::{AcrylMicrovmRuntime, BoxCommand};
 use futures::StreamExt;
 
 fn options(network: NetworkSpec, network_enabled: bool, jailer_enabled: bool) -> BoxOptions {

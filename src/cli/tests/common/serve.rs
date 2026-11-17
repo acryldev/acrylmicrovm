@@ -133,7 +133,10 @@ impl ServeChild {
             }
             std::thread::sleep(Duration::from_millis(200));
         }
-        panic!("acrylmicrovm serve did not become ready on port {}", self.port);
+        panic!(
+            "acrylmicrovm serve did not become ready on port {}",
+            self.port
+        );
     }
 }
 

@@ -368,7 +368,10 @@ mod tests {
     /// inherit that regardless of per-path restrictions.
     fn home_test_dir(name: &str) -> PathBuf {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-        let dir = PathBuf::from(home).join(".acryl").join("microvm-test").join(name);
+        let dir = PathBuf::from(home)
+            .join(".acryl")
+            .join("microvm-test")
+            .join(name);
         std::fs::create_dir_all(&dir).expect("create home test dir");
         dir
     }
@@ -376,7 +379,10 @@ mod tests {
     /// Clean up a home test directory.
     fn cleanup_home_test_dir(name: &str) {
         let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
-        let dir = PathBuf::from(home).join(".acryl").join("microvm-test").join(name);
+        let dir = PathBuf::from(home)
+            .join(".acryl")
+            .join("microvm-test")
+            .join(name);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

@@ -63,7 +63,9 @@ pub(crate) fn create_container_etc_files(
             .truncate(true)
             .mode(FILE_MODE)
             .open(&path)
-            .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to create {}: {}", name, e)))?;
+            .map_err(|e| {
+                AcrylMicrovmError::Internal(format!("Failed to create {}: {}", name, e))
+            })?;
         std::io::Write::write_all(&mut file, content.as_bytes())
             .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to write {}: {}", name, e)))?;
         Ok(())

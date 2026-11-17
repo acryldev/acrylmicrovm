@@ -3,7 +3,9 @@ use crate::registries::PyRegistryHandle;
 use std::sync::Arc;
 
 use acrylmicrovm::ImageHandle;
-use acrylmicrovm::runtime::types::{ImageAliasEvent, ImageDetail, ImageInfo, ImageUsage, ImageVersion};
+use acrylmicrovm::runtime::types::{
+    ImageAliasEvent, ImageDetail, ImageInfo, ImageUsage, ImageVersion,
+};
 use pyo3::prelude::*;
 
 use crate::util::map_err;

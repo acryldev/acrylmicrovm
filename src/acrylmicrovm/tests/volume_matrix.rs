@@ -4,7 +4,7 @@
 mod common;
 
 use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, VolumeSpec};
-use acrylmicrovm::{BoxCommand, AcrylMicrovmResult};
+use acrylmicrovm::{AcrylMicrovmResult, BoxCommand};
 use futures::StreamExt;
 use tempfile::TempDir;
 

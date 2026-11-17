@@ -547,13 +547,15 @@ impl ContainerService for GuestServer {
                             exit.clone(),
                             process,
                         )
-                        .with_metadata(acrylmicrovm_shared::ExecutionInfo {
-                            execution_id: init_execution_id.clone(),
-                            argv: init_argv,
-                            started_at: init_started_at,
-                            tty: init_tty,
-                            is_main_session: true,
-                        });
+                        .with_metadata(
+                            acrylmicrovm_shared::ExecutionInfo {
+                                execution_id: init_execution_id.clone(),
+                                argv: init_argv,
+                                started_at: init_started_at,
+                                tty: init_tty,
+                                is_main_session: true,
+                            },
+                        );
                         if !self
                             .registry
                             .register(init_execution_id.clone(), state.clone())
@@ -793,7 +795,8 @@ mod tests {
 
     #[test]
     fn mount_accepts_a_read_only_share_folder() {
-        let destination = checked_mount(&share_folder("agents", "/opt/acrylmicrovm/agents")).unwrap();
+        let destination =
+            checked_mount(&share_folder("agents", "/opt/acrylmicrovm/agents")).unwrap();
         assert_eq!(destination, PathBuf::from("/opt/acrylmicrovm/agents"));
     }
 
@@ -834,7 +837,10 @@ mod tests {
                 AcrylMicrovmError::NotFound("init gone".into()),
                 Code::FailedPrecondition,
             ),
-            (AcrylMicrovmError::Storage("move_mount".into()), Code::Internal),
+            (
+                AcrylMicrovmError::Storage("move_mount".into()),
+                Code::Internal,
+            ),
         ];
         for (error, code) in cases {
             assert_eq!(mount_status(error).code(), code);

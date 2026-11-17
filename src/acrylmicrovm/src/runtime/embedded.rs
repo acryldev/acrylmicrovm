@@ -117,8 +117,9 @@ impl EmbeddedRuntime {
 
         for (name, mode, data) in MANIFEST {
             let path = tmp.join(name);
-            std::fs::write(&path, data)
-                .map_err(|e| AcrylMicrovmError::Storage(format!("write {}: {}", path.display(), e)))?;
+            std::fs::write(&path, data).map_err(|e| {
+                AcrylMicrovmError::Storage(format!("write {}: {}", path.display(), e))
+            })?;
             #[cfg(unix)]
             Self::set_permissions(&path, *mode)?;
         }
@@ -127,7 +128,11 @@ impl EmbeddedRuntime {
         // Line 1: version (human-readable). Line 2: build profile, read back by
         // `ttl_for_stamp` so each dir is pruned by the TTL of the profile that
         // created it. `\n` separated; readers use `str::lines` (CRLF-tolerant).
-        let stamp_body = format!("{}\n{}\n", crate::VERSION, env!("ACRYLMICROVM_BUILD_PROFILE"));
+        let stamp_body = format!(
+            "{}\n{}\n",
+            crate::VERSION,
+            env!("ACRYLMICROVM_BUILD_PROFILE")
+        );
         std::fs::write(tmp.join(".complete"), stamp_body)
             .map_err(|e| AcrylMicrovmError::Storage(format!("write stamp: {}", e)))?;
 
@@ -203,15 +208,19 @@ impl EmbeddedRuntime {
             env!("ACRYLMICROVM_MANIFEST_HASH"),
         );
 
-        let dir = data_dir.join("acrylmicrovm").join("runtimes").join(dir_name);
+        let dir = data_dir
+            .join("acrylmicrovm")
+            .join("runtimes")
+            .join(dir_name);
         let parent = dir.parent().ok_or_else(|| {
             AcrylMicrovmError::Storage(format!(
                 "Embedded runtime path has no parent: {}",
                 dir.display()
             ))
         })?;
-        std::fs::create_dir_all(parent)
-            .map_err(|e| AcrylMicrovmError::Storage(format!("mkdir {}: {}", parent.display(), e)))?;
+        std::fs::create_dir_all(parent).map_err(|e| {
+            AcrylMicrovmError::Storage(format!("mkdir {}: {}", parent.display(), e))
+        })?;
         Ok(dir)
     }
 

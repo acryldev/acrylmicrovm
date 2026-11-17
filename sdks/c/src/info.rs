@@ -17,7 +17,7 @@ use crate::error::{AcrylMicrovmErrorCode, FFIError, null_pointer_error, write_er
 use crate::event_queue::{CBoxInfoCb, CBoxInfoListCb, RuntimeEvent, push_event};
 use crate::options::AcrylMicrovmPortProtocol;
 use crate::runtime::RuntimeHandle;
-use crate::{CBoxHandle, CAcrylMicrovmError, CAcrylMicrovmRuntime};
+use crate::{CAcrylMicrovmError, CAcrylMicrovmRuntime, CBoxHandle};
 
 /// Network mode exposed by [`CNetworkInfo`].
 #[repr(C)]
@@ -828,7 +828,10 @@ mod tests {
         let port = unsafe { &*resolved_ports.items };
         assert_eq!(port.host_port, 49152);
         assert_eq!(port.guest_port, 3000);
-        assert_eq!(port.protocol, AcrylMicrovmPortProtocol::AcrylMicrovmPortProtocolTcp);
+        assert_eq!(
+            port.protocol,
+            AcrylMicrovmPortProtocol::AcrylMicrovmPortProtocolTcp
+        );
         assert_eq!(
             unsafe { CStr::from_ptr(port.host_ip) }.to_str().unwrap(),
             "127.0.0.1"

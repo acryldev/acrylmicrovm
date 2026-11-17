@@ -3,7 +3,9 @@
 #![cfg(target_os = "linux")]
 mod common;
 
-use acrylmicrovm::{BoxCommand, BoxOptions, AcrylMicrovmRestOptions, AcrylMicrovmRuntime, RootfsSpec};
+use acrylmicrovm::{
+    AcrylMicrovmRestOptions, AcrylMicrovmRuntime, BoxCommand, BoxOptions, RootfsSpec,
+};
 use common::serve::ServeChild;
 use futures::StreamExt;
 use std::path::PathBuf;

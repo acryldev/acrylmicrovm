@@ -80,8 +80,9 @@ impl ImageIndexStore {
     pub fn upsert(&self, reference: &str, image: &CachedImage) -> AcrylMicrovmResult<()> {
         let conn = self.db.conn();
 
-        let layers_json = serde_json::to_string(&image.layers)
-            .map_err(|e| AcrylMicrovmError::Database(format!("Failed to serialize layers: {}", e)))?;
+        let layers_json = serde_json::to_string(&image.layers).map_err(|e| {
+            AcrylMicrovmError::Database(format!("Failed to serialize layers: {}", e))
+        })?;
 
         db_err!(conn.execute(
             r#"

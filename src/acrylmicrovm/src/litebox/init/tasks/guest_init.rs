@@ -15,9 +15,9 @@ use crate::portal::interfaces::{ContainerInitConfig, GuestInitConfig, NetworkIni
 use crate::runtime::constants::vm_defaults::{DEFAULT_CPUS, DEFAULT_MEMORY_MIB};
 use crate::runtime::cpu_count::{CPU_PERIOD_US, CpuCount};
 use crate::runtime::options::BoxOptions;
-use async_trait::async_trait;
 use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
 use acrylmicrovm_shared::{ContainerDevice, ContainerResources};
+use async_trait::async_trait;
 
 /// Oldest guest release that honors `advanced.capabilities` on
 /// `Container.Init`. An earlier guest drops the field and starts the container
@@ -62,18 +62,15 @@ impl PipelineTask<InitCtx> for GuestInitTask {
                 .container_image_config
                 .clone()
                 .ok_or_else(|| AcrylMicrovmError::Internal("rootfs task must run first".into()))?;
-            let volume_mgr = ctx
-                .volume_mgr
-                .take()
-                .ok_or_else(|| AcrylMicrovmError::Internal("vmm_spawn task must run first".into()))?;
-            let rootfs_init = ctx
-                .rootfs_init
-                .take()
-                .ok_or_else(|| AcrylMicrovmError::Internal("vmm_spawn task must run first".into()))?;
-            let container_mounts = ctx
-                .container_mounts
-                .take()
-                .ok_or_else(|| AcrylMicrovmError::Internal("vmm_spawn task must run first".into()))?;
+            let volume_mgr = ctx.volume_mgr.take().ok_or_else(|| {
+                AcrylMicrovmError::Internal("vmm_spawn task must run first".into())
+            })?;
+            let rootfs_init = ctx.rootfs_init.take().ok_or_else(|| {
+                AcrylMicrovmError::Internal("vmm_spawn task must run first".into())
+            })?;
+            let container_mounts = ctx.container_mounts.take().ok_or_else(|| {
+                AcrylMicrovmError::Internal("vmm_spawn task must run first".into())
+            })?;
 
             let network = match &ctx.config.options.network {
                 crate::runtime::options::NetworkSpec::Enabled { .. } => Some(NetworkInitConfig {

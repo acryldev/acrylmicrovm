@@ -61,7 +61,9 @@ where
     let socket = tokio::time::timeout(FORWARD_CONNECT_TIMEOUT, UnixStream::connect(socket_path))
         .await
         .map_err(|_| AcrylMicrovmError::Execution("streamlocal connect timed out".into()))?
-        .map_err(|error| AcrylMicrovmError::Execution(format!("streamlocal connect failed: {error}")))?;
+        .map_err(|error| {
+            AcrylMicrovmError::Execution(format!("streamlocal connect failed: {error}"))
+        })?;
 
     // This prefix is consumed by the parent bridge. It proves that pathname
     // lookup and connect succeeded inside the container mount namespace before

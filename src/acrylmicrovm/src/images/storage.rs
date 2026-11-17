@@ -63,8 +63,9 @@ impl ImageStorage {
             return Ok(());
         }
 
-        let manifest_json = serde_json::to_string_pretty(manifest)
-            .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to serialize manifest: {}", e)))?;
+        let manifest_json = serde_json::to_string_pretty(manifest).map_err(|e| {
+            AcrylMicrovmError::Storage(format!("Failed to serialize manifest: {}", e))
+        })?;
 
         std::fs::write(&manifest_path, manifest_json).map_err(|e| {
             AcrylMicrovmError::Storage(format!(
@@ -288,7 +289,9 @@ impl ImageStorage {
         // Extract expected hash from digest
         let expected_hash = digest
             .strip_prefix("sha256:")
-            .ok_or_else(|| AcrylMicrovmError::Storage("Invalid digest format, expected sha256:".into()))?
+            .ok_or_else(|| {
+                AcrylMicrovmError::Storage("Invalid digest format, expected sha256:".into())
+            })?
             .to_string();
 
         // Generate random suffix to prevent collision in parallel downloads
@@ -377,7 +380,9 @@ impl ImageStorage {
         // Extract expected hash from digest
         let expected_hash = digest
             .strip_prefix("sha256:")
-            .ok_or_else(|| AcrylMicrovmError::Storage("Invalid digest format, expected sha256:".into()))?
+            .ok_or_else(|| {
+                AcrylMicrovmError::Storage("Invalid digest format, expected sha256:".into())
+            })?
             .to_string();
 
         // Ensure parent directory exists

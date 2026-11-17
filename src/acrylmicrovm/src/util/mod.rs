@@ -239,7 +239,10 @@ pub fn inject_guest_binary(rootfs_path: &std::path::Path) -> AcrylMicrovmResult<
 /// Check if destination binary is up-to-date compared to source.
 ///
 /// Uses fast mtime+size comparison instead of content hashing.
-fn is_binary_up_to_date(source: &std::path::Path, dest: &std::path::Path) -> AcrylMicrovmResult<bool> {
+fn is_binary_up_to_date(
+    source: &std::path::Path,
+    dest: &std::path::Path,
+) -> AcrylMicrovmResult<bool> {
     let source_meta = std::fs::metadata(source).map_err(|e| {
         AcrylMicrovmError::Storage(format!(
             "Failed to get metadata for {}: {}",

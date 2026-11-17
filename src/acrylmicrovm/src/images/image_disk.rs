@@ -96,7 +96,11 @@ impl ImageDiskManager {
     }
 
     /// Build ext4 from image layers and atomically install to cache.
-    async fn build_and_install(&self, image: &ImageObject, digest: &str) -> AcrylMicrovmResult<Disk> {
+    async fn build_and_install(
+        &self,
+        image: &ImageObject,
+        digest: &str,
+    ) -> AcrylMicrovmResult<Disk> {
         // All work happens in a temp directory (staged)
         let temp = tempfile::tempdir_in(&self.temp_dir).map_err(|e| {
             AcrylMicrovmError::Storage(format!(

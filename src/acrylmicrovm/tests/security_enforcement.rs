@@ -14,7 +14,9 @@
 
 mod common;
 
-use acrylmicrovm::runtime::options::{BoxOptions, AcrylMicrovmOptions, NetworkSpec, RootfsSpec, VolumeSpec};
+use acrylmicrovm::runtime::options::{
+    AcrylMicrovmOptions, BoxOptions, NetworkSpec, RootfsSpec, VolumeSpec,
+};
 use acrylmicrovm::{BoxCommand, LiteBox};
 use common::TestRuntime as AcrylMicrovmRuntime;
 use futures::StreamExt;
@@ -259,7 +261,11 @@ async fn sealed_root_leaves_container_rootfs_writable(bx: &LiteBox) {
     .await;
     assert_eq!(exit, 0, "container rootfs should stay writable");
 
-    let content = exec_stdout(bx, BoxCommand::new("cat").arg("/usr/acrylmicrovm-seal-probe")).await;
+    let content = exec_stdout(
+        bx,
+        BoxCommand::new("cat").arg("/usr/acrylmicrovm-seal-probe"),
+    )
+    .await;
     assert_eq!(content.trim(), "ok");
 }
 

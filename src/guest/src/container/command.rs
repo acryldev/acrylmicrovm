@@ -295,12 +295,15 @@ impl ContainerCommand {
         use nix::unistd::pipe;
 
         // Create pipes for I/O
-        let (stdin_read, stdin_write) = pipe()
-            .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to create stdin pipe: {}", e)))?;
-        let (stdout_read, stdout_write) = pipe()
-            .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to create stdout pipe: {}", e)))?;
-        let (stderr_read, stderr_write) = pipe()
-            .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to create stderr pipe: {}", e)))?;
+        let (stdin_read, stdin_write) = pipe().map_err(|e| {
+            AcrylMicrovmError::Internal(format!("Failed to create stdin pipe: {}", e))
+        })?;
+        let (stdout_read, stdout_write) = pipe().map_err(|e| {
+            AcrylMicrovmError::Internal(format!("Failed to create stdout pipe: {}", e))
+        })?;
+        let (stderr_read, stderr_write) = pipe().map_err(|e| {
+            AcrylMicrovmError::Internal(format!("Failed to create stderr pipe: {}", e))
+        })?;
 
         tracing::debug!(container_id = %self.id, "spawning with pipes");
 

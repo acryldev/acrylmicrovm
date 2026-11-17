@@ -298,7 +298,10 @@ impl ImageStore {
     /// same write lock that drops them, so a reference a pull indexes
     /// meanwhile is either among them or indexed after. Their layers stay in
     /// storage, so pulling one of these builds again reuses them.
-    pub async fn forget_matching(&self, is_match: impl Fn(&str) -> bool) -> AcrylMicrovmResult<usize> {
+    pub async fn forget_matching(
+        &self,
+        is_match: impl Fn(&str) -> bool,
+    ) -> AcrylMicrovmResult<usize> {
         let inner = self.inner.write().await;
         let references: Vec<String> = inner
             .index
@@ -340,7 +343,10 @@ impl ImageStore {
     /// - If `path/index.json` or `path/oci-layout` doesn't exist
     /// - If any referenced blob is missing
     /// - If hard linking fails
-    pub async fn load_from_local(&self, path: std::path::PathBuf) -> AcrylMicrovmResult<ImageManifest> {
+    pub async fn load_from_local(
+        &self,
+        path: std::path::PathBuf,
+    ) -> AcrylMicrovmResult<ImageManifest> {
         tracing::info!("Loading OCI image from local path: {}", path.display());
 
         // 1. Validate OCI layout
@@ -357,8 +363,9 @@ impl ImageStore {
         let index_json = std::fs::read_to_string(&index_path)
             .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to read index.json: {}", e)))?;
 
-        let index: OciImageIndex = serde_json::from_str(&index_json)
-            .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to parse index.json: {}", e)))?;
+        let index: OciImageIndex = serde_json::from_str(&index_json).map_err(|e| {
+            AcrylMicrovmError::Storage(format!("Failed to parse index.json: {}", e))
+        })?;
 
         // 3. Get first manifest descriptor
         let manifest_desc = index
@@ -749,7 +756,11 @@ impl ImageStore {
     }
 
     /// Update index with newly pulled image.
-    async fn update_index(&self, image_ref: &str, manifest: &ImageManifest) -> AcrylMicrovmResult<()> {
+    async fn update_index(
+        &self,
+        image_ref: &str,
+        manifest: &ImageManifest,
+    ) -> AcrylMicrovmResult<()> {
         let inner = self.inner.read().await;
 
         let cached_image = CachedImage {
@@ -879,7 +890,9 @@ impl ImageStore {
                     diff_ids: Vec::new(), // Populated after config download
                 })
             }
-            _ => Err(AcrylMicrovmError::Storage("platform manifest is not a valid image".into()).into()),
+            _ => Err(
+                AcrylMicrovmError::Storage("platform manifest is not a valid image".into()).into(),
+            ),
         }
     }
 
@@ -1183,11 +1196,14 @@ impl ImageStore {
         manifest_path: &std::path::Path,
         context: &str,
     ) -> AcrylMicrovmResult<(String, Vec<LayerInfo>)> {
-        let manifest_json = std::fs::read_to_string(manifest_path)
-            .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to read manifest file: {}", e)))?;
+        let manifest_json = std::fs::read_to_string(manifest_path).map_err(|e| {
+            AcrylMicrovmError::Storage(format!("Failed to read manifest file: {}", e))
+        })?;
 
-        let oci_manifest: ClientOciImageManifest = serde_json::from_str(&manifest_json)
-            .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to parse {}: {}", context, e)))?;
+        let oci_manifest: ClientOciImageManifest =
+            serde_json::from_str(&manifest_json).map_err(|e| {
+                AcrylMicrovmError::Storage(format!("Failed to parse {}: {}", context, e))
+            })?;
 
         let config_digest_str = oci_manifest.config.digest.clone();
         let layers = Self::layers_from_image(&oci_manifest)?;

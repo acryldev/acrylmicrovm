@@ -83,7 +83,10 @@ mod tests {
         let error = validate_mount_override("/sys", &mount_override("/sys", &[]))
             .expect_err("empty options must not pass");
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         assert!(
             error.to_string().contains("options"),
             "error should name the field: {error}"
@@ -95,7 +98,10 @@ mod tests {
         let error = validate_mount_override("/sys", &mount_override("", &["rbind"]))
             .expect_err("empty source must not pass");
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         assert!(
             error.to_string().contains("source"),
             "error should name the field: {error}"
@@ -113,7 +119,10 @@ mod tests {
         let error = validate_mount_override("/proc", &mount_override("/sys", &["rbind"]))
             .expect_err("a destination other than /sys must not pass");
 
-        assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error:?}");
+        assert!(
+            matches!(error, AcrylMicrovmError::Unsupported(_)),
+            "{error:?}"
+        );
         assert!(
             error.to_string().contains("/proc"),
             "error should name the unsupported destination: {error}"

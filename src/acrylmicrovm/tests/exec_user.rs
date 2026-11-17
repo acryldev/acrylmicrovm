@@ -35,12 +35,13 @@ struct TestBox {
 impl TestBox {
     async fn new() -> Self {
         let home = acrylmicrovm_test_utils::home::PerTestBoxHome::new();
-        let runtime = common::TestRuntime::new(acrylmicrovm::runtime::options::AcrylMicrovmOptions {
-            home_dir: home.path.clone(),
-            image_registries: common::test_registries(),
-            ..Default::default()
-        })
-        .expect("create runtime");
+        let runtime =
+            common::TestRuntime::new(acrylmicrovm::runtime::options::AcrylMicrovmOptions {
+                home_dir: home.path.clone(),
+                image_registries: common::test_registries(),
+                ..Default::default()
+            })
+            .expect("create runtime");
         let handle = runtime.create(common::alpine_opts(), None).await.unwrap();
         handle.start().await.unwrap();
         Self {
@@ -131,7 +132,10 @@ async fn test_exec_user_invalid_spec_is_invalid_argument() {
             .exec(BoxCommand::new("touch").arg("/tmp/marker-2116").user(spec))
             .await;
         assert!(
-            matches!(result, Err(acrylmicrovm::AcrylMicrovmError::InvalidArgument(_))),
+            matches!(
+                result,
+                Err(acrylmicrovm::AcrylMicrovmError::InvalidArgument(_))
+            ),
             "{spec}: got {:?}",
             result.err()
         );

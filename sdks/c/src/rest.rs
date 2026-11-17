@@ -41,7 +41,9 @@ use crate::error::{AcrylMicrovmErrorCode, error_to_code, null_pointer_error, wri
 use crate::event_queue::EventQueue;
 use crate::runtime::{RuntimeHandle, RuntimeLiveness, create_tokio_runtime};
 use crate::util::c_str_to_string;
-use crate::{CAcrylMicrovmCredential, CAcrylMicrovmError, CAcrylMicrovmRestOptions, CAcrylMicrovmRuntime};
+use crate::{
+    CAcrylMicrovmCredential, CAcrylMicrovmError, CAcrylMicrovmRestOptions, CAcrylMicrovmRuntime,
+};
 
 /// Opaque credential handle. Wraps a core `Arc<dyn Credential>` so the
 /// concrete credential kind (today only `ApiKeyCredential`) is hidden

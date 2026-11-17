@@ -21,7 +21,11 @@ impl Migration for ReplaceSnapshots {
         "Replace snapshots with box_snapshot table"
     }
 
-    fn run(&self, conn: &Connection, _home_dir: Option<&std::path::Path>) -> AcrylMicrovmResult<()> {
+    fn run(
+        &self,
+        conn: &Connection,
+        _home_dir: Option<&std::path::Path>,
+    ) -> AcrylMicrovmResult<()> {
         db_err!(conn.execute_batch("DROP TABLE IF EXISTS snapshots;"))?;
         db_err!(conn.execute_batch(schema::BOX_SNAPSHOT_TABLE))?;
         Ok(())

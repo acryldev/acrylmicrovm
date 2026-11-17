@@ -4,8 +4,8 @@
 //! Handles loading configuration from JSON files.
 //! Uses `AcrylMicrovmOptions` directly to avoid maintaining duplicate config structures.
 
-use anyhow::{Context, Result, bail};
 use acrylmicrovm::runtime::options::AcrylMicrovmOptions;
+use anyhow::{Context, Result, bail};
 use std::path::Path;
 
 /// Load configuration from a JSON file.

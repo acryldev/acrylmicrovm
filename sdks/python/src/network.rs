@@ -472,9 +472,10 @@ mod tests {
     /// Runs `script`'s `main()` with `network` bound to box1's handle on a
     /// REST runtime, the way Python code awaits `box.network.<call>`.
     fn run_with_network(url: &str, script: &str) -> (acrylmicrovm::AcrylMicrovmRuntime, Py<PyAny>) {
-        let runtime =
-            acrylmicrovm::AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(url.to_string()))
-                .unwrap();
+        let runtime = acrylmicrovm::AcrylMicrovmRuntime::rest(
+            acrylmicrovm::AcrylMicrovmRestOptions::new(url.to_string()),
+        )
+        .unwrap();
         let litebox = pyo3_async_runtimes::tokio::get_runtime()
             .block_on(runtime.get("box1"))
             .unwrap()

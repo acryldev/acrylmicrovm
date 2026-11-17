@@ -190,7 +190,8 @@ fn test_runtime_accepts_image_registry_config() {
 fn test_runtime_images_null_pointer_validation() {
     unsafe {
         let mut error = FFIError::default();
-        let code = acrylmicrovm_runtime_images(ptr::null_mut(), ptr::null_mut(), &mut error as *mut _);
+        let code =
+            acrylmicrovm_runtime_images(ptr::null_mut(), ptr::null_mut(), &mut error as *mut _);
         assert_eq!(code, AcrylMicrovmErrorCode::InvalidArgument);
         assert!(!error.message.is_null());
         acrylmicrovm_error_free(&mut error as *mut _);
@@ -271,8 +272,10 @@ extern "C" fn record_pull_code(
 #[test]
 fn test_rest_runtime_images_refuses_pull() {
     let tokio_rt = crate::runtime::create_tokio_runtime().expect("create tokio runtime");
-    let runtime = AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new("http://localhost:1"))
-        .expect("create rest runtime");
+    let runtime = AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+        "http://localhost:1",
+    ))
+    .expect("create rest runtime");
     let mut runtime_handle = crate::runtime::RuntimeHandle {
         runtime,
         tokio_rt,
@@ -309,7 +312,9 @@ fn test_rest_runtime_images_refuses_pull() {
         if unsafe { *pull_code_slot }.is_some() {
             break;
         }
-        unsafe { acrylmicrovm_runtime_drain(&mut runtime_handle as *mut _, 500, &mut error as *mut _) };
+        unsafe {
+            acrylmicrovm_runtime_drain(&mut runtime_handle as *mut _, 500, &mut error as *mut _)
+        };
     }
 
     assert_eq!(
@@ -439,8 +444,9 @@ fn create_box_rejects_null_callback() {
     let opts = unsafe { new_test_options() };
     let mut error = FFIError::default();
 
-    let code =
-        unsafe { acrylmicrovm_create_box(runtime, opts, None, ptr::null_mut(), &mut error as *mut _) };
+    let code = unsafe {
+        acrylmicrovm_create_box(runtime, opts, None, ptr::null_mut(), &mut error as *mut _)
+    };
     assert_null_cb_rejected(code, &mut error);
 
     // acrylmicrovm_create_box only consumes opts on success; on this error path
@@ -669,7 +675,9 @@ fn guest_privileged_accepts_canonical_full_capabilities() {
         let name = CString::new(capability).unwrap();
         let names = [name.as_ptr()];
         assert_eq!(
-            unsafe { acrylmicrovm_advanced_options_set_capabilities_add(advanced, names.as_ptr(), 1) },
+            unsafe {
+                acrylmicrovm_advanced_options_set_capabilities_add(advanced, names.as_ptr(), 1)
+            },
             AcrylMicrovmErrorCode::Ok
         );
         assert_eq!(
@@ -697,7 +705,8 @@ fn guest_privileged_rejects_conflicting_capabilities_without_mutation() {
         for (values, setter) in [
             (
                 add,
-                acrylmicrovm_advanced_options_set_capabilities_add as unsafe extern "C" fn(_, _, _) -> _,
+                acrylmicrovm_advanced_options_set_capabilities_add
+                    as unsafe extern "C" fn(_, _, _) -> _,
             ),
             (
                 drop,
@@ -728,8 +737,9 @@ fn guest_privileged_rejects_conflicting_capabilities_without_mutation() {
 fn runtime_metrics_rejects_null_callback() {
     let (runtime, home_dir) = unsafe { new_test_runtime_handle("null-cb-rtmet") };
     let mut error = FFIError::default();
-    let code =
-        unsafe { acrylmicrovm_runtime_metrics(runtime, None, ptr::null_mut(), &mut error as *mut _) };
+    let code = unsafe {
+        acrylmicrovm_runtime_metrics(runtime, None, ptr::null_mut(), &mut error as *mut _)
+    };
     assert_null_cb_rejected(code, &mut error);
     unsafe { acrylmicrovm_runtime_free(runtime) };
     let _ = std::fs::remove_dir_all(home_dir);
@@ -739,7 +749,8 @@ fn runtime_metrics_rejects_null_callback() {
 fn list_info_rejects_null_callback() {
     let (runtime, home_dir) = unsafe { new_test_runtime_handle("null-cb-listinfo") };
     let mut error = FFIError::default();
-    let code = unsafe { acrylmicrovm_list_info(runtime, None, ptr::null_mut(), &mut error as *mut _) };
+    let code =
+        unsafe { acrylmicrovm_list_info(runtime, None, ptr::null_mut(), &mut error as *mut _) };
     assert_null_cb_rejected(code, &mut error);
     unsafe { acrylmicrovm_runtime_free(runtime) };
     let _ = std::fs::remove_dir_all(home_dir);
@@ -1201,8 +1212,11 @@ mod image_catalog {
             let mut runtime = MaybeUninit::<*mut RuntimeHandle>::uninit();
             let mut error = FFIError::default();
             unsafe {
-                let code =
-                    acrylmicrovm_rest_options_new(base_url.as_ptr(), options.as_mut_ptr(), &mut error);
+                let code = acrylmicrovm_rest_options_new(
+                    base_url.as_ptr(),
+                    options.as_mut_ptr(),
+                    &mut error,
+                );
                 assert_eq!(code, AcrylMicrovmErrorCode::Ok);
                 let options = options.assume_init();
                 let code = acrylmicrovm_rest_runtime_new_with_options(
@@ -1228,7 +1242,8 @@ mod image_catalog {
         ) -> Self {
             let mut handle = MaybeUninit::<*mut ImageHandle>::uninit();
             let mut error = FFIError::default();
-            let code = unsafe { acrylmicrovm_runtime_images(runtime, handle.as_mut_ptr(), &mut error) };
+            let code =
+                unsafe { acrylmicrovm_runtime_images(runtime, handle.as_mut_ptr(), &mut error) };
             assert_eq!(code, AcrylMicrovmErrorCode::Ok);
             Self {
                 runtime,
@@ -1285,7 +1300,8 @@ mod image_catalog {
                 if unsafe { (*slot).code.is_some() } {
                     break;
                 }
-                let dispatched = unsafe { acrylmicrovm_runtime_drain(self.runtime, 500, &mut error) };
+                let dispatched =
+                    unsafe { acrylmicrovm_runtime_drain(self.runtime, 500, &mut error) };
                 assert!(dispatched >= 0, "drain failed");
             }
             assert!(
@@ -1434,7 +1450,12 @@ mod image_catalog {
         let usage = images.usage();
 
         assert_eq!(images.requests_received(), [USAGE.request_line]);
-        assert_eq!(usage.code, Some(AcrylMicrovmErrorCode::Ok), "{}", usage.message);
+        assert_eq!(
+            usage.code,
+            Some(AcrylMicrovmErrorCode::Ok),
+            "{}",
+            usage.message
+        );
         assert_eq!(usage.value, Some((3, 20, 8192)));
     }
 
@@ -1509,12 +1530,14 @@ mod image_catalog {
 
             let code = acrylmicrovm_image_get(handle, ptr::null(), Some(record_detail), no_data, e);
             assert_refused(code, InvalidArgument, &mut *e, "name is null");
-            let code = acrylmicrovm_image_remove(handle, ptr::null(), Some(record_removal), no_data, e);
+            let code =
+                acrylmicrovm_image_remove(handle, ptr::null(), Some(record_removal), no_data, e);
             assert_refused(code, InvalidArgument, &mut *e, "name is null");
 
             let code = acrylmicrovm_image_get(handle, not_utf8, Some(record_detail), no_data, e);
             assert_refused(code, InvalidArgument, &mut *e, "name is not UTF-8");
-            let code = acrylmicrovm_image_remove(handle, not_utf8, Some(record_removal), no_data, e);
+            let code =
+                acrylmicrovm_image_remove(handle, not_utf8, Some(record_removal), no_data, e);
             assert_refused(code, InvalidArgument, &mut *e, "name is not UTF-8");
 
             let code = acrylmicrovm_image_get(handle, name, None, no_data, e);

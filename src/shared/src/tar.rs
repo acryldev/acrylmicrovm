@@ -5,7 +5,7 @@
 //! duplicating tar building/extraction logic.
 
 use crate::constants::files::{COPY_CHUNKS_IN_FLIGHT, COPY_CHUNK_SIZE};
-use crate::{BoxByteStream, AcrylMicrovmError, AcrylMicrovmResult};
+use crate::{AcrylMicrovmError, AcrylMicrovmResult, BoxByteStream};
 use futures::StreamExt;
 use std::collections::HashSet;
 use std::io::{self, Read, Write};
@@ -170,7 +170,10 @@ impl Drop for PipeWriter {
 /// Returns the source shape (`source_is_dir = src.is_dir()`) alongside the
 /// stream. The pack runs on a `spawn_blocking` thread; a pack failure surfaces
 /// as a terminal `Err` item on the stream.
-pub async fn pack_stream(src: PathBuf, opts: PackContext) -> AcrylMicrovmResult<(bool, BoxByteStream)> {
+pub async fn pack_stream(
+    src: PathBuf,
+    opts: PackContext,
+) -> AcrylMicrovmResult<(bool, BoxByteStream)> {
     let source_is_dir = src.is_dir();
     if !src.exists() {
         return Err(AcrylMicrovmError::NotFound(format!(
@@ -259,7 +262,11 @@ pub struct UnpackReport {
 /// [`Landing`]).
 ///
 /// Runs blocking I/O on a dedicated thread via `spawn_blocking`.
-pub async fn unpack(tar_path: PathBuf, dest: PathBuf, opts: UnpackContext) -> AcrylMicrovmResult<()> {
+pub async fn unpack(
+    tar_path: PathBuf,
+    dest: PathBuf,
+    opts: UnpackContext,
+) -> AcrylMicrovmResult<()> {
     tokio::task::spawn_blocking(move || unpack_blocking(&tar_path, &dest, &opts))
         .await
         .map_err(|e| AcrylMicrovmError::Storage(format!("unpack task join error: {}", e)))?
@@ -300,8 +307,8 @@ fn extract_from_reader<R: Read>(
         .entries()
         .map_err(|e| AcrylMicrovmError::Storage(format!("failed to read tar entries: {}", e)))?
     {
-        let mut file =
-            entry.map_err(|e| AcrylMicrovmError::Storage(format!("failed to read tar entry: {}", e)))?;
+        let mut file = entry
+            .map_err(|e| AcrylMicrovmError::Storage(format!("failed to read tar entry: {}", e)))?;
         let undecided = !landing.decided();
         let placed = landing.place(&file)?;
         // Before `prepare`, so a refused first entry leaves `dest` untouched.
@@ -319,7 +326,10 @@ fn extract_from_reader<R: Read>(
             directories.push((file, landed));
         } else {
             unpack_at(&mut file, dest, &landed).map_err(|e| {
-                AcrylMicrovmError::Storage(format!("failed to extract archive: {}", with_causes(&e)))
+                AcrylMicrovmError::Storage(format!(
+                    "failed to extract archive: {}",
+                    with_causes(&e)
+                ))
             })?;
         }
     }
@@ -2072,7 +2082,11 @@ mod tests {
     }
 
     /// Stream `src` as a copy does, `SRC` or (`contents`) `SRC/.`, to `dest`.
-    async fn stream_copy(src: &Path, contents: bool, dest: &Path) -> AcrylMicrovmResult<UnpackReport> {
+    async fn stream_copy(
+        src: &Path,
+        contents: bool,
+        dest: &Path,
+    ) -> AcrylMicrovmResult<UnpackReport> {
         let opts = PackContext {
             follow_symlinks: false,
             include_parent: !contents,
@@ -2203,7 +2217,10 @@ mod tests {
                 .await
                 .unwrap_err();
 
-            assert!(matches!(err, AcrylMicrovmError::InvalidArgument(_)), "{err}");
+            assert!(
+                matches!(err, AcrylMicrovmError::InvalidArgument(_)),
+                "{err}"
+            );
             assert_eq!(landed(&dest), paths(&["c.txt"]), "{last:?}");
         }
     }
@@ -2313,7 +2330,10 @@ mod tests {
 
         for (_tmp, dest, result) in land_both(&entries, |_| {}).await {
             let err = result.unwrap_err();
-            assert!(matches!(err, AcrylMicrovmError::InvalidArgument(_)), "{err}");
+            assert!(
+                matches!(err, AcrylMicrovmError::InvalidArgument(_)),
+                "{err}"
+            );
             assert_eq!(std::fs::read_to_string(&dest).unwrap(), "a");
         }
     }
@@ -2329,7 +2349,10 @@ mod tests {
             land_both(&entries, |dest| std::fs::write(dest, "file").unwrap()).await
         {
             let err = result.unwrap_err();
-            assert!(matches!(err, AcrylMicrovmError::InvalidArgument(_)), "{err}");
+            assert!(
+                matches!(err, AcrylMicrovmError::InvalidArgument(_)),
+                "{err}"
+            );
             assert_eq!(std::fs::read_to_string(&dest).unwrap(), "file");
         }
     }
@@ -2342,7 +2365,10 @@ mod tests {
 
         for (_tmp, dest, result) in land_both(&entries, |_| {}).await {
             let err = result.unwrap_err();
-            assert!(matches!(err, AcrylMicrovmError::InvalidArgument(_)), "{err}");
+            assert!(
+                matches!(err, AcrylMicrovmError::InvalidArgument(_)),
+                "{err}"
+            );
             assert!(dest.symlink_metadata().is_err());
         }
     }

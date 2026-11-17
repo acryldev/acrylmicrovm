@@ -12,7 +12,9 @@ use std::{
     time::Duration,
 };
 
-use acrylmicrovm_hypervisor::{KvmVcpu, KvmVm, VcpuExit, VcpuHandle as _, X86BootRegisters, X86Segment};
+use acrylmicrovm_hypervisor::{
+    KvmVcpu, KvmVm, VcpuExit, VcpuHandle as _, X86BootRegisters, X86Segment,
+};
 use vm_memory::{Bytes, GuestAddress};
 
 use crate::memory::{GuestMemoryMmap, GuestRam, ram_ranges};

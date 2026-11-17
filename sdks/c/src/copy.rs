@@ -7,16 +7,18 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use acrylmicrovm::litebox::copy::CopyOptions;
-use acrylmicrovm::{BoxByteStream, AcrylMicrovmError, CopySourceKind};
+use acrylmicrovm::{AcrylMicrovmError, BoxByteStream, CopySourceKind};
 use futures::StreamExt;
 use tokio::runtime::Runtime as TokioRuntime;
 use tokio::sync::mpsc;
 
 use crate::box_handle::BoxHandle;
-use crate::error::{AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error};
+use crate::error::{
+    AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error,
+};
 use crate::event_queue::{CBoxCopyCb, RuntimeEvent, push_event};
 use crate::util::c_str_to_string;
-use crate::{CBoxHandle, CAcrylMicrovmError};
+use crate::{CAcrylMicrovmError, CBoxHandle};
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn acrylmicrovm_copy_into(
@@ -162,7 +164,9 @@ pub enum AcrylMicrovmCopySourceKind {
 
 fn source_kind_to_c(source: CopySourceKind) -> i32 {
     match source {
-        CopySourceKind::Unknown => AcrylMicrovmCopySourceKind::AcrylMicrovmCopySourceKindUnknown as i32,
+        CopySourceKind::Unknown => {
+            AcrylMicrovmCopySourceKind::AcrylMicrovmCopySourceKindUnknown as i32
+        }
         CopySourceKind::File => AcrylMicrovmCopySourceKind::AcrylMicrovmCopySourceKindFile as i32,
         CopySourceKind::Dir => AcrylMicrovmCopySourceKind::AcrylMicrovmCopySourceKindDir as i32,
     }
@@ -366,8 +370,9 @@ pub unsafe extern "C" fn acrylmicrovm_copy_out_read(
         }
         *out_read = 0;
         if capacity == 0 {
-            let error =
-                AcrylMicrovmError::InvalidArgument("capacity must be greater than zero".to_string());
+            let error = AcrylMicrovmError::InvalidArgument(
+                "capacity must be greater than zero".to_string(),
+            );
             let code = error_to_code(&error);
             write_error(out_error, error);
             return code;
@@ -500,7 +505,9 @@ pub unsafe extern "C" fn acrylmicrovm_copy_in_write(
         let Some(tx) = stream_ref.tx.as_ref() else {
             write_error(
                 out_error,
-                acrylmicrovm::AcrylMicrovmError::InvalidState("copy-in stream is closed".to_string()),
+                acrylmicrovm::AcrylMicrovmError::InvalidState(
+                    "copy-in stream is closed".to_string(),
+                ),
             );
             return AcrylMicrovmErrorCode::InvalidState;
         };
@@ -558,7 +565,9 @@ pub unsafe extern "C" fn acrylmicrovm_copy_in_abort(
         let Some(tx) = stream_ref.tx.as_ref() else {
             write_error(
                 out_error,
-                acrylmicrovm::AcrylMicrovmError::InvalidState("copy-in stream is closed".to_string()),
+                acrylmicrovm::AcrylMicrovmError::InvalidState(
+                    "copy-in stream is closed".to_string(),
+                ),
             );
             return AcrylMicrovmErrorCode::InvalidState;
         };
@@ -645,7 +654,11 @@ mod tests {
             source_kind,
             AcrylMicrovmCopySourceKind::AcrylMicrovmCopySourceKindUnknown as i32
         );
-        assert_error_contains(&error, AcrylMicrovmErrorCode::InvalidArgument, "handle is null");
+        assert_error_contains(
+            &error,
+            AcrylMicrovmErrorCode::InvalidArgument,
+            "handle is null",
+        );
         unsafe { crate::error::acrylmicrovm_error_free(&mut error) };
 
         source_kind = AcrylMicrovmCopySourceKind::AcrylMicrovmCopySourceKindDir as i32;
@@ -672,7 +685,11 @@ mod tests {
             )
         };
         assert!(stream.is_null());
-        assert_error_contains(&error, AcrylMicrovmErrorCode::InvalidArgument, "handle is null");
+        assert_error_contains(
+            &error,
+            AcrylMicrovmErrorCode::InvalidArgument,
+            "handle is null",
+        );
         unsafe { crate::error::acrylmicrovm_error_free(&mut error) };
 
         let stream = unsafe {
@@ -735,7 +752,9 @@ mod tests {
         assert_eq!(stream.read_into(&mut dst).unwrap(), 1);
         assert_eq!(dst[0], 7);
         let error = stream.read_into(&mut dst).unwrap_err();
-        assert!(matches!(error, AcrylMicrovmError::Internal(message) if message.contains("guest gone")));
+        assert!(
+            matches!(error, AcrylMicrovmError::Internal(message) if message.contains("guest gone"))
+        );
         assert!(matches!(
             stream.read_into(&mut dst).unwrap_err(),
             AcrylMicrovmError::InvalidState(message) if message == "copy-out stream has failed"
@@ -796,7 +815,11 @@ mod tests {
         };
         assert_eq!(code, AcrylMicrovmErrorCode::InvalidArgument);
         assert_eq!(out_len, 0);
-        assert_error_contains(&error, AcrylMicrovmErrorCode::InvalidArgument, "buffer is null");
+        assert_error_contains(
+            &error,
+            AcrylMicrovmErrorCode::InvalidArgument,
+            "buffer is null",
+        );
         unsafe { crate::error::acrylmicrovm_error_free(&mut error) };
 
         let code = unsafe {
@@ -826,7 +849,11 @@ mod tests {
             )
         };
         assert_eq!(code, AcrylMicrovmErrorCode::InvalidArgument);
-        assert_error_contains(&error, AcrylMicrovmErrorCode::InvalidArgument, "stream is null");
+        assert_error_contains(
+            &error,
+            AcrylMicrovmErrorCode::InvalidArgument,
+            "stream is null",
+        );
         unsafe { crate::error::acrylmicrovm_error_free(&mut error) };
 
         let code = unsafe {
@@ -893,8 +920,9 @@ mod tests {
         // A spent stream rejects both writes and a second abort.
         let mut err2 = CAcrylMicrovmError::default();
         let data = [1u8; 4];
-        let code =
-            unsafe { acrylmicrovm_copy_in_write(&mut stream, data.as_ptr(), data.len(), &mut err2) };
+        let code = unsafe {
+            acrylmicrovm_copy_in_write(&mut stream, data.as_ptr(), data.len(), &mut err2)
+        };
         assert_eq!(code, AcrylMicrovmErrorCode::InvalidState);
         let mut err3 = CAcrylMicrovmError::default();
         let code = unsafe { acrylmicrovm_copy_in_abort(&mut stream, &mut err3) };
@@ -916,7 +944,8 @@ mod tests {
 
         let data = [7u8; 3];
         let mut err = CAcrylMicrovmError::default();
-        let code = unsafe { acrylmicrovm_copy_in_write(stream, data.as_ptr(), data.len(), &mut err) };
+        let code =
+            unsafe { acrylmicrovm_copy_in_write(stream, data.as_ptr(), data.len(), &mut err) };
         assert_eq!(code, AcrylMicrovmErrorCode::Ok);
 
         let drain_rt = tokio::runtime::Runtime::new().unwrap();

@@ -28,7 +28,7 @@ use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetReques
 
 use acrylmicrovm::runtime::options::{InboundNetworkConfig, NetworkMode, OutboundNetworkConfig};
 use acrylmicrovm::{
-    BoxCommand, BoxInfo, BoxOptions, BoxStatus, AcrylMicrovmRuntime, ExecStdin, Execution, LiteBox,
+    AcrylMicrovmRuntime, BoxCommand, BoxInfo, BoxOptions, BoxStatus, ExecStdin, Execution, LiteBox,
     NetworkSpec, RootfsSpec,
 };
 
@@ -1047,8 +1047,10 @@ async fn run_lifecycle_once(state: &AppState, now: Instant) {
 async fn reaper_loop(state: Arc<AppState>) {
     let reconnect_grace = resolve_duration("ACRYLMICROVM_RECONNECT_GRACE", DEFAULT_RECONNECT_GRACE);
     let shutdown_grace = resolve_duration("ACRYLMICROVM_SHUTDOWN_GRACE", DEFAULT_SHUTDOWN_GRACE);
-    let max_lifetime =
-        resolve_duration("ACRYLMICROVM_MAX_SESSION_LIFETIME", DEFAULT_MAX_SESSION_LIFETIME);
+    let max_lifetime = resolve_duration(
+        "ACRYLMICROVM_MAX_SESSION_LIFETIME",
+        DEFAULT_MAX_SESSION_LIFETIME,
+    );
 
     let mut ticker = tokio::time::interval(REAPER_TICK);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1208,7 +1210,9 @@ fn box_info_to_response(info: &BoxInfo) -> BoxResponse {
     }
 }
 
-fn volume_info_to_response(info: &acrylmicrovm::runtime::types::VolumeInfo) -> types::VolumeResponse {
+fn volume_info_to_response(
+    info: &acrylmicrovm::runtime::types::VolumeInfo,
+) -> types::VolumeResponse {
     types::VolumeResponse {
         id: info.id.clone(),
         name: info.name.clone(),
@@ -1217,7 +1221,9 @@ fn volume_info_to_response(info: &acrylmicrovm::runtime::types::VolumeInfo) -> t
     }
 }
 
-fn build_box_options(req: &CreateBoxRequest) -> Result<BoxOptions, acrylmicrovm::AcrylMicrovmError> {
+fn build_box_options(
+    req: &CreateBoxRequest,
+) -> Result<BoxOptions, acrylmicrovm::AcrylMicrovmError> {
     let rootfs = if let Some(ref path) = req.rootfs_path {
         RootfsSpec::RootfsPath(path.clone())
     } else {
@@ -3692,8 +3698,8 @@ mod tests {
             recovered_terminals: RwLock::new(HashMap::new()),
         });
         let (url, server) = serve_router(state).await;
-        let remote =
-            AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(url)).expect("rest runtime");
+        let remote = AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(url))
+            .expect("rest runtime");
         let images = remote.images().expect("image handle");
 
         assert!(images.list().await.expect("list").is_empty());
@@ -3709,7 +3715,10 @@ mod tests {
             "{missing}"
         );
         let gone = images.remove("quay.io/acme/app").await.unwrap_err();
-        assert!(matches!(gone, acrylmicrovm::AcrylMicrovmError::NotFound(_)), "{gone}");
+        assert!(
+            matches!(gone, acrylmicrovm::AcrylMicrovmError::NotFound(_)),
+            "{gone}"
+        );
 
         // Read as an image name, "usage" would be refused as an invalid
         // argument; on its own route the cache answers that it has no usage.
@@ -3750,8 +3759,10 @@ mod tests {
     async fn reading_a_box_over_http_reports_the_deadlines_serve_holds() {
         let upstream = stub_upstream("stopped", true).await;
         let state = Arc::new(AppState {
-            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone()))
-                .expect("rest runtime"),
+            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+                upstream.url.clone(),
+            ))
+            .expect("rest runtime"),
             boxes: RwLock::new(HashMap::new()),
             executions: RwLock::new(HashMap::new()),
             api_key: None,
@@ -3816,8 +3827,10 @@ mod tests {
     async fn removing_a_box_by_name_forgets_the_deadline_filed_under_its_id() {
         let upstream = stub_upstream("stopped", true).await;
         let state = Arc::new(AppState {
-            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone()))
-                .expect("rest runtime"),
+            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+                upstream.url.clone(),
+            ))
+            .expect("rest runtime"),
             boxes: RwLock::new(HashMap::new()),
             executions: RwLock::new(HashMap::new()),
             api_key: None,
@@ -3874,8 +3887,10 @@ mod tests {
     async fn the_sweep_removes_a_box_whose_delete_deadline_has_passed() {
         let upstream = stub_upstream("stopped", true).await;
         let state = AppState {
-            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone()))
-                .expect("rest runtime"),
+            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+                upstream.url.clone(),
+            ))
+            .expect("rest runtime"),
             boxes: RwLock::new(HashMap::new()),
             executions: RwLock::new(HashMap::new()),
             api_key: None,
@@ -3919,8 +3934,10 @@ mod tests {
     async fn creating_a_box_over_http_files_the_deadlines_it_asked_for() {
         let upstream = stub_upstream("running", true).await;
         let state = Arc::new(AppState {
-            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone()))
-                .expect("rest runtime"),
+            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+                upstream.url.clone(),
+            ))
+            .expect("rest runtime"),
             boxes: RwLock::new(HashMap::new()),
             executions: RwLock::new(HashMap::new()),
             api_key: None,
@@ -3973,8 +3990,10 @@ mod tests {
     async fn activity_on_an_escaped_name_lands_under_the_name_the_sweep_reads() {
         let upstream = stub_upstream("running", true).await;
         let state = Arc::new(AppState {
-            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone()))
-                .expect("rest runtime"),
+            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+                upstream.url.clone(),
+            ))
+            .expect("rest runtime"),
             boxes: RwLock::new(HashMap::new()),
             executions: RwLock::new(HashMap::new()),
             api_key: None,
@@ -4036,8 +4055,10 @@ mod tests {
     async fn a_stopped_box_with_autoresume_off_refuses_the_routes_that_would_wake_it() {
         let upstream = stub_upstream("stopped", false).await;
         let state = Arc::new(AppState {
-            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone()))
-                .expect("rest runtime"),
+            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+                upstream.url.clone(),
+            ))
+            .expect("rest runtime"),
             boxes: RwLock::new(HashMap::new()),
             executions: RwLock::new(HashMap::new()),
             api_key: None,
@@ -4147,8 +4168,10 @@ mod tests {
     async fn a_stopped_box_with_autoresume_on_is_not_refused() {
         let upstream = stub_upstream("stopped", true).await;
         let state = Arc::new(AppState {
-            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone()))
-                .expect("rest runtime"),
+            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+                upstream.url.clone(),
+            ))
+            .expect("rest runtime"),
             boxes: RwLock::new(HashMap::new()),
             executions: RwLock::new(HashMap::new()),
             api_key: None,
@@ -4193,8 +4216,10 @@ mod tests {
     async fn the_sweep_stops_a_box_idle_past_its_window() {
         let upstream = stub_upstream("running", true).await;
         let state = AppState {
-            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone()))
-                .expect("rest runtime"),
+            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+                upstream.url.clone(),
+            ))
+            .expect("rest runtime"),
             boxes: RwLock::new(HashMap::new()),
             executions: RwLock::new(HashMap::new()),
             api_key: None,
@@ -4236,8 +4261,10 @@ mod tests {
     async fn the_sweep_leaves_a_box_still_inside_its_idle_window() {
         let upstream = stub_upstream("running", true).await;
         let state = AppState {
-            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone()))
-                .expect("rest runtime"),
+            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+                upstream.url.clone(),
+            ))
+            .expect("rest runtime"),
             boxes: RwLock::new(HashMap::new()),
             executions: RwLock::new(HashMap::new()),
             api_key: None,
@@ -4279,8 +4306,10 @@ mod tests {
     async fn the_sweep_leaves_a_box_whose_deadline_has_not_passed() {
         let upstream = stub_upstream("stopped", true).await;
         let state = AppState {
-            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone()))
-                .expect("rest runtime"),
+            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+                upstream.url.clone(),
+            ))
+            .expect("rest runtime"),
             boxes: RwLock::new(HashMap::new()),
             executions: RwLock::new(HashMap::new()),
             api_key: None,
@@ -4330,8 +4359,10 @@ mod tests {
     async fn scraping_metrics_will_not_wake_a_box_the_sweep_would_stop() {
         let upstream = stub_upstream("stopped", true).await;
         let state = Arc::new(AppState {
-            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone()))
-                .expect("rest runtime"),
+            runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+                upstream.url.clone(),
+            ))
+            .expect("rest runtime"),
             boxes: RwLock::new(HashMap::new()),
             executions: RwLock::new(HashMap::new()),
             api_key: None,

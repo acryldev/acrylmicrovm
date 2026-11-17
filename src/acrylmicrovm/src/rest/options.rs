@@ -145,7 +145,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_with_api_key() {
-        let opts = AcrylMicrovmRestOptions::new("https://api.example.com").with_api_key("blk_live_x");
+        let opts =
+            AcrylMicrovmRestOptions::new("https://api.example.com").with_api_key("blk_live_x");
         let cred = opts.credential.expect("credential set");
         let tok = cred.get_token().await.expect("get_token");
         assert_eq!(tok.token, "blk_live_x");

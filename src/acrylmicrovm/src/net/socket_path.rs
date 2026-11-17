@@ -259,8 +259,9 @@ fn ensure_owned_private_dir(dir: &Path) -> AcrylMicrovmResult<()> {
         }
     }
 
-    let meta = std::fs::symlink_metadata(dir)
-        .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to stat {}: {}", dir.display(), e)))?;
+    let meta = std::fs::symlink_metadata(dir).map_err(|e| {
+        AcrylMicrovmError::Storage(format!("Failed to stat {}: {}", dir.display(), e))
+    })?;
     if !meta.file_type().is_dir() {
         return Err(AcrylMicrovmError::Internal(format!(
             "{} exists but is not a directory — refusing to use it \

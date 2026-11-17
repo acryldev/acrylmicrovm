@@ -15,7 +15,10 @@ fn nested_create_setter_reaches_existing_runtime_authorization() {
             .expect("runtime_new returned null runtime pointer");
         for enabled in [true, false] {
             assert_eq!(
-                acrylmicrovm_advanced_options_set_nested_virtualization(advanced, i32::from(enabled)),
+                acrylmicrovm_advanced_options_set_nested_virtualization(
+                    advanced,
+                    i32::from(enabled)
+                ),
                 AcrylMicrovmErrorCode::Ok
             );
             let mut options = acrylmicrovm::BoxOptions::default();

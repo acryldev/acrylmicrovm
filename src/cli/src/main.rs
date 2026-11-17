@@ -258,7 +258,8 @@ where
             Err(err) => {
                 eprintln!(
                     "warning: could not create log dir {}: {}; serve logs will be stderr only",
-                    acrylmicrovm::runtime::layout::FilesystemLayout::logs_dir_for(home_dir).display(),
+                    acrylmicrovm::runtime::layout::FilesystemLayout::logs_dir_for(home_dir)
+                        .display(),
                     err,
                 );
                 return None;

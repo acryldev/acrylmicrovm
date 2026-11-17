@@ -9,7 +9,8 @@ mod common;
 use std::process::{Command, Stdio};
 
 use acrylmicrovm::{
-    BoxCommand, BoxOptions, AcrylMicrovmError, AcrylMicrovmRestOptions, AcrylMicrovmRuntime, LiteBox, RootfsSpec,
+    AcrylMicrovmError, AcrylMicrovmRestOptions, AcrylMicrovmRuntime, BoxCommand, BoxOptions,
+    LiteBox, RootfsSpec,
 };
 use common::serve::ServeChild;
 use futures::StreamExt;
@@ -58,7 +59,8 @@ async fn exec_user_over_serve() {
         box_ids: Vec::new(),
     };
 
-    let runtime = AcrylMicrovmRuntime::rest(AcrylMicrovmRestOptions::new(serve.url())).expect("rest runtime");
+    let runtime =
+        AcrylMicrovmRuntime::rest(AcrylMicrovmRestOptions::new(serve.url())).expect("rest runtime");
     let sandbox = runtime
         .create(
             BoxOptions {

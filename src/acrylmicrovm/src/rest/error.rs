@@ -76,7 +76,9 @@ fn refine_by_code(code: &str, msg: &str) -> Option<AcrylMicrovmError> {
     Some(match code {
         "invalid_argument" => AcrylMicrovmError::InvalidArgument(msg),
         "unsupported" => AcrylMicrovmError::Unsupported(msg),
-        "unauthenticated" | "permission_denied" => AcrylMicrovmError::Config(format!("auth: {}", msg)),
+        "unauthenticated" | "permission_denied" => {
+            AcrylMicrovmError::Config(format!("auth: {}", msg))
+        }
         "not_found" => AcrylMicrovmError::NotFound(msg),
         "session_reaped" => AcrylMicrovmError::SessionReaped(msg),
         "already_exists" => AcrylMicrovmError::AlreadyExists(msg),
@@ -212,7 +214,12 @@ mod tests {
     /// One row of the round-trip table: `(http_status, error_type,
     /// snake_code, variant_predicate)`. Aliased so clippy doesn't
     /// flag the tuple as overly complex.
-    type RoundTripRow = (u16, &'static str, &'static str, fn(&AcrylMicrovmError) -> bool);
+    type RoundTripRow = (
+        u16,
+        &'static str,
+        &'static str,
+        fn(&AcrylMicrovmError) -> bool,
+    );
 
     /// One row of the status-baseline table: `(http_status,
     /// variant_predicate, variant_name_for_the_failure_message)`.
@@ -456,7 +463,11 @@ mod tests {
                 |e| matches!(e, AcrylMicrovmError::InvalidArgument(_)),
                 "InvalidArgument",
             ),
-            (404, |e| matches!(e, AcrylMicrovmError::NotFound(_)), "NotFound"),
+            (
+                404,
+                |e| matches!(e, AcrylMicrovmError::NotFound(_)),
+                "NotFound",
+            ),
             (
                 409,
                 |e| matches!(e, AcrylMicrovmError::InvalidState(_)),
@@ -504,7 +515,10 @@ mod tests {
         let text =
             r#"{"statusCode":409,"error":"Conflict","message":"dup","code":"already_exists"}"#;
         let err = map_http_body(StatusCode::CONFLICT, text);
-        assert!(matches!(err, AcrylMicrovmError::AlreadyExists(_)), "got {err:?}");
+        assert!(
+            matches!(err, AcrylMicrovmError::AlreadyExists(_)),
+            "got {err:?}"
+        );
     }
 
     /// A nested envelope that names no code must still decode as an

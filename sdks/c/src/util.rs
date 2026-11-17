@@ -73,7 +73,10 @@ pub fn stopped_runtime_error(action: &str) -> AcrylMicrovmError {
     ))
 }
 
-pub fn ensure_runtime_live(liveness: &RuntimeLiveness, action: &str) -> Result<(), AcrylMicrovmError> {
+pub fn ensure_runtime_live(
+    liveness: &RuntimeLiveness,
+    action: &str,
+) -> Result<(), AcrylMicrovmError> {
     if liveness.is_alive() {
         Ok(())
     } else {

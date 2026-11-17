@@ -221,7 +221,8 @@ async fn main_command_exits_after_large_output_without_attach() {
     let completed = tokio::time::timeout(std::time::Duration::from_secs(30), async {
         handle.start().await.expect("start box");
         loop {
-            if handle.info().await.expect("get box info").status == acrylmicrovm::BoxStatus::Stopped {
+            if handle.info().await.expect("get box info").status == acrylmicrovm::BoxStatus::Stopped
+            {
                 return true;
             }
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -882,7 +883,12 @@ async fn a_main_command_missing_from_the_image_is_an_invalid_argument() {
         other => panic!("a missing main command is the caller's mistake, got {other:?}"),
     };
     assert!(message.contains("'httpd'"), "names the command: {message}");
-    for leaked in ["internal error", "/run/acrylmicrovm", "bundle", box_id.as_str()] {
+    for leaked in [
+        "internal error",
+        "/run/acrylmicrovm",
+        "bundle",
+        box_id.as_str(),
+    ] {
         assert!(!message.contains(leaked), "leaks {leaked:?}: {message}");
     }
 }

@@ -166,7 +166,9 @@ impl AcrylMicrovmError {
 
     pub fn http(&self) -> (u16, &'static str, &'static str) {
         match self {
-            AcrylMicrovmError::InvalidArgument(_) => (400, "InvalidArgumentError", "invalid_argument"),
+            AcrylMicrovmError::InvalidArgument(_) => {
+                (400, "InvalidArgumentError", "invalid_argument")
+            }
             AcrylMicrovmError::Unsupported(_) | AcrylMicrovmError::UnsupportedEngine => {
                 (400, "UnsupportedError", "unsupported")
             }
@@ -181,7 +183,9 @@ impl AcrylMicrovmError {
                 (429, "ResourceExhaustedError", "resource_exhausted")
             }
             AcrylMicrovmError::Network(_) => (503, "NetworkError", "network_unavailable"),
-            AcrylMicrovmError::Portal(_) | AcrylMicrovmError::Rpc(_) | AcrylMicrovmError::RpcTransport(_) => {
+            AcrylMicrovmError::Portal(_)
+            | AcrylMicrovmError::Rpc(_)
+            | AcrylMicrovmError::RpcTransport(_) => {
                 (503, "UpstreamUnavailableError", "upstream_unavailable")
             }
             AcrylMicrovmError::Engine(_) => (503, "EngineError", "engine_unavailable"),
@@ -200,8 +204,8 @@ mod tests {
 
     #[test]
     fn validation_status_distinguishes_caller_input_from_internal_failure() {
-        let invalid =
-            AcrylMicrovmError::InvalidArgument("unknown capability".into()).into_validation_status();
+        let invalid = AcrylMicrovmError::InvalidArgument("unknown capability".into())
+            .into_validation_status();
         assert_eq!(invalid.code(), tonic::Code::InvalidArgument);
         assert_eq!(invalid.message(), "unknown capability");
 

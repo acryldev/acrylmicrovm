@@ -36,7 +36,8 @@ impl VmmInstanceImpl for KrunVmmInstance {
             // VM failed to start — use hypervisor probe to diagnose the cause.
             // libkrun collapses all errors to -EINVAL, so the probe inspects
             // the hypervisor directly to get the specific error code.
-            let err = AcrylMicrovmError::Engine(format!("VM failed to start (libkrun status={status})"));
+            let err =
+                AcrylMicrovmError::Engine(format!("VM failed to start (libkrun status={status})"));
             Err(self.probe.diagnose_create_failure(err))
         } else {
             // VM started and guest exited successfully (status is guest exit code)
@@ -68,7 +69,10 @@ impl Krun {
         Ok(Self { options })
     }
 
-    fn set_entrypoint(config: &InstanceSpec, ctx: &mut KrunContext) -> Result<(), AcrylMicrovmError> {
+    fn set_entrypoint(
+        config: &InstanceSpec,
+        ctx: &mut KrunContext,
+    ) -> Result<(), AcrylMicrovmError> {
         // Prepare entrypoint - the VM runs the guest agent which will:
         // 1. Mount virtiofs shares
         // 2. Create overlayfs from layers
@@ -311,7 +315,10 @@ impl Vmm for Krun {
             tracing::info!("Adding filesystem shares via virtiofs:");
             for share in config.fs_shares.shares() {
                 let path_str = share.host_path.to_str().ok_or_else(|| {
-                    AcrylMicrovmError::Engine(format!("Invalid path: {}", share.host_path.display()))
+                    AcrylMicrovmError::Engine(format!(
+                        "Invalid path: {}",
+                        share.host_path.display()
+                    ))
                 })?;
 
                 tracing::info!(

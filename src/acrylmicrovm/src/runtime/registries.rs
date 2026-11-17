@@ -13,8 +13,8 @@
 use std::fmt;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use acrylmicrovm_shared::errors::AcrylMicrovmError;
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 

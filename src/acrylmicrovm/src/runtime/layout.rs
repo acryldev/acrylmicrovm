@@ -208,11 +208,13 @@ impl FilesystemLayout {
         std::fs::create_dir_all(self.image_layers_dir())
             .map_err(|e| AcrylMicrovmError::Storage(format!("failed to create layers dir: {e}")))?;
 
-        std::fs::create_dir_all(self.image_manifests_dir())
-            .map_err(|e| AcrylMicrovmError::Storage(format!("failed to create manifests dir: {e}")))?;
+        std::fs::create_dir_all(self.image_manifests_dir()).map_err(|e| {
+            AcrylMicrovmError::Storage(format!("failed to create manifests dir: {e}"))
+        })?;
 
-        std::fs::create_dir_all(self.image_layout().disk_images_dir())
-            .map_err(|e| AcrylMicrovmError::Storage(format!("failed to create disk-images dir: {e}")))?;
+        std::fs::create_dir_all(self.image_layout().disk_images_dir()).map_err(|e| {
+            AcrylMicrovmError::Storage(format!("failed to create disk-images dir: {e}"))
+        })?;
 
         self.validate_same_filesystem()?;
 
@@ -598,8 +600,9 @@ impl BoxFilesystemLayout {
         std::fs::create_dir_all(&self.box_dir)
             .map_err(|e| AcrylMicrovmError::Storage(format!("failed to create box dir: {e}")))?;
 
-        std::fs::create_dir_all(self.sockets_dir())
-            .map_err(|e| AcrylMicrovmError::Storage(format!("failed to create sockets dir: {e}")))?;
+        std::fs::create_dir_all(self.sockets_dir()).map_err(|e| {
+            AcrylMicrovmError::Storage(format!("failed to create sockets dir: {e}"))
+        })?;
 
         // All sockets bind through the short /tmp symlink (sun_path limit) —
         // it must exist BEFORE anything binds, or boot fails on ENOENT.
@@ -627,8 +630,9 @@ impl BoxFilesystemLayout {
     /// Cleanup the box directory.
     pub fn cleanup(&self) -> AcrylMicrovmResult<()> {
         if self.box_dir.exists() {
-            std::fs::remove_dir_all(&self.box_dir)
-                .map_err(|e| AcrylMicrovmError::Storage(format!("failed to cleanup box dir: {e}")))?;
+            std::fs::remove_dir_all(&self.box_dir).map_err(|e| {
+                AcrylMicrovmError::Storage(format!("failed to cleanup box dir: {e}"))
+            })?;
         }
         self.sockets().remove();
         Ok(())
@@ -730,17 +734,21 @@ impl ImageFilesystemLayout {
         std::fs::create_dir_all(self.layers_dir())
             .map_err(|e| AcrylMicrovmError::Storage(format!("failed to create layers dir: {e}")))?;
 
-        std::fs::create_dir_all(self.extracted_dir())
-            .map_err(|e| AcrylMicrovmError::Storage(format!("failed to create extracted dir: {e}")))?;
+        std::fs::create_dir_all(self.extracted_dir()).map_err(|e| {
+            AcrylMicrovmError::Storage(format!("failed to create extracted dir: {e}"))
+        })?;
 
-        std::fs::create_dir_all(self.disk_images_dir())
-            .map_err(|e| AcrylMicrovmError::Storage(format!("failed to create disk-images dir: {e}")))?;
+        std::fs::create_dir_all(self.disk_images_dir()).map_err(|e| {
+            AcrylMicrovmError::Storage(format!("failed to create disk-images dir: {e}"))
+        })?;
 
-        std::fs::create_dir_all(self.manifests_dir())
-            .map_err(|e| AcrylMicrovmError::Storage(format!("failed to create manifests dir: {e}")))?;
+        std::fs::create_dir_all(self.manifests_dir()).map_err(|e| {
+            AcrylMicrovmError::Storage(format!("failed to create manifests dir: {e}"))
+        })?;
 
-        std::fs::create_dir_all(self.configs_dir())
-            .map_err(|e| AcrylMicrovmError::Storage(format!("failed to create configs dir: {e}")))?;
+        std::fs::create_dir_all(self.configs_dir()).map_err(|e| {
+            AcrylMicrovmError::Storage(format!("failed to create configs dir: {e}"))
+        })?;
 
         Ok(())
     }

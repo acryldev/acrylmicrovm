@@ -9,10 +9,12 @@ use tokio::runtime::Runtime as TokioRuntime;
 
 use acrylmicrovm::litebox::LiteBox;
 use acrylmicrovm::runtime::AcrylMicrovmRuntime;
-use acrylmicrovm::runtime::options::{BoxOptions, AcrylMicrovmOptions};
-use acrylmicrovm::{BoxID, AcrylMicrovmError, RootfsSpec};
+use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, BoxOptions};
+use acrylmicrovm::{AcrylMicrovmError, BoxID, RootfsSpec};
 
-use crate::error::{AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error};
+use crate::error::{
+    AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error,
+};
 use crate::runtime::create_tokio_runtime;
 use crate::util::c_str_to_string;
 use crate::{CAcrylMicrovmError, CAcrylMicrovmExecResult, CAcrylMicrovmSimple};
@@ -110,7 +112,8 @@ unsafe fn runner_new(
         let tokio_rt = match create_tokio_runtime() {
             Ok(rt) => rt,
             Err(e) => {
-                let err = AcrylMicrovmError::Internal(format!("Failed to create async runtime: {}", e));
+                let err =
+                    AcrylMicrovmError::Internal(format!("Failed to create async runtime: {}", e));
                 write_error(out_error, err);
                 return AcrylMicrovmErrorCode::Internal;
             }

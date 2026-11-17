@@ -15,7 +15,7 @@
 mod common;
 
 use acrylmicrovm::AcrylMicrovmRuntime;
-use acrylmicrovm::runtime::options::{BoxOptions, AcrylMicrovmOptions};
+use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, BoxOptions};
 use std::time::Instant;
 
 /// Print timing lines from shim.stderr, returning counts per prefix.

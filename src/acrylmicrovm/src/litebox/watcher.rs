@@ -174,7 +174,10 @@ impl BoxWatcher {
                 },
             )
             .await
-            && !matches!(error, AcrylMicrovmError::NotFound(_) | AcrylMicrovmError::Stopped(_))
+            && !matches!(
+                error,
+                AcrylMicrovmError::NotFound(_) | AcrylMicrovmError::Stopped(_)
+            )
         {
             tracing::warn!(box_id = %self.box_id, %error, "Failed to report box exit");
         }

@@ -65,7 +65,9 @@ pub(crate) fn mount_init_filesystems() -> AcrylMicrovmResult<()> {
                 flags,
                 None::<&str>,
             )
-            .map_err(|e| AcrylMicrovmError::Internal(format!("mount {filesystem} on {path}: {e}")))?;
+            .map_err(|e| {
+                AcrylMicrovmError::Internal(format!("mount {filesystem} on {path}: {e}"))
+            })?;
         }
     }
 
@@ -181,8 +183,9 @@ fn mount_tmpfs(cfg: &TmpfsMount) -> AcrylMicrovmResult<()> {
 
     // Create directory if it doesn't exist
     if !path.exists() {
-        fs::create_dir_all(path)
-            .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to create {}: {}", cfg.path, e)))?;
+        fs::create_dir_all(path).map_err(|e| {
+            AcrylMicrovmError::Internal(format!("Failed to create {}: {}", cfg.path, e))
+        })?;
     }
 
     // Mount tmpfs - use empty flags to be safe

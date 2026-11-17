@@ -50,7 +50,11 @@ trait AgentBackend: Send + Sync + std::fmt::Debug {
 
     fn capabilities(&self) -> AgentCapabilities;
 
-    async fn send(&self, text: &str, options: &AgentSendOptions) -> AcrylMicrovmResult<AgentTurnState>;
+    async fn send(
+        &self,
+        text: &str,
+        options: &AgentSendOptions,
+    ) -> AcrylMicrovmResult<AgentTurnState>;
 
     async fn turn(&self, turn_id: &str) -> AcrylMicrovmResult<AgentTurnState>;
 
@@ -94,7 +98,11 @@ trait AgentBackend: Send + Sync + std::fmt::Debug {
         unsupported(self.adapter(), "turn.steer")
     }
 
-    async fn interrupt(&self, _turn_id: &str, _options: &AgentControlOptions) -> AcrylMicrovmResult<()> {
+    async fn interrupt(
+        &self,
+        _turn_id: &str,
+        _options: &AgentControlOptions,
+    ) -> AcrylMicrovmResult<()> {
         unsupported(self.adapter(), "turn.interrupt")
     }
 }
@@ -144,7 +152,11 @@ impl Agents {
     /// `agent` selects the implementation: only `"opencode"`, with OpenCode
     /// 2.2.2 already installed in the Box. Starts the Box and OpenCode's
     /// managed service on first use.
-    pub async fn create(&self, agent: &str, options: AgentCreateOptions) -> AcrylMicrovmResult<Agent> {
+    pub async fn create(
+        &self,
+        agent: &str,
+        options: AgentCreateOptions,
+    ) -> AcrylMicrovmResult<Agent> {
         match agent {
             opencode::IMPLEMENTATION => {
                 self.require_local_runtime()?;
@@ -230,7 +242,11 @@ impl Agent {
     }
 
     /// Submit text. The default `queue` mode waits until the agent is idle.
-    pub async fn send(&self, text: &str, options: AgentSendOptions) -> AcrylMicrovmResult<AgentTurn> {
+    pub async fn send(
+        &self,
+        text: &str,
+        options: AgentSendOptions,
+    ) -> AcrylMicrovmResult<AgentTurn> {
         let state = self.backend.send(text, &options).await?;
         Ok(self.turn(state))
     }
@@ -242,7 +258,10 @@ impl Agent {
     }
 
     /// Open the agent's live events; events emitted before opening are not replayed.
-    pub async fn events(&self, options: AgentEventsOptions) -> AcrylMicrovmResult<AgentEventStream> {
+    pub async fn events(
+        &self,
+        options: AgentEventsOptions,
+    ) -> AcrylMicrovmResult<AgentEventStream> {
         self.backend.events(&options).await
     }
 
@@ -320,7 +339,10 @@ impl AgentTurn {
     }
 
     /// Open this turn's view of the agent's events.
-    pub async fn events(&self, options: AgentEventsOptions) -> AcrylMicrovmResult<AgentEventStream> {
+    pub async fn events(
+        &self,
+        options: AgentEventsOptions,
+    ) -> AcrylMicrovmResult<AgentEventStream> {
         self.backend.turn_events(&self.state.id, &options).await
     }
 

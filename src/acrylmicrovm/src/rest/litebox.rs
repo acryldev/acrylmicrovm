@@ -384,10 +384,12 @@ impl BoxBackend for RestBox {
                     .connect_ws_with_response(&path)
                     .await
                     .map_err(|e| match e {
-                        AcrylMicrovmError::AlreadyExists(msg) => AcrylMicrovmError::AlreadyExists(format!(
-                            "box {} main session has another client attached: {}",
-                            box_id, msg
-                        )),
+                        AcrylMicrovmError::AlreadyExists(msg) => {
+                            AcrylMicrovmError::AlreadyExists(format!(
+                                "box {} main session has another client attached: {}",
+                                box_id, msg
+                            ))
+                        }
                         other => other,
                     })?;
 
@@ -417,10 +419,12 @@ impl BoxBackend for RestBox {
                         "session {} not found — likely reaped after disconnect timeout: {}",
                         execution_id, msg
                     )),
-                    AcrylMicrovmError::AlreadyExists(msg) => AcrylMicrovmError::AlreadyExists(format!(
-                        "session {} has another client attached: {}",
-                        execution_id, msg
-                    )),
+                    AcrylMicrovmError::AlreadyExists(msg) => {
+                        AcrylMicrovmError::AlreadyExists(format!(
+                            "session {} has another client attached: {}",
+                            execution_id, msg
+                        ))
+                    }
                     other => other,
                 })?;
 
@@ -481,7 +485,9 @@ impl BoxBackend for RestBox {
             host_src.to_path_buf(),
             acrylmicrovm_shared::tar::PackContext {
                 follow_symlinks: opts.follow_symlinks,
-                include_parent: !acrylmicrovm_shared::tar::specifies_current_dir(host_src.as_os_str()),
+                include_parent: !acrylmicrovm_shared::tar::specifies_current_dir(
+                    host_src.as_os_str(),
+                ),
             },
         )
         .await?;
@@ -565,16 +571,17 @@ impl BoxBackend for RestBox {
         // slot when we read it back — we must not depend on Arc drop timing.
         let transport_fault: Arc<Mutex<Option<AcrylMicrovmError>>> = Arc::new(Mutex::new(None));
         let fault_slot = Arc::clone(&transport_fault);
-        let stream: acrylmicrovm_shared::BoxByteStream = Box::pin(resp.bytes_stream().map(move |r| {
-            r.map(|b| b.to_vec()).map_err(|e| {
-                let classified = transport_error(e);
-                let message = classified.to_string();
-                if let Ok(mut slot) = fault_slot.lock() {
-                    *slot = Some(classified);
-                }
-                io::Error::other(message)
-            })
-        }));
+        let stream: acrylmicrovm_shared::BoxByteStream =
+            Box::pin(resp.bytes_stream().map(move |r| {
+                r.map(|b| b.to_vec()).map_err(|e| {
+                    let classified = transport_error(e);
+                    let message = classified.to_string();
+                    if let Ok(mut slot) = fault_slot.lock() {
+                        *slot = Some(classified);
+                    }
+                    io::Error::other(message)
+                })
+            }));
 
         let unpacked = acrylmicrovm_shared::tar::unpack_stream(
             stream,
@@ -722,7 +729,11 @@ impl BoxNetworkBackend for RestBox {
             .await
     }
 
-    async fn tunnel(&self, target: SocketAddr, options: TunnelOptions) -> AcrylMicrovmResult<BoxTunnel> {
+    async fn tunnel(
+        &self,
+        target: SocketAddr,
+        options: TunnelOptions,
+    ) -> AcrylMicrovmResult<BoxTunnel> {
         let descriptor = self.tunnel_endpoint(target, options).await?;
         let endpoint = descriptor.uri;
         let client = self.client.clone();
@@ -764,7 +775,11 @@ impl RestBox {
 
 #[async_trait]
 impl SnapshotBackend for RestBox {
-    async fn create(&self, options: SnapshotOptions, name: &str) -> AcrylMicrovmResult<SnapshotInfo> {
+    async fn create(
+        &self,
+        options: SnapshotOptions,
+        name: &str,
+    ) -> AcrylMicrovmResult<SnapshotInfo> {
         self.client.require_snapshots_enabled().await?;
 
         let box_id = self.box_id_str();
@@ -1425,10 +1440,9 @@ fn extract_tar_to_path(tar_bytes: &[u8], host_dst: &Path) -> AcrylMicrovmResult<
         // Re-read the (single) entry from a fresh Archive and copy
         // its bytes into host_dst directly.
         let mut archive = tar::Archive::new(tar_bytes);
-        for entry in archive
-            .entries()
-            .map_err(|e| AcrylMicrovmError::Internal(format!("failed to re-read tar archive: {}", e)))?
-        {
+        for entry in archive.entries().map_err(|e| {
+            AcrylMicrovmError::Internal(format!("failed to re-read tar archive: {}", e))
+        })? {
             let mut entry = entry.map_err(|e| {
                 AcrylMicrovmError::Internal(format!("failed to re-read tar entry: {}", e))
             })?;
@@ -1436,10 +1450,18 @@ fn extract_tar_to_path(tar_bytes: &[u8], host_dst: &Path) -> AcrylMicrovmResult<
                 continue;
             }
             let mut out = std::fs::File::create(host_dst).map_err(|e| {
-                AcrylMicrovmError::Internal(format!("failed to create {}: {}", host_dst.display(), e))
+                AcrylMicrovmError::Internal(format!(
+                    "failed to create {}: {}",
+                    host_dst.display(),
+                    e
+                ))
             })?;
             std::io::copy(&mut entry, &mut out).map_err(|e| {
-                AcrylMicrovmError::Internal(format!("failed to write {}: {}", host_dst.display(), e))
+                AcrylMicrovmError::Internal(format!(
+                    "failed to write {}: {}",
+                    host_dst.display(),
+                    e
+                ))
             })?;
             return Ok(());
         }
@@ -2137,7 +2159,9 @@ mod tests {
             follow_symlinks: false,
             include_parent: true,
         };
-        let (_, tar) = acrylmicrovm_shared::tar::pack_stream(tree, pack).await.unwrap();
+        let (_, tar) = acrylmicrovm_shared::tar::pack_stream(tree, pack)
+            .await
+            .unwrap();
         let tar_bytes: Vec<u8> = tar.map(Result::unwrap).concat().await;
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3217,7 +3241,8 @@ mod tests {
         });
         let mut rest_box = rest_box_for(port, "tun-box");
         rest_box.client = ApiClient::new(
-            &AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}")).with_api_key("owner-key"),
+            &AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))
+                .with_api_key("owner-key"),
         )
         .unwrap();
         let network = crate::litebox::NetworkHandle::new(Arc::new(rest_box));

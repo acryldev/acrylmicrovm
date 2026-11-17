@@ -40,7 +40,11 @@ impl SnapshotStore {
     }
 
     /// Find a snapshot by box ID and name.
-    pub(crate) fn find(&self, box_id: &str, name: &str) -> AcrylMicrovmResult<Option<SnapshotInfo>> {
+    pub(crate) fn find(
+        &self,
+        box_id: &str,
+        name: &str,
+    ) -> AcrylMicrovmResult<Option<SnapshotInfo>> {
         let conn = self.db.conn();
         let json: Option<String> = db_err!(
             conn.query_row(

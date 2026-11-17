@@ -179,14 +179,14 @@ impl KrunContext {
         let kernel_c = CString::new(kernel_path)
             .map_err(|e| AcrylMicrovmError::Engine(format!("invalid kernel path: {e}")))?;
 
-        let initramfs_c = if let Some(initramfs) = initramfs {
-            Some(
-                CString::new(initramfs)
-                    .map_err(|e| AcrylMicrovmError::Engine(format!("invalid initramfs path: {e}")))?,
-            )
-        } else {
-            None
-        };
+        let initramfs_c =
+            if let Some(initramfs) = initramfs {
+                Some(CString::new(initramfs).map_err(|e| {
+                    AcrylMicrovmError::Engine(format!("invalid initramfs path: {e}"))
+                })?)
+            } else {
+                None
+            };
 
         let cmdline_c = if let Some(cmdline) = cmdline {
             Some(

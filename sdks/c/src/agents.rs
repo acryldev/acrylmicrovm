@@ -7,7 +7,7 @@ use std::ptr;
 use acrylmicrovm::AcrylMicrovmError;
 
 use crate::error::{AcrylMicrovmErrorCode, null_pointer_error, write_error};
-use crate::{CBoxHandle, CAcrylMicrovmError};
+use crate::{CAcrylMicrovmError, CBoxHandle};
 
 /// Box-owned namespace; release with acrylmicrovm_agents_free.
 #[derive(Debug)]
@@ -80,7 +80,8 @@ pub struct CAgentEventsOptions {
 
 /// On success, receives an owned agent; release it with acrylmicrovm_agent_free.
 /// The error pointer is borrowed for callback dispatch only.
-pub type CAgentCb = Option<unsafe extern "C" fn(*mut CAgent, *const CAcrylMicrovmError, *mut c_void)>;
+pub type CAgentCb =
+    Option<unsafe extern "C" fn(*mut CAgent, *const CAcrylMicrovmError, *mut c_void)>;
 /// On success, receives an owned turn; release it with acrylmicrovm_agent_turn_free.
 /// The error pointer is borrowed for callback dispatch only.
 pub type CAgentTurnCb =
@@ -403,7 +404,10 @@ pub unsafe extern "C" fn acrylmicrovm_agent_events_free(handle: *mut CAgentEvent
     }
 }
 
-unsafe fn not_implemented(operation: &str, out_error: *mut CAcrylMicrovmError) -> AcrylMicrovmErrorCode {
+unsafe fn not_implemented(
+    operation: &str,
+    out_error: *mut CAcrylMicrovmError,
+) -> AcrylMicrovmErrorCode {
     unsafe {
         write_error(
             out_error,

@@ -1,5 +1,7 @@
 // Modified by ACRYL, 2026
-use acrylmicrovm::runtime::advanced_options::{ContainerCapabilities, ResourceLimits, SecurityOptions};
+use acrylmicrovm::runtime::advanced_options::{
+    ContainerCapabilities, ResourceLimits, SecurityOptions,
+};
 use napi_derive::napi;
 
 // ============================================================================

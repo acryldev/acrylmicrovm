@@ -970,7 +970,10 @@ fn filesystem_init(
     // once the code length and therefore the data addresses are known.
     for (number, args) in [
         (83u32, [Some("/aggregate"), None, None]),
-        (165, [Some("acrylmicrovm"), Some("/aggregate"), Some("virtiofs")]),
+        (
+            165,
+            [Some("acrylmicrovm"), Some("/aggregate"), Some("virtiofs")],
+        ),
         (83, [Some(created.as_str()), None, None]),
         (2, [Some(input.as_str()), None, None]),
     ] {

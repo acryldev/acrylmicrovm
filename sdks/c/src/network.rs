@@ -17,21 +17,22 @@ use acrylmicrovm::litebox::{
     TunnelForwarder as CoreTunnelForwarder,
 };
 use acrylmicrovm::runtime::options::{InboundNetworkConfig, OutboundNetworkConfig};
-use acrylmicrovm::{BoxConnection, AcrylMicrovmError};
+use acrylmicrovm::{AcrylMicrovmError, BoxConnection};
 
 use crate::error::{AcrylMicrovmErrorCode, error_to_code, null_pointer_error, write_error};
 use crate::event_queue::{
     CTunnelForwarderCloseCb, CTunnelForwarderWaitCb, EventQueue, RuntimeEvent, push_event,
 };
 use crate::{
-    CBoxHandle, CBoxNetworkHandle, CBoxTunnelHandle, CAcrylMicrovmError, CTunnelForwarderHandle,
+    CAcrylMicrovmError, CBoxHandle, CBoxNetworkHandle, CBoxTunnelHandle, CTunnelForwarderHandle,
 };
 
 async fn connection_fd(
     mut connection: BoxConnection,
 ) -> Result<std::os::fd::OwnedFd, AcrylMicrovmError> {
-    let (sdk, mut bridge) = tokio::net::UnixStream::pair()
-        .map_err(|error| AcrylMicrovmError::Network(format!("create SDK socket bridge: {error}")))?;
+    let (sdk, mut bridge) = tokio::net::UnixStream::pair().map_err(|error| {
+        AcrylMicrovmError::Network(format!("create SDK socket bridge: {error}"))
+    })?;
     tokio::spawn(async move {
         // The relay is detached, so a failure here has nowhere to be returned;
         // the caller only sees EOF on its half. Log it so it is diagnosable.
@@ -57,8 +58,9 @@ unsafe fn parse_policy<T: serde::de::DeserializeOwned>(
     if json.is_null() {
         return Err(null_pointer_error("policy_json"));
     }
-    serde_json::from_slice(unsafe { CStr::from_ptr(json) }.to_bytes())
-        .map_err(|error| AcrylMicrovmError::InvalidArgument(format!("invalid network policy: {error}")))
+    serde_json::from_slice(unsafe { CStr::from_ptr(json) }.to_bytes()).map_err(|error| {
+        AcrylMicrovmError::InvalidArgument(format!("invalid network policy: {error}"))
+    })
 }
 
 fn policy_result(
@@ -163,7 +165,9 @@ impl BoxTunnelHandle {
             .map_err(|_| AcrylMicrovmError::Internal("tunnel lock poisoned".into()))?
             .take()
             .ok_or_else(|| {
-                AcrylMicrovmError::InvalidState("tunnel connection has already been consumed".into())
+                AcrylMicrovmError::InvalidState(
+                    "tunnel connection has already been consumed".into(),
+                )
             })
     }
 }
@@ -227,7 +231,9 @@ unsafe fn parse_socket_address(
                 IpAddr::V4(Ipv4Addr::LOCALHOST)
             } else {
                 host.parse::<IpAddr>().map_err(|_| {
-                    AcrylMicrovmError::InvalidArgument("TCP listener host must be a numeric IP".into())
+                    AcrylMicrovmError::InvalidArgument(
+                        "TCP listener host must be a numeric IP".into(),
+                    )
                 })?
             };
             Ok(SocketAddress::Tcp(SocketAddr::new(ip, address.port)))
@@ -241,13 +247,9 @@ unsafe fn parse_socket_address(
             if address.path.is_null() {
                 return Err(null_pointer_error("listen.path"));
             }
-            let path = PathBuf::from(
-                unsafe { CStr::from_ptr(address.path) }
-                    .to_str()
-                    .map_err(|_| {
-                        AcrylMicrovmError::InvalidArgument("listener path is not UTF-8".into())
-                    })?,
-            );
+            let path = PathBuf::from(unsafe { CStr::from_ptr(address.path) }.to_str().map_err(
+                |_| AcrylMicrovmError::InvalidArgument("listener path is not UTF-8".into()),
+            )?);
             if !path.is_absolute() {
                 return Err(AcrylMicrovmError::InvalidArgument(
                     "Unix listener path must be absolute".into(),
@@ -274,9 +276,9 @@ pub unsafe extern "C" fn acrylmicrovm_socket_address_parse(
         if address.is_null() || out_address.is_null() {
             return Err(null_pointer_error("address/out_address"));
         }
-        let address = unsafe { CStr::from_ptr(address) }
-            .to_str()
-            .map_err(|_| AcrylMicrovmError::InvalidArgument("socket address is not UTF-8".into()))?;
+        let address = unsafe { CStr::from_ptr(address) }.to_str().map_err(|_| {
+            AcrylMicrovmError::InvalidArgument("socket address is not UTF-8".into())
+        })?;
         let address = address.parse::<SocketAddr>().map_err(|_| {
             AcrylMicrovmError::InvalidArgument("expected numeric IPv4:port or [IPv6]:port".into())
         })?;
@@ -296,7 +298,9 @@ pub unsafe extern "C" fn acrylmicrovm_socket_address_parse(
 }
 
 /// Read only initialized fields for the family, not the storage's padding.
-unsafe fn parse_tunnel_target(target: *const sockaddr_storage) -> Result<SocketAddr, AcrylMicrovmError> {
+unsafe fn parse_tunnel_target(
+    target: *const sockaddr_storage,
+) -> Result<SocketAddr, AcrylMicrovmError> {
     if target.is_null() {
         return Err(null_pointer_error("target"));
     }
@@ -414,7 +418,9 @@ pub unsafe extern "C" fn acrylmicrovm_tunnel_forwarder_close(
 
 /// Initiate non-blocking cancellation and release the caller's handle.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn acrylmicrovm_tunnel_forwarder_free(forwarder: *mut CTunnelForwarderHandle) {
+pub unsafe extern "C" fn acrylmicrovm_tunnel_forwarder_free(
+    forwarder: *mut CTunnelForwarderHandle,
+) {
     if !forwarder.is_null() {
         let forwarder = unsafe { Box::from_raw(forwarder) };
         let handle = forwarder.handle.clone();
@@ -849,7 +855,11 @@ mod tests {
         let mut storage = std::mem::MaybeUninit::uninit();
         assert_eq!(
             unsafe {
-                acrylmicrovm_socket_address_parse(text.as_ptr(), storage.as_mut_ptr(), ptr::null_mut())
+                acrylmicrovm_socket_address_parse(
+                    text.as_ptr(),
+                    storage.as_mut_ptr(),
+                    ptr::null_mut(),
+                )
             },
             AcrylMicrovmErrorCode::Ok
         );
@@ -879,7 +889,13 @@ mod tests {
             let mut tunnel = ptr::null_mut();
             let mut error = CAcrylMicrovmError::default();
             let code = unsafe {
-                acrylmicrovm_network_tunnel(&mut network, &target, ptr::null(), &mut tunnel, &mut error)
+                acrylmicrovm_network_tunnel(
+                    &mut network,
+                    &target,
+                    ptr::null(),
+                    &mut tunnel,
+                    &mut error,
+                )
             };
             assert_eq!(code, AcrylMicrovmErrorCode::InvalidArgument);
             assert!(tunnel.is_null());
@@ -896,9 +912,10 @@ mod tests {
     /// `acrylmicrovm_box_network` builds it from a box handle.
     fn network_at(url: &str) -> (acrylmicrovm::AcrylMicrovmRuntime, BoxNetworkHandle) {
         let tokio_rt = Arc::new(TokioRuntime::new().unwrap());
-        let runtime =
-            acrylmicrovm::AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(url.to_string()))
-                .unwrap();
+        let runtime = acrylmicrovm::AcrylMicrovmRuntime::rest(
+            acrylmicrovm::AcrylMicrovmRestOptions::new(url.to_string()),
+        )
+        .unwrap();
         let litebox = tokio_rt.block_on(runtime.get("box1")).unwrap().unwrap();
         let network = BoxNetworkHandle {
             handle: litebox.network(),

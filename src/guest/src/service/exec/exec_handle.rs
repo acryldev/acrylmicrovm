@@ -65,8 +65,10 @@ fn async_fd(fd: OwnedFd, stream_name: &str) -> AcrylMicrovmResult<AsyncFd<OwnedF
 }
 
 fn set_nonblocking(fd: &OwnedFd) -> AcrylMicrovmResult<()> {
-    let flags = nix::fcntl::fcntl(fd.as_raw_fd(), nix::fcntl::FcntlArg::F_GETFL)
-        .map_err(|error| AcrylMicrovmError::Internal(format!("Failed to read fd flags: {error}")))?;
+    let flags =
+        nix::fcntl::fcntl(fd.as_raw_fd(), nix::fcntl::FcntlArg::F_GETFL).map_err(|error| {
+            AcrylMicrovmError::Internal(format!("Failed to read fd flags: {error}"))
+        })?;
     let mut flags = nix::fcntl::OFlag::from_bits_truncate(flags);
     flags.insert(nix::fcntl::OFlag::O_NONBLOCK);
     nix::fcntl::fcntl(fd.as_raw_fd(), nix::fcntl::FcntlArg::F_SETFL(flags)).map_err(|error| {

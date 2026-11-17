@@ -87,10 +87,9 @@ impl Transport for tokio::net::UnixStream {
 
     fn into_fd(self: Box<Self>) -> AcrylMicrovmResult<OwnedFd> {
         // Deregisters from the reactor; the caller owns the descriptor after.
-        (*self)
-            .into_std()
-            .map(OwnedFd::from)
-            .map_err(|error| AcrylMicrovmError::Network(format!("detach tunnel descriptor: {error}")))
+        (*self).into_std().map(OwnedFd::from).map_err(|error| {
+            AcrylMicrovmError::Network(format!("detach tunnel descriptor: {error}"))
+        })
     }
 }
 
@@ -203,9 +202,9 @@ impl BoxWriter {
     /// Errors are mapped into [`AcrylMicrovmError`]; the disconnected-peer tolerance
     /// itself comes from this type's [`AsyncWrite`] impl.
     pub async fn shutdown(&mut self) -> AcrylMicrovmResult<()> {
-        AsyncWriteExt::shutdown(self)
-            .await
-            .map_err(|error| AcrylMicrovmError::Network(format!("shut down tunnel writer: {error}")))
+        AsyncWriteExt::shutdown(self).await.map_err(|error| {
+            AcrylMicrovmError::Network(format!("shut down tunnel writer: {error}"))
+        })
     }
 }
 
@@ -546,7 +545,9 @@ impl BoundListener {
                     .await
                     .map(Self::Tcp)
                     .map_err(|error| {
-                        AcrylMicrovmError::Network(format!("bind tunnel listener {address}: {error}"))
+                        AcrylMicrovmError::Network(format!(
+                            "bind tunnel listener {address}: {error}"
+                        ))
                     })
             }
             SocketAddress::Unix(path) => {
@@ -818,7 +819,10 @@ mod tests {
         else {
             panic!("a non-local target must be refused");
         };
-        assert!(matches!(error, AcrylMicrovmError::InvalidArgument(_)), "{error}");
+        assert!(
+            matches!(error, AcrylMicrovmError::InvalidArgument(_)),
+            "{error}"
+        );
         assert_eq!(
             *backend.targets.lock().unwrap(),
             [
@@ -969,7 +973,9 @@ mod tests {
             let attempts = Arc::clone(&self.attempts);
             Ok(pending_tunnel(move || {
                 if attempts.fetch_add(1, Ordering::SeqCst) == 1 {
-                    return Err(AcrylMicrovmError::Network("intentional setup failure".into()));
+                    return Err(AcrylMicrovmError::Network(
+                        "intentional setup failure".into(),
+                    ));
                 }
                 Ok(echo_connection())
             }))

@@ -15,8 +15,8 @@ use crate::pipeline::PipelineTask;
 use crate::runtime::layout::BoxFilesystemLayout;
 use crate::runtime::options::RootfsSpec;
 use crate::runtime::rt_impl::SharedRuntimeImpl;
-use async_trait::async_trait;
 use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
+use async_trait::async_trait;
 
 pub struct ContainerRootfsTask;
 
@@ -40,10 +40,9 @@ impl PipelineTask<InitCtx> for ContainerRootfsTask {
             built_from,
         ) = {
             let ctx = ctx.lock().await;
-            let layout = ctx
-                .layout
-                .clone()
-                .ok_or_else(|| AcrylMicrovmError::Internal("filesystem task must run first".into()))?;
+            let layout = ctx.layout.clone().ok_or_else(|| {
+                AcrylMicrovmError::Internal("filesystem task must run first".into())
+            })?;
             let mut env = ctx.config.options.env.clone();
             // Inject secret placeholder env vars (e.g., ACRYLMICROVM_SECRET_OPENAI=<ACRYLMICROVM_SECRET:openai>).
             // The MITM proxy injects real values into request headers on the host.
@@ -274,9 +273,9 @@ fn create_cow_disk(
         ContainerRootfsPrepResult::Layers { .. } => Err(AcrylMicrovmError::Internal(
             "Layers mode requires overlayfs - disk creation not applicable".into(),
         )),
-        ContainerRootfsPrepResult::Merged(_) => {
-            Err(AcrylMicrovmError::Internal("Merged mode not supported".into()))
-        }
+        ContainerRootfsPrepResult::Merged(_) => Err(AcrylMicrovmError::Internal(
+            "Merged mode not supported".into(),
+        )),
     }
 }
 

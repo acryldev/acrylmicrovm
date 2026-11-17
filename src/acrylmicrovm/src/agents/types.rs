@@ -10,7 +10,8 @@ use serde_json::Value;
 use crate::AcrylMicrovmResult;
 
 /// A stream of agent events.
-pub type AgentEventStream = Pin<Box<dyn Stream<Item = AcrylMicrovmResult<AgentEvent>> + Send + Sync>>;
+pub type AgentEventStream =
+    Pin<Box<dyn Stream<Item = AcrylMicrovmResult<AgentEvent>> + Send + Sync>>;
 
 /// Initial adapter configuration. Tools/MCP entries identify Box-managed resources.
 #[derive(Debug, Clone, Default)]

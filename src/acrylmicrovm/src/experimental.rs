@@ -6,7 +6,7 @@
 //! [`ACRYLMICROVM_EXPERIMENTAL`](EXPERIMENTAL_FEATURES_ENV); Rust callers use
 //! [`RuntimeBuilder`] so capability state is explicit and runtime-scoped.
 
-use crate::runtime::options::{BoxOptions, AcrylMicrovmOptions};
+use crate::runtime::options::{AcrylMicrovmOptions, BoxOptions};
 use crate::{AcrylMicrovmError, AcrylMicrovmResult, AcrylMicrovmRuntime};
 use std::collections::BTreeSet;
 

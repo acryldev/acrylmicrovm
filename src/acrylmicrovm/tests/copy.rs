@@ -325,7 +325,8 @@ async fn streaming_payload_under_mount_is_refused(bx: &LiteBox, tmp: &Path) {
             .unwrap();
         builder.finish().unwrap();
     }
-    let poisoned: acrylmicrovm_shared::BoxByteStream = Box::pin(tokio_stream::iter(vec![Ok(tar_bytes)]));
+    let poisoned: acrylmicrovm_shared::BoxByteStream =
+        Box::pin(tokio_stream::iter(vec![Ok(tar_bytes)]));
 
     let err = bx
         .copy_in_stream(poisoned, "/", CopySourceKind::Dir, CopyOptions::default())

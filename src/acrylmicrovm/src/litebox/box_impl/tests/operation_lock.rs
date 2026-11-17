@@ -258,7 +258,10 @@ async fn stopped_removed_handle_start_still_reports_stopped() {
     let bx = &fixture.box_impl;
     bx.stop().await.unwrap();
     bx.runtime.remove_box(bx.id(), false).unwrap();
-    assert!(matches!(bx.start().await, Err(AcrylMicrovmError::Stopped(_))));
+    assert!(matches!(
+        bx.start().await,
+        Err(AcrylMicrovmError::Stopped(_))
+    ));
     bx.stop().await.unwrap();
 }
 async fn check_busy_sync_shutdown(retry_with_drop: bool) {
@@ -459,7 +462,8 @@ async fn implicit_job_rechecks_after_admission() {
         .create(
             BoxOptions {
                 rootfs: RootfsSpec::RootfsPath(
-                    std::env::var("ACRYLMICROVM_REPRO_ROOTFS").expect("set ACRYLMICROVM_REPRO_ROOTFS"),
+                    std::env::var("ACRYLMICROVM_REPRO_ROOTFS")
+                        .expect("set ACRYLMICROVM_REPRO_ROOTFS"),
                 ),
                 detach: false,
                 auto_delete: Some(0),

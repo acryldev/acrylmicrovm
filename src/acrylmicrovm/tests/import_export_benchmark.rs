@@ -17,7 +17,7 @@ use std::os::fd::AsRawFd;
 
 use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, ExportOptions};
 use acrylmicrovm::runtime::types::BoxStatus;
-use acrylmicrovm::{BoxCommand, AcrylMicrovmRuntime, LiteBox};
+use acrylmicrovm::{AcrylMicrovmRuntime, BoxCommand, LiteBox};
 use tempfile::TempDir;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt::writer::TestWriter;

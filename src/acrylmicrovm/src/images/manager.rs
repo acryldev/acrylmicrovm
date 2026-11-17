@@ -626,7 +626,10 @@ mod tests {
 
         let error = images.get("quay.io/acme/missing").await.unwrap_err();
 
-        assert!(matches!(error, crate::AcrylMicrovmError::NotFound(_)), "{error}");
+        assert!(
+            matches!(error, crate::AcrylMicrovmError::NotFound(_)),
+            "{error}"
+        );
     }
 
     /// Remove takes the alias too, or the image would still list as `<none>`,

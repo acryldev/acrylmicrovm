@@ -4,7 +4,9 @@ use std::path::PathBuf;
 
 fn main() {
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-    let output_file = PathBuf::from(&crate_dir).join("include").join("acrylmicrovm.h");
+    let output_file = PathBuf::from(&crate_dir)
+        .join("include")
+        .join("acrylmicrovm.h");
 
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rustc-cdylib-link-arg=-Wl,-install_name,@rpath/libacrylmicrovm.dylib");

@@ -2,7 +2,7 @@
 //! Container service interface.
 
 use acrylmicrovm_shared::{
-    BindMount, AcrylMicrovmError, AcrylMicrovmResult, CaCert,
+    AcrylMicrovmError, AcrylMicrovmResult, BindMount, CaCert,
     ContainerAdvancedOptions as ProtoContainerAdvancedOptions,
     ContainerCapabilities as ProtoContainerCapabilities, ContainerClient,
     ContainerConfig as ProtoContainerConfig, ContainerDevice, ContainerInitErrorKind,
@@ -68,11 +68,13 @@ impl ContainerRootfsInitConfig {
                 need_format,
                 need_resize,
             } => RootfsInit {
-                strategy: Some(acrylmicrovm_shared::rootfs_init::Strategy::Disk(DiskRootfs {
-                    device,
-                    need_format,
-                    need_resize,
-                })),
+                strategy: Some(acrylmicrovm_shared::rootfs_init::Strategy::Disk(
+                    DiskRootfs {
+                        device,
+                        need_format,
+                        need_resize,
+                    },
+                )),
             },
         }
     }

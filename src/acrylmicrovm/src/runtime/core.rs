@@ -10,7 +10,7 @@ use crate::metrics::RuntimeMetrics;
 use crate::runtime::backend::RuntimeBackend;
 use crate::runtime::checkpoints::{CheckpointBackend, CheckpointHandle};
 use crate::runtime::images::ImageBackend;
-use crate::runtime::options::{BoxArchive, BoxOptions, AcrylMicrovmOptions};
+use crate::runtime::options::{AcrylMicrovmOptions, BoxArchive, BoxOptions};
 use crate::runtime::registries::RegistryBackend;
 use crate::runtime::rt_impl::{LocalRuntime, RuntimeImpl};
 use crate::runtime::signal_handler::install_signal_handler;
@@ -589,7 +589,8 @@ impl AcrylMicrovmRuntime {
 
 impl std::fmt::Debug for AcrylMicrovmRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AcrylMicrovmRuntime").finish_non_exhaustive()
+        f.debug_struct("AcrylMicrovmRuntime")
+            .finish_non_exhaustive()
     }
 }
 
@@ -657,7 +658,10 @@ mod tests {
                 .expect("local get_or_create from a checkpoint must fail"),
         ];
         for error in errors {
-            assert!(matches!(error, AcrylMicrovmError::Unsupported(_)), "{error}");
+            assert!(
+                matches!(error, AcrylMicrovmError::Unsupported(_)),
+                "{error}"
+            );
             assert!(error.to_string().contains("REST runtimes"), "{error}");
         }
         assert!(!home.path().join("checkpoints").exists());

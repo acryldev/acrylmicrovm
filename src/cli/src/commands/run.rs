@@ -5,7 +5,7 @@ use crate::cli::{
 };
 use crate::terminal::StreamManager;
 use crate::util::to_shell_exit_code;
-use acrylmicrovm::{AttachOptions, BoxOptions, AcrylMicrovmRuntime, LiteBox, RootfsSpec};
+use acrylmicrovm::{AcrylMicrovmRuntime, AttachOptions, BoxOptions, LiteBox, RootfsSpec};
 use clap::Args;
 use std::io::{self, IsTerminal};
 
@@ -309,8 +309,15 @@ mod tests {
 
     #[test]
     fn run_rootfs_flag_sets_rootfs_path_and_uses_trailing_command() {
-        let cli = Cli::try_parse_from(["acrylmicrovm", "run", "--rootfs", "/tmp/rootfs", "echo", "hi"])
-            .expect("run --rootfs should parse");
+        let cli = Cli::try_parse_from([
+            "acrylmicrovm",
+            "run",
+            "--rootfs",
+            "/tmp/rootfs",
+            "echo",
+            "hi",
+        ])
+        .expect("run --rootfs should parse");
         let Commands::Run(args) = cli.command else {
             panic!("expected run command");
         };

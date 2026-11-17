@@ -220,7 +220,10 @@ impl SourceScan {
 /// caller's guard owning every already-widened entry. Walks top-down: a `0000`
 /// directory cannot be listed until its own owner read+search bits are restored,
 /// so each directory is widened before descent.
-fn scan_source_tree(source: &Path, widened: &mut Vec<WidenedPerm>) -> AcrylMicrovmResult<SourceScan> {
+fn scan_source_tree(
+    source: &Path,
+    widened: &mut Vec<WidenedPerm>,
+) -> AcrylMicrovmResult<SourceScan> {
     let mut scan = SourceScan {
         owners: Vec::new(),
         unrecorded: 0,
@@ -241,8 +244,9 @@ fn scan_dir_recursive(
 
     // A directory needs owner read+search (0o500) before we can list it, read its
     // xattr, or descend.
-    let dir_meta = std::fs::symlink_metadata(dir)
-        .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to stat {}: {}", dir.display(), e)))?;
+    let dir_meta = std::fs::symlink_metadata(dir).map_err(|e| {
+        AcrylMicrovmError::Storage(format!("Failed to stat {}: {}", dir.display(), e))
+    })?;
     let dir_mode = dir_meta.mode();
     if dir_mode & 0o500 != 0o500 {
         record_and_widen(source_root, dir, dir_mode, dir_mode | 0o500, widened)?;
@@ -256,7 +260,11 @@ fn scan_dir_recursive(
     for entry in entries {
         let path = entry
             .map_err(|e| {
-                AcrylMicrovmError::Storage(format!("Failed to read entry in {}: {}", dir.display(), e))
+                AcrylMicrovmError::Storage(format!(
+                    "Failed to read entry in {}: {}",
+                    dir.display(),
+                    e
+                ))
             })?
             .path();
         let meta = std::fs::symlink_metadata(&path).map_err(|e| {
@@ -1316,14 +1324,21 @@ mod tests {
 
     #[test]
     fn test_build_inject_commands_nested_path() {
-        let cmds = build_inject_commands("/host/acrylmicrovm-guest", "acrylmicrovm/bin/acrylmicrovm-guest");
+        let cmds = build_inject_commands(
+            "/host/acrylmicrovm-guest",
+            "acrylmicrovm/bin/acrylmicrovm-guest",
+        );
 
         // Should create parent dirs: acrylmicrovm, acrylmicrovm/bin
         assert!(cmds.contains("mkdir /acrylmicrovm\n"));
         assert!(cmds.contains("mkdir /acrylmicrovm/bin\n"));
 
         // Should write the file (source path quoted for spaces)
-        assert!(cmds.contains("write \"/host/acrylmicrovm-guest\" /acrylmicrovm/bin/acrylmicrovm-guest\n"));
+        assert!(
+            cmds.contains(
+                "write \"/host/acrylmicrovm-guest\" /acrylmicrovm/bin/acrylmicrovm-guest\n"
+            )
+        );
 
         // Should set file permissions
         assert!(cmds.contains("sif /acrylmicrovm/bin/acrylmicrovm-guest uid 0\n"));

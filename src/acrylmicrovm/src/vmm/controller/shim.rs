@@ -193,10 +193,9 @@ impl VmmHandlerTrait for ShimHandler {
         let pid = Pid::from_u32(self.pid);
 
         // Use the shared System instance for stateful CPU tracking
-        let mut sys = self
-            .metrics_sys
-            .lock()
-            .map_err(|e| AcrylMicrovmError::Internal(format!("metrics_sys lock poisoned: {}", e)))?;
+        let mut sys = self.metrics_sys.lock().map_err(|e| {
+            AcrylMicrovmError::Internal(format!("metrics_sys lock poisoned: {}", e))
+        })?;
 
         // Refresh process info - this updates the internal state for delta calculation
         sys.refresh_process(pid);
@@ -301,7 +300,10 @@ impl ShimController {
 
 #[async_trait::async_trait]
 impl VmmController for ShimController {
-    async fn start(&mut self, config: &InstanceSpec) -> AcrylMicrovmResult<Box<dyn VmmHandlerTrait>> {
+    async fn start(
+        &mut self,
+        config: &InstanceSpec,
+    ) -> AcrylMicrovmResult<Box<dyn VmmHandlerTrait>> {
         tracing::debug!(
             "Preparing config: entrypoint.executable={}, entrypoint.args={:?}",
             config.guest_entrypoint.executable,

@@ -40,7 +40,7 @@ use super::{
 };
 use crate::litebox::BoxCommand;
 use crate::runtime::backend::{BoxBackend, BoxNetworkBackend};
-use crate::{BoxID, AcrylMicrovmError, AcrylMicrovmResult};
+use crate::{AcrylMicrovmError, AcrylMicrovmResult, BoxID};
 use http::Client;
 
 /// Implementation name accepted by `agents.create`.
@@ -129,7 +129,11 @@ impl Server {
 
     /// Start the service with OpenCode's own launcher, which spawns it
     /// detached and returns once it answers, then wait for the tunnel.
-    async fn start(&self, box_backend: &dyn BoxBackend, shell: &Shell<'_>) -> AcrylMicrovmResult<()> {
+    async fn start(
+        &self,
+        box_backend: &dyn BoxBackend,
+        shell: &Shell<'_>,
+    ) -> AcrylMicrovmResult<()> {
         let command = shell
             .command("opencode service start 2>&1")
             .timeout(START_TIMEOUT);
@@ -195,7 +199,10 @@ impl Server {
         Session::new(Arc::clone(self), &info["data"])
     }
 
-    pub(super) async fn get_session(self: &Arc<Self>, session_id: &str) -> AcrylMicrovmResult<Session> {
+    pub(super) async fn get_session(
+        self: &Arc<Self>,
+        session_id: &str,
+    ) -> AcrylMicrovmResult<Session> {
         let info = self
             .client
             .get(&format!("/api/session/{session_id}"))
@@ -218,7 +225,9 @@ impl Session {
             .as_str()
             .filter(|id| is_session_id(id))
             .ok_or_else(|| {
-                AcrylMicrovmError::Internal(format!("OpenCode returned a session without an ID: {info}"))
+                AcrylMicrovmError::Internal(format!(
+                    "OpenCode returned a session without an ID: {info}"
+                ))
             })?;
         let model = match (
             info["model"]["providerID"].as_str(),
@@ -257,7 +266,11 @@ impl AgentBackend for Session {
     }
 
     /// Durably admit `text` under a minted input ID; the snapshot reports the admission.
-    async fn send(&self, text: &str, options: &AgentSendOptions) -> AcrylMicrovmResult<AgentTurnState> {
+    async fn send(
+        &self,
+        text: &str,
+        options: &AgentSendOptions,
+    ) -> AcrylMicrovmResult<AgentTurnState> {
         let turn_id = mint_id("msg_");
         let body = prompt_body(&turn_id, text, options)?;
         self.server
@@ -1077,7 +1090,10 @@ fn last_lines(output: &str, count: usize) -> String {
 }
 
 /// Run a short command in the Box and return its exit code and stdout.
-async fn run(box_backend: &dyn BoxBackend, command: BoxCommand) -> AcrylMicrovmResult<(i32, String)> {
+async fn run(
+    box_backend: &dyn BoxBackend,
+    command: BoxCommand,
+) -> AcrylMicrovmResult<(i32, String)> {
     let mut execution = box_backend.exec(command).await?;
     let stdout = match execution.stdout() {
         Some(stream) => stream.collect::<Vec<String>>().await.concat(),

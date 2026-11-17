@@ -1,7 +1,7 @@
 // Modified by ACRYL, 2026
 use crate::service::exec::exec_handle::{ExecStderr, ExecStdout};
-use async_stream::stream;
 use acrylmicrovm_shared::{exec_output, ExecOutput, Stderr, Stdout};
+use async_stream::stream;
 use futures::{Stream, StreamExt};
 use std::collections::VecDeque;
 use std::pin::Pin;

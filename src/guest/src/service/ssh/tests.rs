@@ -662,7 +662,10 @@ async fn grpc_ssh_control_lifecycle_and_bind_failure() {
     let mut fixture = TestGuest::new().await;
     let host = private_key();
     let ssh = config(&host, &[&private_key()], None);
-    assert_eq!(fixture.status().await, acrylmicrovm_shared::SshStatus::default());
+    assert_eq!(
+        fixture.status().await,
+        acrylmicrovm_shared::SshStatus::default()
+    );
     assert!(!fixture._root.path().join("etc/acrylmicrovm").exists());
     assert_eq!(
         fixture.configure(ssh.clone()).await.unwrap_err().code(),

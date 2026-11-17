@@ -136,16 +136,19 @@ impl ContainerStdio {
     /// Returns error if pipe creation fails.
     pub fn pipes() -> AcrylMicrovmResult<(Self, InitStdioFds)> {
         // Create stdin pipe: init reads from rx, we hold tx open
-        let (stdin_rx, stdin_tx) = pipe()
-            .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to create stdin pipe: {}", e)))?;
+        let (stdin_rx, stdin_tx) = pipe().map_err(|e| {
+            AcrylMicrovmError::Internal(format!("Failed to create stdin pipe: {}", e))
+        })?;
 
         // Create stdout pipe: init writes to tx, we can read from rx
-        let (stdout_rx, stdout_tx) = pipe()
-            .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to create stdout pipe: {}", e)))?;
+        let (stdout_rx, stdout_tx) = pipe().map_err(|e| {
+            AcrylMicrovmError::Internal(format!("Failed to create stdout pipe: {}", e))
+        })?;
 
         // Create stderr pipe: init writes to tx, we can read from rx
-        let (stderr_rx, stderr_tx) = pipe()
-            .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to create stderr pipe: {}", e)))?;
+        let (stderr_rx, stderr_tx) = pipe().map_err(|e| {
+            AcrylMicrovmError::Internal(format!("Failed to create stderr pipe: {}", e))
+        })?;
 
         // nix::unistd::pipe() returns OwnedFd directly
         let container_stdio = Self::Pipes {

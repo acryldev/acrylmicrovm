@@ -23,8 +23,8 @@ use crate::runtime::rt_impl::stash_exit_file;
 use crate::util::{PidFileReader, ProcessIdentity};
 use crate::vmm::ExitInfo;
 use crate::vmm::controller::ShimHandler;
-use async_trait::async_trait;
 use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
+use async_trait::async_trait;
 
 pub struct VmmAttachTask;
 

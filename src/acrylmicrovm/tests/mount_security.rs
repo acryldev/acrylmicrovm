@@ -14,7 +14,7 @@
 
 mod common;
 
-use acrylmicrovm::runtime::options::{BoxOptions, AcrylMicrovmOptions, RootfsSpec, VolumeSpec};
+use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, BoxOptions, RootfsSpec, VolumeSpec};
 use acrylmicrovm::{BoxCommand, LiteBox};
 use common::TestRuntime as AcrylMicrovmRuntime;
 use std::path::Path;

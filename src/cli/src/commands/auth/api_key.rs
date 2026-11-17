@@ -4,8 +4,8 @@
 
 use std::io::BufRead;
 
-use anyhow::{Context, Result, anyhow, bail};
 use acrylmicrovm::{AcrylMicrovmError, AcrylMicrovmRuntime, Principal};
+use anyhow::{Context, Result, anyhow, bail};
 use secrecy::SecretString;
 
 use crate::credentials::{self, CredentialStore, Profile};

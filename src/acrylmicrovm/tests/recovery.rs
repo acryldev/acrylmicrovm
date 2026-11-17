@@ -493,7 +493,8 @@ async fn recovery_removes_auto_delete_boxes() {
             image_registries: common::test_registries(),
             ..Default::default()
         };
-        let runtime = AcrylMicrovmRuntime::new(options).expect("Failed to create runtime after restart");
+        let runtime =
+            AcrylMicrovmRuntime::new(options).expect("Failed to create runtime after restart");
 
         // auto_delete>0 box should be removed during recovery
         // auto_delete=0 box should be recovered
@@ -561,7 +562,8 @@ async fn recovery_removes_orphaned_stopped_boxes_without_directory() {
             image_registries: common::test_registries(),
             ..Default::default()
         };
-        let runtime = AcrylMicrovmRuntime::new(options).expect("Failed to create runtime after restart");
+        let runtime =
+            AcrylMicrovmRuntime::new(options).expect("Failed to create runtime after restart");
 
         // Stopped box without directory should be KEPT (it might never have been started)
         // Recovery only removes active (Starting/Running) boxes that are missing directories

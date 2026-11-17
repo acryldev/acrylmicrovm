@@ -14,9 +14,9 @@ use crate::portal::GuestSession;
 use crate::runtime::layout::{BoxFilesystemLayout, FsLayoutConfig};
 use crate::util::{HostDiagnostic, ProcessExit, ProcessMonitor};
 use crate::vmm::exit_info::ExitErrorKind;
-use async_trait::async_trait;
 use acrylmicrovm_shared::BoxTransport;
 use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
+use async_trait::async_trait;
 use std::path::Path;
 use std::time::Duration;
 

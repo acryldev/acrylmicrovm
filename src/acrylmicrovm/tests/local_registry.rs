@@ -275,7 +275,10 @@ async fn pull(registry: &LocalRegistry, image: &str) -> String {
         .expect("pull through the local registry")
 }
 
-async fn try_pull(registry: &LocalRegistry, image: &str) -> acrylmicrovm::AcrylMicrovmResult<String> {
+async fn try_pull(
+    registry: &LocalRegistry,
+    image: &str,
+) -> acrylmicrovm::AcrylMicrovmResult<String> {
     let home = PerTestBoxHome::isolated_in("/tmp");
     let runtime = common::non_vm_runtime(AcrylMicrovmOptions {
         home_dir: home.path.clone(),

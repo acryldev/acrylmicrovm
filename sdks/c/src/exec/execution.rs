@@ -36,13 +36,15 @@ use acrylmicrovm::{AcrylMicrovmError, ExecStderr, ExecStdin, ExecStdout, Executi
 
 use super::command::{AcrylMicrovmCommand, parse_acrylmicrovm_command};
 use crate::box_handle::BoxHandle;
-use crate::error::{AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error};
+use crate::error::{
+    AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error,
+};
 use crate::event_queue::{
     CBoxExitCb, CBoxExitFn, CBoxStderrCb, CBoxStderrFn, CBoxStdoutCb, CBoxStdoutFn,
     CExecutionKillCb, CExecutionResizeCb, CExecutionSignalCb, CExecutionWaitCb, EventQueue,
     RuntimeEvent, push_event,
 };
-use crate::{CBoxHandle, CAcrylMicrovmError, CExecutionHandle};
+use crate::{CAcrylMicrovmError, CBoxHandle, CExecutionHandle};
 
 /// Opaque handle to a running command execution.
 pub struct ExecutionHandle {
@@ -262,7 +264,9 @@ unsafe fn recover_execution(
 /// Return an owned copy of the canonical guest execution ID. Null means an
 /// invalid handle; release a non-null result with `acrylmicrovm_free_string`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn acrylmicrovm_execution_id(execution: *mut CExecutionHandle) -> *mut c_char {
+pub unsafe extern "C" fn acrylmicrovm_execution_id(
+    execution: *mut CExecutionHandle,
+) -> *mut c_char {
     unsafe {
         if execution.is_null() {
             return ptr::null_mut();
@@ -993,7 +997,10 @@ async fn kill_on_clone(slot: &Mutex<Option<Execution>>) -> Result<(), AcrylMicro
     clone.kill().await
 }
 
-async fn signal_on_clone(slot: &Mutex<Option<Execution>>, sig: c_int) -> Result<(), AcrylMicrovmError> {
+async fn signal_on_clone(
+    slot: &Mutex<Option<Execution>>,
+    sig: c_int,
+) -> Result<(), AcrylMicrovmError> {
     let clone = snapshot_execution(slot)?;
     clone.signal(sig).await
 }
@@ -1089,7 +1096,12 @@ mod tests {
         let mut handle = empty_handle();
         let mut error = FFIError::default();
         let code = unsafe {
-            acrylmicrovm_execution_stdin_write(&mut handle as *mut _, b"hello".as_ptr(), 5, &mut error)
+            acrylmicrovm_execution_stdin_write(
+                &mut handle as *mut _,
+                b"hello".as_ptr(),
+                5,
+                &mut error,
+            )
         };
         assert_eq!(code, AcrylMicrovmErrorCode::InvalidState);
         assert!(!error.message.is_null());
@@ -1287,7 +1299,13 @@ mod tests {
         let mut handle = empty_handle();
         let mut error = FFIError::default();
         let code = unsafe {
-            acrylmicrovm_execution_signal(&mut handle as *mut _, 15, None, ptr::null_mut(), &mut error)
+            acrylmicrovm_execution_signal(
+                &mut handle as *mut _,
+                15,
+                None,
+                ptr::null_mut(),
+                &mut error,
+            )
         };
         assert_eq!(code, AcrylMicrovmErrorCode::InvalidArgument);
         assert!(!error.message.is_null());

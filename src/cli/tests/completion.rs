@@ -59,7 +59,10 @@ fn visible_subcommand_names() -> Vec<String> {
 #[case("zsh")]
 #[case("fish")]
 fn completion_exits_success(#[case] shell: &str) {
-    acrylmicrovm_cmd().args(["completion", shell]).assert().success();
+    acrylmicrovm_cmd()
+        .args(["completion", shell])
+        .assert()
+        .success();
 }
 
 #[rstest]
@@ -67,7 +70,10 @@ fn completion_exits_success(#[case] shell: &str) {
 #[case("zsh")]
 #[case("fish")]
 fn completion_output_non_empty(#[case] shell: &str) {
-    let assert = acrylmicrovm_cmd().args(["completion", shell]).assert().success();
+    let assert = acrylmicrovm_cmd()
+        .args(["completion", shell])
+        .assert()
+        .success();
     let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
     assert!(
         !stdout.trim().is_empty(),
@@ -86,7 +92,10 @@ fn completion_contains_subcommands(#[case] shell: &str) {
         !expected.is_empty(),
         "help should list at least one subcommand"
     );
-    let assert = acrylmicrovm_cmd().args(["completion", shell]).assert().success();
+    let assert = acrylmicrovm_cmd()
+        .args(["completion", shell])
+        .assert()
+        .success();
     let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
     for sub in &expected {
         assert!(
@@ -103,7 +112,10 @@ fn completion_contains_subcommands(#[case] shell: &str) {
 #[case("zsh")]
 #[case("fish")]
 fn completion_ssh_advertises_operation_options(#[case] shell: &str) {
-    let assert = acrylmicrovm_cmd().args(["completion", shell]).assert().success();
+    let assert = acrylmicrovm_cmd()
+        .args(["completion", shell])
+        .assert()
+        .success();
     let stdout = std::str::from_utf8(&assert.get_output().stdout).unwrap();
     for name in [
         "configure",

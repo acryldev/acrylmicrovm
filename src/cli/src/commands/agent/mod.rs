@@ -2,14 +2,14 @@
 //! Agent instance and turn commands.
 
 use crate::cli::GlobalFlags;
-use anyhow::{Result, anyhow};
 use acrylmicrovm::agents::{
     AgentConfig, AgentControlOptions as AgentControlOptionsCore,
     AgentCreateOptions as AgentCreateOptionsCore, AgentEventStream,
     AgentEventsOptions as AgentEventsOptionsCore, AgentSendMode,
     AgentSendOptions as AgentSendOptionsCore, AgentWaitOptions as AgentWaitOptionsCore,
 };
-use acrylmicrovm::{Agent, AgentTurn, AcrylMicrovmRuntime, LiteBox};
+use acrylmicrovm::{AcrylMicrovmRuntime, Agent, AgentTurn, LiteBox};
+use anyhow::{Result, anyhow};
 use clap::{Args, Subcommand, ValueEnum};
 use futures::StreamExt;
 use serde_json::Value;

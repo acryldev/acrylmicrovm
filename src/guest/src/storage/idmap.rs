@@ -323,8 +323,9 @@ fn write_id_map(pid: i32, map_file: &str, mappings: &[IdMapping]) -> io::Result<
 // ─────────────────────────────────────────────────────────────────────
 
 fn path_to_cstring(path: &Path) -> AcrylMicrovmResult<CString> {
-    CString::new(path.as_os_str().as_encoded_bytes())
-        .map_err(|_| AcrylMicrovmError::Storage(format!("Path contains null byte: {}", path.display())))
+    CString::new(path.as_os_str().as_encoded_bytes()).map_err(|_| {
+        AcrylMicrovmError::Storage(format!("Path contains null byte: {}", path.display()))
+    })
 }
 
 /// Raw syscall wrappers for the new mount API (kernel 5.12+).

@@ -1,8 +1,10 @@
 // Modified by ACRYL, 2026
 //! Local reproducer for stopping a box while its first boot is in progress.
 
-use acrylmicrovm::runtime::options::{BoxOptions, AcrylMicrovmOptions, NetworkSpec, RootfsSpec, VolumeSpec};
-use acrylmicrovm::{BoxStatus, AcrylMicrovmRuntime};
+use acrylmicrovm::runtime::options::{
+    AcrylMicrovmOptions, BoxOptions, NetworkSpec, RootfsSpec, VolumeSpec,
+};
+use acrylmicrovm::{AcrylMicrovmRuntime, BoxStatus};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;

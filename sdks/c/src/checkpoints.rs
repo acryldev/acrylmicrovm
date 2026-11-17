@@ -459,7 +459,10 @@ mod tests {
             }
         }
         unsafe {
-            assert_eq!(crate::acrylmicrovm_runtime_drain(&mut runtime, 0, &mut error), 0);
+            assert_eq!(
+                crate::acrylmicrovm_runtime_drain(&mut runtime, 0, &mut error),
+                0
+            );
         }
         assert!(
             receiver.try_recv().is_err(),
@@ -620,9 +623,9 @@ mod tests {
                 requests
             });
             let mut runtime = RuntimeHandle {
-                runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(format!(
-                    "http://{address}"
-                )))
+                runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+                    format!("http://{address}"),
+                ))
                 .unwrap(),
                 tokio_rt: create_tokio_runtime().unwrap(),
                 liveness: Arc::new(RuntimeLiveness::new()),
@@ -725,7 +728,10 @@ mod tests {
                     ),
                     AcrylMicrovmErrorCode::Ok
                 );
-                assert_eq!(drain(&mut runtime), (AcrylMicrovmErrorCode::Ok, String::new()));
+                assert_eq!(
+                    drain(&mut runtime),
+                    (AcrylMicrovmErrorCode::Ok, String::new())
+                );
                 let missing = CString::new("missing").unwrap();
                 assert_eq!(
                     acrylmicrovm_checkpoint_get(

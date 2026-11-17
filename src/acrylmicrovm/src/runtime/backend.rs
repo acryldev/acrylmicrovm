@@ -36,7 +36,11 @@ use super::id::BoxID;
 )]
 #[async_trait]
 pub(crate) trait RuntimeBackend: Send + Sync {
-    async fn create(&self, options: BoxOptions, name: Option<String>) -> AcrylMicrovmResult<LiteBox>;
+    async fn create(
+        &self,
+        options: BoxOptions,
+        name: Option<String>,
+    ) -> AcrylMicrovmResult<LiteBox>;
 
     async fn get_or_create(
         &self,
@@ -161,7 +165,11 @@ pub(crate) trait BoxBackend: Send + Sync + Any {
         names: Vec<String>,
     ) -> AcrylMicrovmResult<Vec<LiteBox>>;
 
-    async fn export_box(&self, options: ExportOptions, dest: &Path) -> AcrylMicrovmResult<BoxArchive>;
+    async fn export_box(
+        &self,
+        options: ExportOptions,
+        dest: &Path,
+    ) -> AcrylMicrovmResult<BoxArchive>;
 
     /// Replace the guest's SSH configuration (see [`crate::litebox::SshHandle`]).
     async fn ssh_configure(&self, config: SshConfig) -> AcrylMicrovmResult<SshStatus>;
@@ -234,7 +242,11 @@ pub(crate) trait BoxNetworkBackend: Send + Sync {
 )]
 #[async_trait]
 pub(crate) trait SnapshotBackend: Send + Sync {
-    async fn create(&self, options: SnapshotOptions, name: &str) -> AcrylMicrovmResult<SnapshotInfo>;
+    async fn create(
+        &self,
+        options: SnapshotOptions,
+        name: &str,
+    ) -> AcrylMicrovmResult<SnapshotInfo>;
 
     async fn list(&self) -> AcrylMicrovmResult<Vec<SnapshotInfo>>;
 

@@ -90,8 +90,8 @@ mod tests {
                 tty: 0,
             };
 
-            let err =
-                unsafe { parse_acrylmicrovm_command(&cmd) }.expect_err("invalid timeout should fail");
+            let err = unsafe { parse_acrylmicrovm_command(&cmd) }
+                .expect_err("invalid timeout should fail");
             assert!(
                 matches!(err, AcrylMicrovmError::InvalidArgument(ref msg) if msg.contains("timeout_seconds")),
                 "unexpected error for {timeout_secs:?}: {err}"

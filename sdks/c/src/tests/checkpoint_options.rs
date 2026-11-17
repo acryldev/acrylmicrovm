@@ -17,8 +17,10 @@ extern "C" fn unused_get_or_create_callback(
 
 fn rest_runtime() -> crate::runtime::RuntimeHandle {
     crate::runtime::RuntimeHandle {
-        runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new("http://127.0.0.1:1"))
-            .unwrap(),
+        runtime: AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+            "http://127.0.0.1:1",
+        ))
+        .unwrap(),
         tokio_rt: crate::runtime::create_tokio_runtime().unwrap(),
         liveness: Arc::new(crate::runtime::RuntimeLiveness::new()),
         queue: Arc::new(crate::event_queue::EventQueue::new()),
@@ -28,7 +30,9 @@ fn rest_runtime() -> crate::runtime::RuntimeHandle {
 unsafe fn options() -> *mut CAcrylMicrovmOptions {
     let mut options = ptr::null_mut();
     assert_eq!(
-        unsafe { acrylmicrovm_options_new(c"alpine:latest".as_ptr(), &mut options, ptr::null_mut()) },
+        unsafe {
+            acrylmicrovm_options_new(c"alpine:latest".as_ptr(), &mut options, ptr::null_mut())
+        },
         AcrylMicrovmErrorCode::Ok
     );
     options
@@ -89,9 +93,12 @@ fn checkpoint_setters_reject_explicit_defaults_in_either_order() {
                     7 => acrylmicrovm_options_set_workdir(opts, c"".as_ptr()),
                     8 => acrylmicrovm_options_set_user(opts, c"".as_ptr()),
                     9 => acrylmicrovm_options_add_env(opts, c"A".as_ptr(), c"B".as_ptr()),
-                    10 => {
-                        acrylmicrovm_options_add_bind_mount(opts, c"/tmp".as_ptr(), c"/data".as_ptr(), 0)
-                    }
+                    10 => acrylmicrovm_options_add_bind_mount(
+                        opts,
+                        c"/tmp".as_ptr(),
+                        c"/data".as_ptr(),
+                        0,
+                    ),
                     11 => acrylmicrovm_options_add_managed_volume(
                         opts,
                         c"vol".as_ptr(),

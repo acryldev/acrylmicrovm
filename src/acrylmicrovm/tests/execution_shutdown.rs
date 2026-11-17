@@ -1133,7 +1133,10 @@ async fn cleanup_concurrent_box(handle: Arc<LiteBox>, runtime: AcrylMicrovmRunti
 }
 
 /// Create a runtime with a per-test home directory.
-fn create_test_runtime() -> (acrylmicrovm_test_utils::home::PerTestBoxHome, AcrylMicrovmRuntime) {
+fn create_test_runtime() -> (
+    acrylmicrovm_test_utils::home::PerTestBoxHome,
+    AcrylMicrovmRuntime,
+) {
     let home = acrylmicrovm_test_utils::home::PerTestBoxHome::new();
     let runtime = AcrylMicrovmRuntime::new(AcrylMicrovmOptions {
         home_dir: home.path.clone(),
@@ -1679,7 +1682,12 @@ async fn test_concurrent_exec_env_isolation() {
                 }
             }
             let result = execution.wait().await?;
-            Ok::<(usize, i32, String, String), AcrylMicrovmError>((i, result.exit_code, output, env_val))
+            Ok::<(usize, i32, String, String), AcrylMicrovmError>((
+                i,
+                result.exit_code,
+                output,
+                env_val,
+            ))
         });
         tasks.push(task);
     }

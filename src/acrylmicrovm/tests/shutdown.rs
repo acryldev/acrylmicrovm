@@ -11,7 +11,7 @@
 
 mod common;
 
-use acrylmicrovm::runtime::options::{BoxOptions, AcrylMicrovmOptions, RootfsSpec};
+use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, BoxOptions, RootfsSpec};
 
 // ============================================================================
 // SHUTDOWN IDEMPOTENCY

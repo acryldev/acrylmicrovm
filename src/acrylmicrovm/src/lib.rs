@@ -45,7 +45,7 @@ pub use litebox::{
 };
 pub use portal::GuestSession;
 pub use runtime::{
-    AuthHandle, AcrylMicrovmRuntime, CheckpointHandle, CheckpointInfo, CheckpointState, Domain,
+    AcrylMicrovmRuntime, AuthHandle, CheckpointHandle, CheckpointInfo, CheckpointState, Domain,
     DomainHandle, DomainList, DomainTarget, ImageHandle, Principal,
 };
 
@@ -68,7 +68,7 @@ pub use runtime::advanced_options::{
     ResourceLimits, SecurityOptions,
 };
 pub use runtime::options::{
-    BoxArchive, BoxOptions, AcrylMicrovmOptions, CloneOptions, ExportOptions, ImageRegistry,
+    AcrylMicrovmOptions, BoxArchive, BoxOptions, CloneOptions, ExportOptions, ImageRegistry,
     ImageRegistryAuth, ImageRegistryProxy, InboundNetworkConfig, NetworkMode, NetworkSpec,
     OutboundNetworkConfig, PortProtocol, RegistryTransport, RootfsSpec, Secret, SnapshotOptions,
 };

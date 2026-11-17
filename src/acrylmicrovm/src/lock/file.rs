@@ -138,7 +138,10 @@ impl LockManager for FileLockManager {
             .map_err(|e| {
                 if e.kind() == std::io::ErrorKind::AlreadyExists {
                     // Race condition - try again
-                    AcrylMicrovmError::Internal(format!("lock file already exists: {}", path.display()))
+                    AcrylMicrovmError::Internal(format!(
+                        "lock file already exists: {}",
+                        path.display()
+                    ))
                 } else {
                     AcrylMicrovmError::Storage(format!(
                         "failed to create lock file {}: {}",

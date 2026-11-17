@@ -185,7 +185,7 @@ mod tests {
     use tokio::sync::RwLock;
 
     use super::super::super::types::FileQuery;
-    use super::super::super::{AppState, AcrylMicrovmRuntime};
+    use super::super::super::{AcrylMicrovmRuntime, AppState};
     use super::download_files;
 
     const BOX_ID: &str = "01HJK4TNRPQSXYZ8WM6NCVT9R5";
@@ -278,8 +278,10 @@ mod tests {
     #[tokio::test]
     async fn download_preserves_guest_symlinks_without_reading_their_targets() {
         let (upstream, host_root) = guest_upstream().await;
-        let runtime = AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone()))
-            .expect("REST runtime");
+        let runtime = AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+            upstream.url.clone(),
+        ))
+        .expect("REST runtime");
         let state = Arc::new(AppState {
             runtime,
             boxes: RwLock::new(HashMap::new()),

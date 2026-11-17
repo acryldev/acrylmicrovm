@@ -76,8 +76,10 @@ async fn create_response(
         }
         requests
     });
-    let runtime =
-        AcrylMicrovmRuntime::rest(AcrylMicrovmRestOptions::new(format!("http://127.0.0.1:{port}"))).unwrap();
+    let runtime = AcrylMicrovmRuntime::rest(AcrylMicrovmRestOptions::new(format!(
+        "http://127.0.0.1:{port}"
+    )))
+    .unwrap();
     let options = BoxOptions {
         cpus,
         ..Default::default()

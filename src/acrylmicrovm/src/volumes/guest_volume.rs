@@ -229,9 +229,14 @@ impl GuestVolumeManager {
     /// Aggregate export roots must exist and be disjoint, including after
     /// resolving symlinks. Reject overlaps rather than exposing a share through
     /// another export with different access policy or isolation boundaries.
-    pub fn build_aggregate_mounts(&self, device_tag: &str) -> AcrylMicrovmResult<AggregateMountConfig> {
+    pub fn build_aggregate_mounts(
+        &self,
+        device_tag: &str,
+    ) -> AcrylMicrovmResult<AggregateMountConfig> {
         if device_tag.is_empty() || device_tag.len() > 36 || device_tag.contains('\0') {
-            return Err(AcrylMicrovmError::Storage("Invalid aggregate device tag".into()));
+            return Err(AcrylMicrovmError::Storage(
+                "Invalid aggregate device tag".into(),
+            ));
         }
         let mut names = std::collections::HashSet::new();
         for share in &self.fs_shares {

@@ -20,12 +20,16 @@ use acrylmicrovm::runtime::options::{
     AcrylMicrovmOptions, ImageRegistry, ImageRegistryAuth, RegistryTransport,
 };
 
-use crate::error::{AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error};
+use crate::error::{
+    AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error,
+};
 use crate::event_queue::{CRuntimeShutdownCb, EventQueue, RuntimeEvent, push_event};
 use crate::images::ImageHandle;
 use crate::util::c_str_to_string;
 use crate::volumes::VolumeHandle;
-use crate::{CAcrylMicrovmError, CAcrylMicrovmImageHandle, CAcrylMicrovmRuntime, CAcrylMicrovmVolumeHandle};
+use crate::{
+    CAcrylMicrovmError, CAcrylMicrovmImageHandle, CAcrylMicrovmRuntime, CAcrylMicrovmVolumeHandle,
+};
 
 /// Opaque handle to a AcrylMicrovmRuntime instance with its Tokio runtime and the
 /// per-runtime event queue used by the post-and-drain callback API.
@@ -228,7 +232,9 @@ unsafe fn runtime_new(
             Ok(ExperimentalFeatures::default())
         } else {
             c_str_to_string(features)
-                .map_err(|_| AcrylMicrovmError::InvalidArgument("features is not valid UTF-8".into()))
+                .map_err(|_| {
+                    AcrylMicrovmError::InvalidArgument("features is not valid UTF-8".into())
+                })
                 .and_then(|value| ExperimentalFeatures::parse(&value))
         };
         let features = match features {
@@ -323,8 +329,12 @@ unsafe fn parse_image_registry_array(
             let registry = &*image_registries.add(idx as usize);
             let host = c_string_field(registry.host, "registry host")?;
             let transport = match registry.transport {
-                AcrylMicrovmRegistryTransport::AcrylMicrovmRegistryTransportHttps => RegistryTransport::Https,
-                AcrylMicrovmRegistryTransport::AcrylMicrovmRegistryTransportHttp => RegistryTransport::Http,
+                AcrylMicrovmRegistryTransport::AcrylMicrovmRegistryTransportHttps => {
+                    RegistryTransport::Https
+                }
+                AcrylMicrovmRegistryTransport::AcrylMicrovmRegistryTransportHttp => {
+                    RegistryTransport::Http
+                }
             };
             let auth = registry_auth(registry)?;
 
@@ -365,7 +375,10 @@ unsafe fn registry_auth(
     }
 }
 
-unsafe fn c_string_field(value: *const c_char, field_name: &str) -> Result<String, AcrylMicrovmError> {
+unsafe fn c_string_field(
+    value: *const c_char,
+    field_name: &str,
+) -> Result<String, AcrylMicrovmError> {
     unsafe {
         if value.is_null() {
             return Err(AcrylMicrovmError::InvalidArgument(format!(

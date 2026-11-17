@@ -9,7 +9,7 @@ use acrylmicrovm::AcrylMicrovmError;
 use crate::error::{AcrylMicrovmErrorCode, null_pointer_error, write_error};
 use crate::event_queue::{CExecutionInfoListCb, OwnedFfiPtr, RuntimeEvent, push_event};
 use crate::info::{free_raw_slice, into_raw_slice};
-use crate::{CBoxHandle, CAcrylMicrovmError};
+use crate::{CAcrylMicrovmError, CBoxHandle};
 
 /// Owned metadata for one live guest execution, including the main process.
 #[repr(C)]
@@ -38,17 +38,21 @@ impl CExecutionInfo {
     /// a listed argv would otherwise panic inside the spawned task and the
     /// callback would never fire. Staging also means a failure frees what it
     /// allocated by normal `Drop` — no partially converted list to reclaim.
-    fn stage(info: acrylmicrovm::litebox::ExecutionInfo) -> Result<StagedExecutionInfo, AcrylMicrovmError> {
+    fn stage(
+        info: acrylmicrovm::litebox::ExecutionInfo,
+    ) -> Result<StagedExecutionInfo, AcrylMicrovmError> {
         let argv = info
             .argv
             .into_iter()
             .map(|arg| {
-                CString::new(arg)
-                    .map_err(|_| AcrylMicrovmError::Internal("guest argv contains a NUL byte".into()))
+                CString::new(arg).map_err(|_| {
+                    AcrylMicrovmError::Internal("guest argv contains a NUL byte".into())
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let execution_id = CString::new(info.execution_id)
-            .map_err(|_| AcrylMicrovmError::Internal("guest execution ID contains a NUL byte".into()))?;
+        let execution_id = CString::new(info.execution_id).map_err(|_| {
+            AcrylMicrovmError::Internal("guest execution ID contains a NUL byte".into())
+        })?;
         Ok(StagedExecutionInfo {
             argv,
             execution_id,
@@ -59,7 +63,9 @@ impl CExecutionInfo {
     }
 
     #[cfg(test)]
-    fn try_from_info(info: acrylmicrovm::litebox::ExecutionInfo) -> Result<Self, AcrylMicrovmError> {
+    fn try_from_info(
+        info: acrylmicrovm::litebox::ExecutionInfo,
+    ) -> Result<Self, AcrylMicrovmError> {
         Self::stage(info).map(Self::from)
     }
 }
@@ -234,7 +240,12 @@ mod tests {
         let mut error = crate::error::FFIError::default();
         unsafe {
             assert_eq!(
-                acrylmicrovm_box_executions_list(ptr::null_mut(), None, ptr::null_mut(), &mut error),
+                acrylmicrovm_box_executions_list(
+                    ptr::null_mut(),
+                    None,
+                    ptr::null_mut(),
+                    &mut error
+                ),
                 AcrylMicrovmErrorCode::InvalidArgument,
             );
             crate::acrylmicrovm_error_free(&mut error);

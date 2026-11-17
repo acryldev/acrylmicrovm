@@ -157,8 +157,9 @@ async fn live_gvproxy_backend_expose_list_unexpose_roundtrip() {
 
     let local_socket = dir.path().join("forward.sock");
     let local = local_socket.display().to_string();
-    let has_local =
-        |forwards: &[acrylmicrovm::net::Forward]| forwards.iter().any(|forward| forward.local == local);
+    let has_local = |forwards: &[acrylmicrovm::net::Forward]| {
+        forwards.iter().any(|forward| forward.local == local)
+    };
 
     assert!(
         !has_local(&backend.list_forwards().await.unwrap()),

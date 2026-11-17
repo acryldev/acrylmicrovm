@@ -199,7 +199,10 @@ mod tests {
     fn test_guest_layout_default() {
         let layout = GuestLayout::new();
         assert_eq!(layout.base().to_str().unwrap(), "/run/acrylmicrovm");
-        assert_eq!(layout.shared_dir().to_str().unwrap(), "/run/acrylmicrovm/shared");
+        assert_eq!(
+            layout.shared_dir().to_str().unwrap(),
+            "/run/acrylmicrovm/shared"
+        );
     }
 
     #[test]

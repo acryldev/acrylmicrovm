@@ -371,7 +371,8 @@ struct Rig {
 }
 impl Rig {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("acrylmicrovm-fs-worker-{}", std::process::id()));
+        let path =
+            std::env::temp_dir().join(format!("acrylmicrovm-fs-worker-{}", std::process::id()));
         fs::create_dir(&path).unwrap();
         fs::write(path.join("file"), b"host bytes").unwrap();
         let events = EventLoop::new().unwrap();

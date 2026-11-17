@@ -23,7 +23,9 @@ use acrylmicrovm::ImageHandle as CoreImageHandle;
 use acrylmicrovm::runtime::types::{ImageAliasEvent, ImageDetail, ImageUsage, ImageVersion};
 
 use crate::CAcrylMicrovmRegistryHandle;
-use crate::error::{AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error};
+use crate::error::{
+    AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error,
+};
 use crate::event_queue::{
     CBoxImageGetCb, CBoxImageListCb, CBoxImagePullCb, CBoxImageRemoveCb, CBoxImageUsageCb,
     EventQueue, RuntimeEvent, push_event,

@@ -52,7 +52,8 @@ fn nested_virtualization_can_create_kvm_vm() {
 
     let mut ctx = common::acrylmicrovm();
     ctx.cmd.timeout(std::time::Duration::from_secs(180));
-    ctx.cmd.env("ACRYLMICROVM_EXPERIMENTAL", "nested-virtualization");
+    ctx.cmd
+        .env("ACRYLMICROVM_EXPERIMENTAL", "nested-virtualization");
     ctx.cmd.args([
         "run",
         "--nested-virtualization",

@@ -270,12 +270,15 @@ fn spawn_with_pty(req: &ExecRequest, config: PtyConfig) -> Result<ExecHandle, Sp
     let slave_raw_fd = slave.as_raw_fd();
 
     // Duplicate slave FD for each stdio (Stdio::from_raw_fd takes ownership and will close)
-    let slave_stdin = dup(slave.as_raw_fd())
-        .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to dup slave for stdin: {}", e)))?;
-    let slave_stdout = dup(slave.as_raw_fd())
-        .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to dup slave for stdout: {}", e)))?;
-    let slave_stderr = dup(slave.as_raw_fd())
-        .map_err(|e| AcrylMicrovmError::Internal(format!("Failed to dup slave for stderr: {}", e)))?;
+    let slave_stdin = dup(slave.as_raw_fd()).map_err(|e| {
+        AcrylMicrovmError::Internal(format!("Failed to dup slave for stdin: {}", e))
+    })?;
+    let slave_stdout = dup(slave.as_raw_fd()).map_err(|e| {
+        AcrylMicrovmError::Internal(format!("Failed to dup slave for stdout: {}", e))
+    })?;
+    let slave_stderr = dup(slave.as_raw_fd()).map_err(|e| {
+        AcrylMicrovmError::Internal(format!("Failed to dup slave for stderr: {}", e))
+    })?;
 
     // Build command
     let mut cmd = Command::new(&req.program);
@@ -330,18 +333,20 @@ fn spawn_with_pty(req: &ExecRequest, config: PtyConfig) -> Result<ExecHandle, Sp
         Ok(fd) => fd,
         Err(error) => {
             terminate_child(&mut child);
-            return Err(
-                AcrylMicrovmError::Internal(format!("Failed to dup PTY for stdin: {error}")).into(),
-            );
+            return Err(AcrylMicrovmError::Internal(format!(
+                "Failed to dup PTY for stdin: {error}"
+            ))
+            .into());
         }
     };
     let stdout_fd = match dup(master.as_raw_fd()) {
         Ok(fd) => fd,
         Err(error) => {
             terminate_child(&mut child);
-            return Err(
-                AcrylMicrovmError::Internal(format!("Failed to dup PTY for stdout: {error}")).into(),
-            );
+            return Err(AcrylMicrovmError::Internal(format!(
+                "Failed to dup PTY for stdout: {error}"
+            ))
+            .into());
         }
     };
 

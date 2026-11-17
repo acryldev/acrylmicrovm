@@ -2,9 +2,9 @@
 //! Guest service interface.
 
 use acrylmicrovm_shared::{
-    BlockDeviceSource, AcrylMicrovmError, AcrylMicrovmResult, Filesystem, GuestClient, GuestInitRequest,
-    NetworkInit, PingRequest, QuiesceRequest, ShutdownRequest, ThawRequest, VirtiofsSource, Volume,
-    guest_init_response,
+    AcrylMicrovmError, AcrylMicrovmResult, BlockDeviceSource, Filesystem, GuestClient,
+    GuestInitRequest, NetworkInit, PingRequest, QuiesceRequest, ShutdownRequest, ThawRequest,
+    VirtiofsSource, Volume, guest_init_response,
 };
 use tonic::transport::Channel;
 
@@ -287,12 +287,14 @@ impl VolumeConfig {
                 container_id,
             } => Volume {
                 mount_point,
-                source: Some(acrylmicrovm_shared::volume::Source::Virtiofs(VirtiofsSource {
-                    tag,
-                    read_only,
-                    device_tag,
-                    export_key,
-                })),
+                source: Some(acrylmicrovm_shared::volume::Source::Virtiofs(
+                    VirtiofsSource {
+                        tag,
+                        read_only,
+                        device_tag,
+                        export_key,
+                    },
+                )),
                 container_id: container_id.unwrap_or_default(),
             },
             VolumeConfig::BlockDevice {

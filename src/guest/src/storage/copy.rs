@@ -24,7 +24,10 @@ use rayon::prelude::*;
 ///
 /// # Returns
 /// New layer paths on disk
-pub fn copy_layers_to_disk(lower_dirs: &[String], upper_dir: &str) -> AcrylMicrovmResult<Vec<String>> {
+pub fn copy_layers_to_disk(
+    lower_dirs: &[String],
+    upper_dir: &str,
+) -> AcrylMicrovmResult<Vec<String>> {
     // Create layers directory next to upper_dir
     let upper_path = Path::new(upper_dir);
     let layers_dir = upper_path
@@ -106,7 +109,9 @@ pub fn copy_layers_to_disk(lower_dirs: &[String], upper_dir: &str) -> AcrylMicro
         .collect();
 
     // Check for errors and collect results
-    let copied_dirs: Vec<String> = results.into_iter().collect::<AcrylMicrovmResult<Vec<_>>>()?;
+    let copied_dirs: Vec<String> = results
+        .into_iter()
+        .collect::<AcrylMicrovmResult<Vec<_>>>()?;
 
     // Sync filesystem to ensure all data is flushed to disk before overlayfs mount
     tracing::debug!("Syncing filesystem to ensure layer data is persisted");

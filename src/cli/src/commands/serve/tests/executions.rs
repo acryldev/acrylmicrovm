@@ -26,8 +26,10 @@ async fn recorded_exit(state: &AppState, box_id: &str, exec_id: &str, code: i32)
 async fn recovered_status_uses_the_canonical_box_after_exit() {
     let upstream = stub_upstream("stopped", true).await;
     let mut state = lifecycle_state();
-    state.runtime =
-        AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone())).unwrap();
+    state.runtime = AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+        upstream.url.clone(),
+    ))
+    .unwrap();
     let state = Arc::new(state);
     recorded_exit(&state, STUB_BOX_ID, "exec-1", 42).await;
     let response = get_execution(
@@ -68,8 +70,10 @@ async fn repeated_pending_recovery_drops_the_duplicate_waiter() {
 async fn recovered_wait_failure_is_not_an_execution_exit() {
     let upstream = stub_upstream("stopped", true).await;
     let mut state = lifecycle_state();
-    state.runtime =
-        AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone())).unwrap();
+    state.runtime = AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+        upstream.url.clone(),
+    ))
+    .unwrap();
     let state = Arc::new(state);
     let (execution, _out, _err, _input, result) = Execution::stub("exec-1");
     state
@@ -121,8 +125,10 @@ async fn inventory_polling_does_not_refresh_the_idle_clock() {
 async fn implicit_resume_forgets_the_previous_main_status() {
     let upstream = stub_upstream("stopped", true).await;
     let mut state = lifecycle_state();
-    state.runtime =
-        AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(upstream.url.clone())).unwrap();
+    state.runtime = AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
+        upstream.url.clone(),
+    ))
+    .unwrap();
     recorded_exit(&state, STUB_BOX_ID, "main-session", 42).await;
     let _box = get_or_resume_box(&state, STUB_BOX_NAME)
         .await

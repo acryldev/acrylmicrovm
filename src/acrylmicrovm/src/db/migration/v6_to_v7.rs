@@ -146,8 +146,9 @@ fn migrate_box_disk_files(
     })?;
 
     for entry in entries {
-        let entry = entry
-            .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to read directory entry: {}", e)))?;
+        let entry = entry.map_err(|e| {
+            AcrylMicrovmError::Storage(format!("Failed to read directory entry: {}", e))
+        })?;
         let box_dir = entry.path();
         if !box_dir.is_dir() {
             continue;

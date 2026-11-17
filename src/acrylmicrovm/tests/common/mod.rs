@@ -14,11 +14,13 @@
 // Re-export shared infrastructure from acrylmicrovm-test-utils.
 pub use acrylmicrovm_test_utils::*;
 
-use acrylmicrovm::runtime::options::{BoxOptions, AcrylMicrovmOptions, RootfsSpec};
+use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, BoxOptions, RootfsSpec};
 
 /// Non-VM suites use the existing test constructor on hosted runners. VM
 /// integration builds retain the public constructor and its host validation.
-pub fn non_vm_runtime(options: AcrylMicrovmOptions) -> acrylmicrovm::AcrylMicrovmResult<TestRuntime> {
+pub fn non_vm_runtime(
+    options: AcrylMicrovmOptions,
+) -> acrylmicrovm::AcrylMicrovmResult<TestRuntime> {
     if std::env::var("ACRYLMICROVM_TEST_ENGINE").as_deref() == Ok("native") {
         return TestRuntime::new(options);
     }

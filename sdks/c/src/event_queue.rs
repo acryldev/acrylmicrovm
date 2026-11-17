@@ -101,14 +101,17 @@ pub(crate) type CBoxCreateBoxFn =
 
 /// Get-or-create completion. Same shape as create plus a `bool` that is `true`
 /// when a new box was created and `false` when an existing box was adopted.
-pub type CBoxGetOrCreateBoxCb =
-    Option<extern "C" fn(*mut crate::CBoxHandle, bool, *mut crate::CAcrylMicrovmError, *mut c_void)>;
+pub type CBoxGetOrCreateBoxCb = Option<
+    extern "C" fn(*mut crate::CBoxHandle, bool, *mut crate::CAcrylMicrovmError, *mut c_void),
+>;
 pub(crate) type CBoxGetOrCreateBoxFn =
     extern "C" fn(*mut crate::CBoxHandle, bool, *mut crate::CAcrylMicrovmError, *mut c_void);
 
 /// Box export completion.
-pub type CBoxExportCb = Option<extern "C" fn(*mut c_char, *mut crate::CAcrylMicrovmError, *mut c_void)>;
-pub(crate) type CBoxExportFn = extern "C" fn(*mut c_char, *mut crate::CAcrylMicrovmError, *mut c_void);
+pub type CBoxExportCb =
+    Option<extern "C" fn(*mut c_char, *mut crate::CAcrylMicrovmError, *mut c_void)>;
+pub(crate) type CBoxExportFn =
+    extern "C" fn(*mut c_char, *mut crate::CAcrylMicrovmError, *mut c_void);
 
 /// Runtime import completion.
 pub type CRuntimeImportCb =
@@ -197,8 +200,9 @@ pub(crate) type CBoxVolumeRemoveFn = extern "C" fn(*mut crate::CAcrylMicrovmErro
 /// Registry login list completion. A successful callback owns the list and
 /// must release it with `acrylmicrovm_free_registry_credential_list`; the error
 /// pointer is borrowed for callback dispatch only.
-pub type CBoxRegistryListCb =
-    Option<extern "C" fn(*mut CRegistryCredentialList, *mut crate::CAcrylMicrovmError, *mut c_void)>;
+pub type CBoxRegistryListCb = Option<
+    extern "C" fn(*mut CRegistryCredentialList, *mut crate::CAcrylMicrovmError, *mut c_void),
+>;
 pub(crate) type CBoxRegistryListFn =
     extern "C" fn(*mut CRegistryCredentialList, *mut crate::CAcrylMicrovmError, *mut c_void);
 
@@ -247,8 +251,10 @@ pub(crate) type CBoxSshDisableFn =
 /// Box info completion. On success the callback owns the non-null metadata and
 /// must release it with `acrylmicrovm_free_box_info`. The error pointer is borrowed
 /// for callback dispatch only; on failure the metadata pointer is null.
-pub type CBoxInfoCb = Option<extern "C" fn(*mut CBoxInfo, *mut crate::CAcrylMicrovmError, *mut c_void)>;
-pub(crate) type CBoxInfoFn = extern "C" fn(*mut CBoxInfo, *mut crate::CAcrylMicrovmError, *mut c_void);
+pub type CBoxInfoCb =
+    Option<extern "C" fn(*mut CBoxInfo, *mut crate::CAcrylMicrovmError, *mut c_void)>;
+pub(crate) type CBoxInfoFn =
+    extern "C" fn(*mut CBoxInfo, *mut crate::CAcrylMicrovmError, *mut c_void);
 
 /// Box info list completion.
 pub type CBoxInfoListCb =
@@ -280,8 +286,10 @@ pub type CRuntimeShutdownCb = Option<extern "C" fn(*mut crate::CAcrylMicrovmErro
 pub(crate) type CRuntimeShutdownFn = extern "C" fn(*mut crate::CAcrylMicrovmError, *mut c_void);
 
 /// Execution wait completion (carries exit code on success).
-pub type CExecutionWaitCb = Option<extern "C" fn(c_int, *mut crate::CAcrylMicrovmError, *mut c_void)>;
-pub(crate) type CExecutionWaitFn = extern "C" fn(c_int, *mut crate::CAcrylMicrovmError, *mut c_void);
+pub type CExecutionWaitCb =
+    Option<extern "C" fn(c_int, *mut crate::CAcrylMicrovmError, *mut c_void)>;
+pub(crate) type CExecutionWaitFn =
+    extern "C" fn(c_int, *mut crate::CAcrylMicrovmError, *mut c_void);
 
 /// Execution kill completion.
 pub type CExecutionKillCb = Option<extern "C" fn(*mut crate::CAcrylMicrovmError, *mut c_void)>;
@@ -299,12 +307,15 @@ pub type CExecutionResizeCb = Option<extern "C" fn(*mut crate::CAcrylMicrovmErro
 pub(crate) type CExecutionResizeFn = extern "C" fn(*mut crate::CAcrylMicrovmError, *mut c_void);
 
 /// Tunnel forwarder wait completion.
-pub type CTunnelForwarderWaitCb = Option<extern "C" fn(*mut crate::CAcrylMicrovmError, *mut c_void)>;
+pub type CTunnelForwarderWaitCb =
+    Option<extern "C" fn(*mut crate::CAcrylMicrovmError, *mut c_void)>;
 pub(crate) type CTunnelForwarderWaitFn = extern "C" fn(*mut crate::CAcrylMicrovmError, *mut c_void);
 
 /// Tunnel forwarder close completion.
-pub type CTunnelForwarderCloseCb = Option<extern "C" fn(*mut crate::CAcrylMicrovmError, *mut c_void)>;
-pub(crate) type CTunnelForwarderCloseFn = extern "C" fn(*mut crate::CAcrylMicrovmError, *mut c_void);
+pub type CTunnelForwarderCloseCb =
+    Option<extern "C" fn(*mut crate::CAcrylMicrovmError, *mut c_void)>;
+pub(crate) type CTunnelForwarderCloseFn =
+    extern "C" fn(*mut crate::CAcrylMicrovmError, *mut c_void);
 
 // ─── Owned FFI payload ─────────────────────────────────────────────────────
 //
@@ -755,9 +766,9 @@ mod phase2_regression_tests {
                 .build()
                 .expect("tokio runtime"),
         );
-        let runtime = acrylmicrovm::runtime::AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
-            "http://127.0.0.1:1",
-        ))
+        let runtime = acrylmicrovm::runtime::AcrylMicrovmRuntime::rest(
+            acrylmicrovm::AcrylMicrovmRestOptions::new("http://127.0.0.1:1"),
+        )
         .expect("rest runtime");
         Box::into_raw(Box::new(RuntimeHandle {
             runtime,
@@ -1025,7 +1036,9 @@ mod close_and_free_tests {
     use crate::error::FFIError;
     use crate::images::{CImagePullResult, free_image_pull_result};
     use crate::runtime::{RuntimeHandle, RuntimeLiveness};
-    use crate::{FREE_STR_CALLS, FREE_STR_LOCK, acrylmicrovm_runtime_drain, acrylmicrovm_runtime_free};
+    use crate::{
+        FREE_STR_CALLS, FREE_STR_LOCK, acrylmicrovm_runtime_drain, acrylmicrovm_runtime_free,
+    };
 
     fn new_stub_runtime_handle() -> *mut RuntimeHandle {
         let tokio_rt = Arc::new(
@@ -1035,9 +1048,9 @@ mod close_and_free_tests {
                 .build()
                 .expect("tokio runtime"),
         );
-        let runtime = acrylmicrovm::runtime::AcrylMicrovmRuntime::rest(acrylmicrovm::AcrylMicrovmRestOptions::new(
-            "http://127.0.0.1:1",
-        ))
+        let runtime = acrylmicrovm::runtime::AcrylMicrovmRuntime::rest(
+            acrylmicrovm::AcrylMicrovmRestOptions::new("http://127.0.0.1:1"),
+        )
         .expect("rest runtime");
         Box::into_raw(Box::new(RuntimeHandle {
             runtime,
@@ -1104,7 +1117,8 @@ mod close_and_free_tests {
 
         let drain_thread = thread::spawn(move || {
             let mut err = FFIError::default();
-            let count = unsafe { acrylmicrovm_runtime_drain(rt_addr as *mut _, -1, &mut err as *mut _) };
+            let count =
+                unsafe { acrylmicrovm_runtime_drain(rt_addr as *mut _, -1, &mut err as *mut _) };
             tx.send(count).unwrap();
         });
 
@@ -1226,7 +1240,8 @@ mod close_and_free_tests {
 
         let drain_thread = thread::spawn(move || {
             let mut err = FFIError::default();
-            let count = unsafe { acrylmicrovm_runtime_drain(rt_addr as *mut _, -1, &mut err as *mut _) };
+            let count =
+                unsafe { acrylmicrovm_runtime_drain(rt_addr as *mut _, -1, &mut err as *mut _) };
             tx.send(count).unwrap();
         });
 

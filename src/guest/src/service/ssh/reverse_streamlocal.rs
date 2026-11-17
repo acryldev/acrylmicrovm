@@ -32,8 +32,10 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio_stream::wrappers::ReceiverStream;
 use tracing::{debug, warn};
 
-pub(crate) const INTERNAL_REVERSE_STREAMLOCAL_ARG: &str = "--acrylmicrovm-internal-reverse-streamlocal";
-pub(crate) const REVERSE_STREAMLOCAL_READY_MAGIC: &[u8] = b"\0acrylmicrovm-reverse-streamlocal-ready\0";
+pub(crate) const INTERNAL_REVERSE_STREAMLOCAL_ARG: &str =
+    "--acrylmicrovm-internal-reverse-streamlocal";
+pub(crate) const REVERSE_STREAMLOCAL_READY_MAGIC: &[u8] =
+    b"\0acrylmicrovm-reverse-streamlocal-ready\0";
 const REVERSE_STREAMLOCAL_STOPPED_MAGIC: &[u8] = b"\0acrylmicrovm-reverse-streamlocal-stopped\0";
 const HELPER_RELAY_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 const INGRESS_TOKEN_BYTES: usize = 36;
@@ -49,7 +51,9 @@ pub(crate) fn run_internal(args: InternalArgs) -> AcrylMicrovmResult<()> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
-        .map_err(|error| AcrylMicrovmError::Internal(format!("reverse streamlocal runtime: {error}")))?;
+        .map_err(|error| {
+            AcrylMicrovmError::Internal(format!("reverse streamlocal runtime: {error}"))
+        })?;
     runtime.block_on(serve_reverse_streamlocal(
         args,
         tokio::io::stdin(),
@@ -198,7 +202,9 @@ where
         .write_all(REVERSE_STREAMLOCAL_STOPPED_MAGIC)
         .await
         .map_err(|error| {
-            AcrylMicrovmError::Execution(format!("reverse streamlocal stopped write failed: {error}"))
+            AcrylMicrovmError::Execution(format!(
+                "reverse streamlocal stopped write failed: {error}"
+            ))
         })?;
     status.flush().await.map_err(|error| {
         AcrylMicrovmError::Execution(format!("reverse streamlocal stopped flush failed: {error}"))
@@ -226,7 +232,9 @@ where
     let mut token = [0_u8; INGRESS_TOKEN_BYTES];
     tokio::time::timeout(FORWARD_CONNECT_TIMEOUT, control.read_exact(&mut token))
         .await
-        .map_err(|_| AcrylMicrovmError::Execution("reverse streamlocal token read timed out".into()))?
+        .map_err(|_| {
+            AcrylMicrovmError::Execution("reverse streamlocal token read timed out".into())
+        })?
         .map_err(|error| {
             AcrylMicrovmError::Execution(format!("reverse streamlocal token read failed: {error}"))
         })?;

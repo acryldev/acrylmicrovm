@@ -930,7 +930,10 @@ fn build() {
         .unwrap_or_else(|e| panic!("Failed to fix libkrunfw: {}", e));
 
     // Expose libkrunfw library directory for downstream bundling
-    println!("cargo:LIBKRUNFW_ACRYLMICROVM_DEP={}", libkrunfw_lib.display());
+    println!(
+        "cargo:LIBKRUNFW_ACRYLMICROVM_DEP={}",
+        libkrunfw_lib.display()
+    );
 
     // Step 2: Build libkrun.a (expensive — only when krun feature is enabled)
     if cfg!(feature = "krun") {

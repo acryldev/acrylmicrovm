@@ -231,7 +231,9 @@ impl BoxImpl {
             )
         })
         .await
-        .map_err(|e| AcrylMicrovmError::Internal(format!("Export finalize task panicked: {}", e)))?;
+        .map_err(|e| {
+            AcrylMicrovmError::Internal(format!("Export finalize task panicked: {}", e))
+        })?;
 
         tracing::info!(
             box_id = %self.config.id,
@@ -270,8 +272,9 @@ fn do_export_flatten(
         )));
     }
 
-    let temp_dir = tempfile::tempdir_in(runtime_layout.temp_dir())
-        .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to create temp directory: {}", e)))?;
+    let temp_dir = tempfile::tempdir_in(runtime_layout.temp_dir()).map_err(|e| {
+        AcrylMicrovmError::Storage(format!("Failed to create temp directory: {}", e))
+    })?;
 
     let t_flatten = Instant::now();
     let flat_container = temp_dir.path().join(disk_filenames::CONTAINER_DISK);

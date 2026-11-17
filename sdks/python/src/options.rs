@@ -6,7 +6,7 @@ use acrylmicrovm::litebox::copy::CopyOptions;
 use acrylmicrovm::runtime::advanced_options::{HealthCheckOptions, SecurityOptions};
 use acrylmicrovm::runtime::constants::images;
 use acrylmicrovm::runtime::options::{
-    BoxOptions, AcrylMicrovmOptions, ImageRegistry, ImageRegistryAuth, InboundNetworkConfig,
+    AcrylMicrovmOptions, BoxOptions, ImageRegistry, ImageRegistryAuth, InboundNetworkConfig,
     NetworkMode, NetworkSpec, OutboundNetworkConfig, PortProtocol, PortSpec, RegistryTransport,
     RootfsSpec, VolumeSpec,
 };

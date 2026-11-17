@@ -142,6 +142,8 @@ mod tests {
         assert!(profile.contains("abi <abi/4.0>"));
         assert!(profile.contains("include <tunables/global>"));
         assert!(profile.contains("flags=(attach_disconnected,mediate_deleted)"));
-        assert!(profile.contains("allow pix /** -> &acrylmicrovm_bwrap//&acrylmicrovm_unpriv_bwrap"));
+        assert!(
+            profile.contains("allow pix /** -> &acrylmicrovm_bwrap//&acrylmicrovm_unpriv_bwrap")
+        );
     }
 }

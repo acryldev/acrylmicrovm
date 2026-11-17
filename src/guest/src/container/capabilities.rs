@@ -197,9 +197,9 @@ fn parse_capabilities(names: &[String]) -> AcrylMicrovmResult<HashSet<Capability
 fn parse_capability(name: &str) -> AcrylMicrovmResult<Capability> {
     let normalized = name.to_ascii_uppercase();
     let unprefixed = normalized.strip_prefix("CAP_").unwrap_or(&normalized);
-    unprefixed
-        .parse::<Capability>()
-        .map_err(|_| AcrylMicrovmError::InvalidArgument(format!("unknown Linux capability '{name}'")))
+    unprefixed.parse::<Capability>().map_err(|_| {
+        AcrylMicrovmError::InvalidArgument(format!("unknown Linux capability '{name}'"))
+    })
 }
 
 fn is_all(name: &str) -> bool {

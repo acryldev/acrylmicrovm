@@ -37,12 +37,13 @@ struct TestBox {
 impl TestBox {
     async fn new() -> Self {
         let home = acrylmicrovm_test_utils::home::PerTestBoxHome::new();
-        let runtime = common::TestRuntime::new(acrylmicrovm::runtime::options::AcrylMicrovmOptions {
-            home_dir: home.path.clone(),
-            image_registries: common::test_registries(),
-            ..Default::default()
-        })
-        .expect("create runtime");
+        let runtime =
+            common::TestRuntime::new(acrylmicrovm::runtime::options::AcrylMicrovmOptions {
+                home_dir: home.path.clone(),
+                image_registries: common::test_registries(),
+                ..Default::default()
+            })
+            .expect("create runtime");
         let handle = runtime.create(common::alpine_opts(), None).await.unwrap();
         handle.start().await.unwrap();
         Self {

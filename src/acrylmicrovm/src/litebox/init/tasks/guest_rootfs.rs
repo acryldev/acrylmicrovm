@@ -12,8 +12,8 @@ use crate::runtime::constants::images;
 use crate::runtime::layout::BoxFilesystemLayout;
 use crate::runtime::rt_impl::SharedRuntimeImpl;
 use crate::vmm::guest_artifacts::GuestArtifacts;
-use async_trait::async_trait;
 use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
+use async_trait::async_trait;
 
 pub struct GuestRootfsTask;
 
@@ -25,10 +25,9 @@ impl PipelineTask<InitCtx> for GuestRootfsTask {
 
         let (runtime, layout, reuse_rootfs) = {
             let ctx = ctx.lock().await;
-            let layout = ctx
-                .layout
-                .clone()
-                .ok_or_else(|| AcrylMicrovmError::Internal("filesystem task must run first".into()))?;
+            let layout = ctx.layout.clone().ok_or_else(|| {
+                AcrylMicrovmError::Internal("filesystem task must run first".into())
+            })?;
             (ctx.runtime.clone(), layout, ctx.reuse_rootfs)
         };
 

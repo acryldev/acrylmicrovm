@@ -105,7 +105,10 @@ impl BoxManager {
     /// Lookup a box by ID prefix or name.
     ///
     /// Tries exact name match first, then ID prefix match.
-    pub fn lookup_box(&self, id_or_name: &str) -> AcrylMicrovmResult<Option<(BoxConfig, BoxState)>> {
+    pub fn lookup_box(
+        &self,
+        id_or_name: &str,
+    ) -> AcrylMicrovmResult<Option<(BoxConfig, BoxState)>> {
         // First try exact ID match
         if let Some(result) = self.store.load(id_or_name)? {
             return Ok(Some(result));

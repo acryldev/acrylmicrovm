@@ -39,7 +39,11 @@ pub enum CheckpointState {
 )]
 #[async_trait]
 pub(crate) trait CheckpointBackend: Send + Sync {
-    async fn create(&self, source: &str, name: Option<String>) -> AcrylMicrovmResult<CheckpointInfo>;
+    async fn create(
+        &self,
+        source: &str,
+        name: Option<String>,
+    ) -> AcrylMicrovmResult<CheckpointInfo>;
     async fn list(&self) -> AcrylMicrovmResult<Vec<CheckpointInfo>>;
     async fn get(&self, key: &str) -> AcrylMicrovmResult<CheckpointInfo>;
     async fn remove(&self, key: &str, force: bool) -> AcrylMicrovmResult<()>;

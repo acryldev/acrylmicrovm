@@ -376,7 +376,9 @@ impl GuestRootfsManager {
             create_ext4_from_dir(&tree_for_build, &staged_for_build, 0)
         })
         .await
-        .map_err(|e| AcrylMicrovmError::Storage(format!("minimal rootfs build task failed: {e}")))??;
+        .map_err(|e| {
+            AcrylMicrovmError::Storage(format!("minimal rootfs build task failed: {e}"))
+        })??;
 
         self.install(key, disk)
     }
@@ -385,7 +387,10 @@ impl GuestRootfsManager {
     ///
     /// Leaks the disk (prevents drop cleanup) since ownership transfers to
     /// the `OnceCell<GuestRootfs>` in the runtime.
-    fn disk_to_guest_rootfs(disk: Disk, env: Vec<(String, String)>) -> AcrylMicrovmResult<GuestRootfs> {
+    fn disk_to_guest_rootfs(
+        disk: Disk,
+        env: Vec<(String, String)>,
+    ) -> AcrylMicrovmResult<GuestRootfs> {
         let disk_path = disk.path().to_path_buf();
         let _ = disk.leak();
         GuestRootfs::new(
@@ -426,7 +431,11 @@ impl GuestRootfsManager {
     ///
     /// Injects the same [`GuestBinary`] the caller keyed `version_key` on, so
     /// what is cached always matches what the key names.
-    async fn build_and_install(&self, image_disk: &Disk, version_key: &str) -> AcrylMicrovmResult<Disk> {
+    async fn build_and_install(
+        &self,
+        image_disk: &Disk,
+        version_key: &str,
+    ) -> AcrylMicrovmResult<Disk> {
         let build_start = std::time::Instant::now();
 
         // Stage: copy image disk to temp, inject guest binary there
@@ -460,7 +469,11 @@ impl GuestRootfsManager {
         let inject_start = std::time::Instant::now();
         let guest = GuestBinary::get()?;
 
-        inject_file_into_ext4(&staged_path, guest.path(), "acrylmicrovm/bin/acrylmicrovm-guest")?;
+        inject_file_into_ext4(
+            &staged_path,
+            guest.path(),
+            "acrylmicrovm/bin/acrylmicrovm-guest",
+        )?;
         tracing::info!(
             elapsed_ms = inject_start.elapsed().as_millis() as u64,
             "build_and_install: inject guest binary done"

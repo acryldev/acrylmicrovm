@@ -5,7 +5,7 @@ mod common;
 
 use acrylmicrovm::BoxCommand;
 use acrylmicrovm::net::constants::{HOST_HOSTNAME, HOST_IP};
-use acrylmicrovm::runtime::options::{BoxOptions, AcrylMicrovmOptions, NetworkSpec};
+use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, BoxOptions, NetworkSpec};
 use common::TestRuntime as AcrylMicrovmRuntime;
 use futures::StreamExt;
 use std::io::{Read, Write};

@@ -7,7 +7,7 @@ use crate::portal::connection::Connection;
 use crate::portal::interfaces::FilesInterface;
 use crate::portal::interfaces::SshInterface;
 use crate::portal::interfaces::{ContainerInterface, ExecutionInterface, GuestInterface};
-use acrylmicrovm_shared::{BoxTransport, AcrylMicrovmResult};
+use acrylmicrovm_shared::{AcrylMicrovmResult, BoxTransport};
 
 /// High-level guest session.
 ///

@@ -319,12 +319,12 @@ impl Qcow2Helper {
                 && d.as_slice() != zero_cluster.as_slice()
             {
                 let offset = next_data_cluster * cluster_size;
-                output
-                    .seek(SeekFrom::Start(offset))
-                    .map_err(|e| AcrylMicrovmError::Storage(format!("flatten: data seek: {}", e)))?;
-                output
-                    .write_all(d)
-                    .map_err(|e| AcrylMicrovmError::Storage(format!("flatten: data write: {}", e)))?;
+                output.seek(SeekFrom::Start(offset)).map_err(|e| {
+                    AcrylMicrovmError::Storage(format!("flatten: data seek: {}", e))
+                })?;
+                output.write_all(d).map_err(|e| {
+                    AcrylMicrovmError::Storage(format!("flatten: data write: {}", e))
+                })?;
 
                 let l1_idx = (vc / l2_entries) as usize;
                 let l2_idx = (vc % l2_entries) as usize;
@@ -388,9 +388,9 @@ impl Qcow2Helper {
             .map_err(|e| AcrylMicrovmError::Storage(format!("flatten: rc table seek: {}", e)))?;
         for i in 0..num_rc_blocks {
             let block_offset = (rc_block_start + i) * cluster_size;
-            output
-                .write_all(&block_offset.to_be_bytes())
-                .map_err(|e| AcrylMicrovmError::Storage(format!("flatten: rc table write: {}", e)))?;
+            output.write_all(&block_offset.to_be_bytes()).map_err(|e| {
+                AcrylMicrovmError::Storage(format!("flatten: rc table write: {}", e))
+            })?;
         }
 
         // Phase 6: Write refcount blocks.
@@ -415,9 +415,9 @@ impl Qcow2Helper {
 
         for bi in 0..num_rc_blocks {
             let block_offset = (rc_block_start + bi) * cluster_size;
-            output
-                .seek(SeekFrom::Start(block_offset))
-                .map_err(|e| AcrylMicrovmError::Storage(format!("flatten: rc block seek: {}", e)))?;
+            output.seek(SeekFrom::Start(block_offset)).map_err(|e| {
+                AcrylMicrovmError::Storage(format!("flatten: rc block seek: {}", e))
+            })?;
             let first = (bi * rc_entries_per_block) as usize;
             for c in 0..rc_entries_per_block as usize {
                 let refcount: u16 = if first + c < used.len() && used[first + c] {
@@ -492,7 +492,9 @@ impl Qcow2Helper {
         }
 
         if chain.is_empty() {
-            return Err(AcrylMicrovmError::Storage("flatten: empty backing chain".into()));
+            return Err(AcrylMicrovmError::Storage(
+                "flatten: empty backing chain".into(),
+            ));
         }
 
         Ok(chain)
@@ -744,7 +746,10 @@ impl Qcow2Helper {
 
     /// Create COW child disk using external qemu-img binary.
     #[allow(dead_code)]
-    fn create_cow_child_disk_external(base_disk: &Path, child_path: &Path) -> AcrylMicrovmResult<Disk> {
+    fn create_cow_child_disk_external(
+        base_disk: &Path,
+        child_path: &Path,
+    ) -> AcrylMicrovmResult<Disk> {
         // Ensure parent directory exists
         if let Some(parent) = child_path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
@@ -782,7 +787,10 @@ impl Qcow2Helper {
             .arg(child_path)
             .output()
             .map_err(|e| {
-                AcrylMicrovmError::Storage(format!("Failed to run qemu-img (is it installed?): {}", e))
+                AcrylMicrovmError::Storage(format!(
+                    "Failed to run qemu-img (is it installed?): {}",
+                    e
+                ))
             })?;
 
         if !output.status.success() {
@@ -1124,8 +1132,9 @@ pub fn read_backing_chain(path: &Path) -> Vec<PathBuf> {
 /// Raw backing files are valid terminal nodes in a qcow2 backing chain, so a
 /// non-qcow2 magic is not an error here.
 fn has_qcow2_magic(path: &Path) -> AcrylMicrovmResult<bool> {
-    let mut file = std::fs::File::open(path)
-        .map_err(|e| AcrylMicrovmError::Storage(format!("Failed to open {}: {}", path.display(), e)))?;
+    let mut file = std::fs::File::open(path).map_err(|e| {
+        AcrylMicrovmError::Storage(format!("Failed to open {}: {}", path.display(), e))
+    })?;
 
     let mut magic_buf = [0u8; 4];
     match file.read_exact(&mut magic_buf) {
@@ -1240,7 +1249,11 @@ impl FlattenLayer {
                 ))
             })?;
             Some(String::from_utf8(buf).map_err(|e| {
-                AcrylMicrovmError::Storage(format!("Invalid backing path in {}: {}", path.display(), e))
+                AcrylMicrovmError::Storage(format!(
+                    "Invalid backing path in {}: {}",
+                    path.display(),
+                    e
+                ))
             })?)
         } else {
             None
@@ -1343,11 +1356,13 @@ impl FlattenLayer {
                     return Ok(None); // Unallocated — fall through to backing.
                 }
 
-                file.seek(SeekFrom::Start(data_offset))
-                    .map_err(|e| AcrylMicrovmError::Storage(format!("flatten: data seek: {}", e)))?;
+                file.seek(SeekFrom::Start(data_offset)).map_err(|e| {
+                    AcrylMicrovmError::Storage(format!("flatten: data seek: {}", e))
+                })?;
                 let mut buf = vec![0u8; cs as usize];
-                file.read_exact(&mut buf)
-                    .map_err(|e| AcrylMicrovmError::Storage(format!("flatten: data read: {}", e)))?;
+                file.read_exact(&mut buf).map_err(|e| {
+                    AcrylMicrovmError::Storage(format!("flatten: data read: {}", e))
+                })?;
                 Ok(Some(buf))
             }
         }

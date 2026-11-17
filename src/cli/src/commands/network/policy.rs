@@ -1,6 +1,6 @@
 // Modified by ACRYL, 2026
-use anyhow::{Result, anyhow};
 use acrylmicrovm::runtime::options::{InboundNetworkConfig, NetworkMode, OutboundNetworkConfig};
+use anyhow::{Result, anyhow};
 use clap::Args;
 
 use crate::cli::GlobalFlags;

@@ -10,8 +10,8 @@
 //! [`NetworkBackendEndpoint`] value type the engine wires into the NIC.
 
 use crate::runtime::advanced_options::NetworkRateLimit;
-use async_trait::async_trait;
 use acrylmicrovm_shared::errors::{AcrylMicrovmError, AcrylMicrovmResult};
+use async_trait::async_trait;
 use serde_json::Value;
 use std::io;
 use std::net::SocketAddr;

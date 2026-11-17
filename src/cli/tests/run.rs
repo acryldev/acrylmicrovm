@@ -356,7 +356,10 @@ fn test_run_cpus_limit() {
         "acrylmicrovm-cpu-limited",
     ]);
 
-    ctx.cmd.assert().success().stdout("acrylmicrovm-cpu-limited\n");
+    ctx.cmd
+        .assert()
+        .success()
+        .stdout("acrylmicrovm-cpu-limited\n");
 }
 
 #[test]

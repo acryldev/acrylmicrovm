@@ -308,7 +308,10 @@ impl SnapshotManager {
         let container_disk = disks_dir.join(disk_filenames::CONTAINER_DISK);
         if container_disk.exists() {
             std::fs::remove_file(&container_disk).map_err(|e| {
-                AcrylMicrovmError::Storage(format!("Failed to remove current container disk: {}", e))
+                AcrylMicrovmError::Storage(format!(
+                    "Failed to remove current container disk: {}",
+                    e
+                ))
             })?;
         }
 

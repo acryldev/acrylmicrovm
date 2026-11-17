@@ -14,7 +14,9 @@ use tokio::runtime::Runtime as TokioRuntime;
 
 use acrylmicrovm::runtime::VolumeHandle as CoreVolumeHandle;
 
-use crate::error::{AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error};
+use crate::error::{
+    AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error,
+};
 use crate::event_queue::{
     CBoxVolumeCreateCb, CBoxVolumeGetCb, CBoxVolumeListCb, CBoxVolumeRemoveCb, EventQueue,
     RuntimeEvent, push_event,

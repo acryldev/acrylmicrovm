@@ -16,7 +16,9 @@ use tokio::runtime::Runtime as TokioRuntime;
 use acrylmicrovm::AcrylMicrovmError;
 use acrylmicrovm::runtime::{Domain, DomainHandle as CoreDomainHandle, DomainList, DomainTarget};
 
-use crate::error::{AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error};
+use crate::error::{
+    AcrylMicrovmErrorCode, FFIError, error_to_code, null_pointer_error, write_error,
+};
 use crate::info::{free_raw_slice, into_raw_slice};
 use crate::runtime::{RuntimeHandle, RuntimeLiveness};
 use crate::{CAcrylMicrovmDomainHandle, CAcrylMicrovmError, CAcrylMicrovmRuntime};

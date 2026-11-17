@@ -3,8 +3,8 @@
 
 use std::io::Write;
 
-use anyhow::{Result, bail};
 use acrylmicrovm::{AcrylMicrovmRuntime, CheckpointInfo};
+use anyhow::{Result, bail};
 use clap::{Args, Subcommand};
 use tabled::Tabled;
 

@@ -1,6 +1,6 @@
 // Modified by ACRYL, 2026
-use anyhow::{Context, bail};
 use acrylmicrovm::AcrylMicrovmRestOptions;
+use anyhow::{Context, bail};
 use clap::{Args, Subcommand};
 use reqwest::{Client, Method};
 use serde_json::{Value, json};
@@ -315,8 +315,9 @@ mod tests {
     async fn ci_rejects_invalid_accounts_before_loading_remote_credentials() {
         use clap::Parser;
         for account in ["-foo", &"a".repeat(40)] {
-            let cli = crate::cli::Cli::try_parse_from(["acrylmicrovm", "ci", "connect", "--", account])
-                .unwrap();
+            let cli =
+                crate::cli::Cli::try_parse_from(["acrylmicrovm", "ci", "connect", "--", account])
+                    .unwrap();
             let args = CiArgs {
                 command: CiCommand::Connect(ConnectArgs {
                     github_account: account.to_owned(),
@@ -330,8 +331,8 @@ mod tests {
     }
     #[test]
     fn ci_endpoint_preserves_context_routing_and_rejects_unsafe_urls() {
-        let options =
-            AcrylMicrovmRestOptions::new("https://api.example/api").with_path_prefix("region/tenant");
+        let options = AcrylMicrovmRestOptions::new("https://api.example/api")
+            .with_path_prefix("region/tenant");
         assert_eq!(
             endpoint(&options).unwrap().as_str(),
             "https://api.example/api/v1/region/tenant/ci/connect"

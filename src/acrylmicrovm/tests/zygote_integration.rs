@@ -14,7 +14,7 @@
 mod common;
 
 use acrylmicrovm::BoxCommand;
-use acrylmicrovm::runtime::options::{BoxOptions, AcrylMicrovmOptions, RootfsSpec};
+use acrylmicrovm::runtime::options::{AcrylMicrovmOptions, BoxOptions, RootfsSpec};
 use acrylmicrovm_shared::AcrylMicrovmError;
 use common::TestRuntime as AcrylMicrovmRuntime;
 use std::sync::Arc;
@@ -26,7 +26,10 @@ use acrylmicrovm::LiteBox;
 // HELPERS
 // ============================================================================
 
-fn create_test_runtime() -> (acrylmicrovm_test_utils::home::PerTestBoxHome, AcrylMicrovmRuntime) {
+fn create_test_runtime() -> (
+    acrylmicrovm_test_utils::home::PerTestBoxHome,
+    AcrylMicrovmRuntime,
+) {
     let home = acrylmicrovm_test_utils::home::PerTestBoxHome::new();
     let runtime = AcrylMicrovmRuntime::new(AcrylMicrovmOptions {
         home_dir: home.path.clone(),
@@ -380,7 +383,12 @@ async fn test_zygote_concurrent_stdout_unique() {
                 }
             }
             let result = execution.wait().await?;
-            Ok::<(usize, i32, String, String), AcrylMicrovmError>((i, result.exit_code, output, marker))
+            Ok::<(usize, i32, String, String), AcrylMicrovmError>((
+                i,
+                result.exit_code,
+                output,
+                marker,
+            ))
         }));
     }
 
@@ -686,7 +694,12 @@ async fn test_zygote_concurrent_env_isolation() {
                 }
             }
             let result = execution.wait().await?;
-            Ok::<(usize, i32, String, String), AcrylMicrovmError>((i, result.exit_code, output, env_val))
+            Ok::<(usize, i32, String, String), AcrylMicrovmError>((
+                i,
+                result.exit_code,
+                output,
+                env_val,
+            ))
         }));
     }
 

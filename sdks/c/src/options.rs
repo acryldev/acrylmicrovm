@@ -66,11 +66,12 @@ mod required_headers_tests {
         ));
         let rootfs = home.join("rootfs");
         std::fs::create_dir_all(&rootfs).unwrap();
-        let runtime = acrylmicrovm::AcrylMicrovmRuntime::new_for_test(acrylmicrovm::AcrylMicrovmOptions {
-            home_dir: home.join("runtime"),
-            ..Default::default()
-        })
-        .unwrap();
+        let runtime =
+            acrylmicrovm::AcrylMicrovmRuntime::new_for_test(acrylmicrovm::AcrylMicrovmOptions {
+                home_dir: home.join("runtime"),
+                ..Default::default()
+            })
+            .unwrap();
         let mut handle = OptionsHandle {
             options: BoxOptions {
                 rootfs: acrylmicrovm::RootfsSpec::RootfsPath(rootfs.to_string_lossy().into_owned()),
@@ -143,7 +144,10 @@ pub unsafe extern "C" fn acrylmicrovm_options_set_checkpoint(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn acrylmicrovm_options_set_name(opts: *mut CAcrylMicrovmOptions, name: *const c_char) {
+pub unsafe extern "C" fn acrylmicrovm_options_set_name(
+    opts: *mut CAcrylMicrovmOptions,
+    name: *const c_char,
+) {
     options_set_name(opts, name)
 }
 
@@ -154,7 +158,10 @@ pub unsafe extern "C" fn acrylmicrovm_options_set_cpus(opts: *mut CAcrylMicrovmO
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn acrylmicrovm_options_set_memory(opts: *mut CAcrylMicrovmOptions, memory_mib: c_int) {
+pub unsafe extern "C" fn acrylmicrovm_options_set_memory(
+    opts: *mut CAcrylMicrovmOptions,
+    memory_mib: c_int,
+) {
     unsafe { mark_checkpoint_override(opts) };
     options_set_memory(opts, memory_mib)
 }
@@ -178,7 +185,10 @@ pub unsafe extern "C" fn acrylmicrovm_options_set_workdir(
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn acrylmicrovm_options_set_user(opts: *mut CAcrylMicrovmOptions, user: *const c_char) {
+pub unsafe extern "C" fn acrylmicrovm_options_set_user(
+    opts: *mut CAcrylMicrovmOptions,
+    user: *const c_char,
+) {
     unsafe { mark_checkpoint_override(opts) };
     options_set_user(opts, user)
 }
@@ -263,7 +273,9 @@ pub unsafe extern "C" fn acrylmicrovm_options_set_network_enabled(opts: *mut CAc
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn acrylmicrovm_options_set_network_disabled(opts: *mut CAcrylMicrovmOptions) {
+pub unsafe extern "C" fn acrylmicrovm_options_set_network_disabled(
+    opts: *mut CAcrylMicrovmOptions,
+) {
     unsafe { mark_checkpoint_override(opts) };
     options_set_network_disabled(opts)
 }
@@ -291,7 +303,9 @@ pub unsafe extern "C" fn acrylmicrovm_options_add_network_allow(
 /// Enables exposed services subject to each tunnel's access policy.
 /// Mirrors `acrylmicrovm_options_set_network_enabled` for the inbound direction.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn acrylmicrovm_options_set_network_inbound_enabled(opts: *mut CAcrylMicrovmOptions) {
+pub unsafe extern "C" fn acrylmicrovm_options_set_network_inbound_enabled(
+    opts: *mut CAcrylMicrovmOptions,
+) {
     unsafe { mark_checkpoint_override(opts) };
     options_set_network_inbound_enabled(opts)
 }
@@ -300,7 +314,9 @@ pub unsafe extern "C" fn acrylmicrovm_options_set_network_inbound_enabled(opts: 
 /// default). Mirrors `acrylmicrovm_options_set_network_disabled` for the
 /// inbound direction.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn acrylmicrovm_options_set_network_inbound_disabled(opts: *mut CAcrylMicrovmOptions) {
+pub unsafe extern "C" fn acrylmicrovm_options_set_network_inbound_disabled(
+    opts: *mut CAcrylMicrovmOptions,
+) {
     unsafe { mark_checkpoint_override(opts) };
     options_set_network_inbound_disabled(opts)
 }
@@ -368,7 +384,10 @@ pub unsafe extern "C" fn acrylmicrovm_options_add_secret_with_headers(
 
 /// Deprecated: use `acrylmicrovm_options_set_auto_delete_interval`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn acrylmicrovm_options_set_auto_remove(opts: *mut CAcrylMicrovmOptions, val: c_int) {
+pub unsafe extern "C" fn acrylmicrovm_options_set_auto_remove(
+    opts: *mut CAcrylMicrovmOptions,
+    val: c_int,
+) {
     unsafe { mark_checkpoint_override(opts) };
     options_set_auto_remove(opts, val)
 }
@@ -431,7 +450,10 @@ pub unsafe fn options_set_auto_resume_enabled(handle: *mut OptionsHandle, val: c
 }
 
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn acrylmicrovm_options_set_detach(opts: *mut CAcrylMicrovmOptions, val: c_int) {
+pub unsafe extern "C" fn acrylmicrovm_options_set_detach(
+    opts: *mut CAcrylMicrovmOptions,
+    val: c_int,
+) {
     unsafe { mark_checkpoint_override(opts) };
     options_set_detach(opts, val)
 }

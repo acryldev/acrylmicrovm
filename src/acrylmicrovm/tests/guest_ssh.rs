@@ -134,7 +134,10 @@ async fn runtime_ssh_shutdown_during_vm_startup() {
 }
 
 /// Wait for the main command's write before inspecting its host-mounted record.
-async fn start_recorded_main(sandbox: &acrylmicrovm::LiteBox, attached: Option<acrylmicrovm::Execution>) {
+async fn start_recorded_main(
+    sandbox: &acrylmicrovm::LiteBox,
+    attached: Option<acrylmicrovm::Execution>,
+) {
     tokio::time::timeout(Duration::from_secs(30), async {
         sandbox.start().await.unwrap();
         // Guest output permits one subscriber; keep an existing pre-start attach.
@@ -216,7 +219,10 @@ async fn check_ssh_start_policy(
     let recorded = std::fs::read_to_string(&record).unwrap();
     if matches!(operation, SshOperation::Configure) {
         let error = result.unwrap_err();
-        assert!(matches!(error, acrylmicrovm::AcrylMicrovmError::InvalidState(_)));
+        assert!(matches!(
+            error,
+            acrylmicrovm::AcrylMicrovmError::InvalidState(_)
+        ));
         assert!(error.to_string().contains("start the box explicitly"));
     } else if matches!(operation, SshOperation::Disable) {
         assert!(matches!(
@@ -605,7 +611,8 @@ async fn guest_ssh_accounts_share_identity_and_file_permissions() {
         let mut options = common::alpine_opts();
         options.user = user.map(str::to_owned);
         if name == "app" {
-            options.rootfs = acrylmicrovm::runtime::options::RootfsSpec::Image("python:alpine".into());
+            options.rootfs =
+                acrylmicrovm::runtime::options::RootfsSpec::Image("python:alpine".into());
         }
         options.ports = vec![PortSpec {
             host_port: None,
@@ -1000,7 +1007,8 @@ async fn guest_ssh_rpc_exec_pty_sftp_reconnect_and_vm_restart() {
         assert_eq!(std::fs::read(download).unwrap(), b"SSH SFTP round trip\n");
         let mut unrelated = sandbox
             .exec(
-                acrylmicrovm::BoxCommand::new("sh").args(["-c", "read value; test \"$value\" = alive"]),
+                acrylmicrovm::BoxCommand::new("sh")
+                    .args(["-c", "read value; test \"$value\" = alive"]),
             )
             .await
             .unwrap();
@@ -1326,7 +1334,10 @@ async fn guest_ssh_disk_copies_keep_switch_and_identity() {
     assert!(restored.enabled);
     assert_eq!(restored.host_key_fingerprint, fingerprint);
     let corrupt = source
-        .exec(acrylmicrovm::BoxCommand::new("sh").args(["-c", "printf invalid > /etc/acrylmicrovm/ssh.cfg"]))
+        .exec(
+            acrylmicrovm::BoxCommand::new("sh")
+                .args(["-c", "printf invalid > /etc/acrylmicrovm/ssh.cfg"]),
+        )
         .await
         .unwrap();
     assert!(corrupt.wait().await.unwrap().success());
@@ -1335,7 +1346,10 @@ async fn guest_ssh_disk_copies_keep_switch_and_identity() {
     let source = runtime.get("ssh-copy-source").await.unwrap().unwrap();
     source.start().await.unwrap();
     assert!(!source.ssh().status().await.unwrap().enabled);
-    let command = source.exec(acrylmicrovm::BoxCommand::new("true")).await.unwrap();
+    let command = source
+        .exec(acrylmicrovm::BoxCommand::new("true"))
+        .await
+        .unwrap();
     assert!(command.wait().await.unwrap().success());
     source.stop().await.unwrap();
     runtime

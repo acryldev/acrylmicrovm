@@ -27,7 +27,10 @@ fn assert_spawn_survives_cgroup_failure(membership_target: Option<&Path>, quota_
     let cgroups = tempfile::tempdir().unwrap();
     let group = cgroups.path().join("acrylmicrovm/membership-test");
     fs::create_dir_all(&group).unwrap();
-    for parent in [cgroups.path().to_path_buf(), cgroups.path().join("acrylmicrovm")] {
+    for parent in [
+        cgroups.path().to_path_buf(),
+        cgroups.path().join("acrylmicrovm"),
+    ] {
         fs::write(parent.join("cgroup.controllers"), "cpu memory pids").unwrap();
     }
     if let Some(target) = membership_target {
