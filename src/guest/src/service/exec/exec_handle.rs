@@ -57,7 +57,8 @@ impl ExecStdin {
 
 fn async_fd(fd: OwnedFd, stream_name: &str) -> AcrylMicrovmResult<AsyncFd<OwnedFd>> {
     set_nonblocking(&fd)?;
-    AsyncFd::new(fd).map_err(|error| {
+    // SAFETY: the AsyncFd owns this OwnedFd, which stays open and returns the same fd until dropped.
+    unsafe { AsyncFd::register(fd) }.map_err(|error| {
         AcrylMicrovmError::Internal(format!(
             "Failed to register {stream_name} with Tokio I/O reactor: {error}"
         ))
