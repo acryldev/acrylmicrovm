@@ -147,7 +147,6 @@ CLAUDE.local.md
 .worktreeinclude
 AGENTS.local.md
 AGENTS.override.md
-Cargo.lock
 *.dylib.dSYM/
 
 # Apps workspace
