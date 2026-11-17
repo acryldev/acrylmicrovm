@@ -97,7 +97,8 @@ jobs:
       - name: Package runtime
         run: |
           VERSION=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          RUNTIME_DIR=$(ls -dt target/release/build/acrylmicrovm-*/out/runtime 2>/dev/null | head -1)
+          # older cargo writes build/<crate>-<hash>/out, newer cargo build/<crate>/<hash>/out
+          RUNTIME_DIR=$(ls -dt target/release/build/acrylmicrovm-*/out/runtime target/release/build/acrylmicrovm/*/out/runtime 2>/dev/null | head -1)
           [ -n "$RUNTIME_DIR" ] || { echo "ERROR: Runtime directory not found under target/"; exit 1; }
           cp -a "$RUNTIME_DIR" acrylmicrovm-runtime
           tar czf "acrylmicrovm-runtime-v${VERSION}-${{ matrix.target }}.tar.gz" acrylmicrovm-runtime/
