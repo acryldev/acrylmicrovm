@@ -68,7 +68,8 @@ jobs:
     name: Publish to PyPI
     needs: build_wheels
     runs-on: ubuntu-latest
-    if: github.event_name == 'release' && github.event.action == 'published'
+    # PyPI is not set up yet; set the repo variable PUBLISH_FROM_CI=true once PyPI Trusted Publishing is configured.
+    if: github.event_name == 'release' && github.event.action == 'published' && vars.PUBLISH_FROM_CI == 'true'
     permissions:
       id-token: write  # IMPORTANT: this permission is mandatory for trusted publishing
 
