@@ -1,6 +1,12 @@
 // Modified by ACRYL, 2026
 //! File upload/download handlers (tar-based).
 //!
+//! On the local backend the archive passes through to the guest unchanged,
+//! with its shape (one file or a directory tree) carried as `source_is_dir`
+//! on upload and as the `x-acrylmicrovm-source-is-dir` header on download,
+//! so `cp` over REST lands files exactly as the embedded runtime does. Other
+//! backends fall back to staging through a host temp directory.
+//!
 //! Downloads preserve guest-provided symbolic links as link entries. The
 //! host-side response packer must not dereference them, because the link
 //! target was chosen inside the guest and may name a host file.
@@ -11,8 +17,9 @@ use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use futures::StreamExt;
 
-use acrylmicrovm::CopyOptions;
+use acrylmicrovm::{AcrylMicrovmError, CopyOptions, CopySourceKind};
 
 use super::super::types::FileQuery;
 use super::super::{AppState, error_from_acrylmicrovm, error_response, get_or_resume_box};
@@ -28,7 +35,22 @@ pub(in crate::commands::serve) async fn upload_files(
         Err(resp) => return resp,
     };
 
-    // Extract tar to temp dir, then copy into container
+    let archive = body.to_vec();
+    let passthrough = litebox
+        .copy_in_stream(
+            futures::stream::once(async move { Ok(archive) }),
+            &query.path,
+            CopySourceKind::from_wire(query.source_is_dir),
+            CopyOptions::default(),
+        )
+        .await;
+    match passthrough {
+        Ok(()) => return StatusCode::NO_CONTENT.into_response(),
+        Err(AcrylMicrovmError::Unsupported(_)) => {}
+        Err(e) => return error_from_acrylmicrovm(&e),
+    }
+
+    // Not the local backend: extract tar to temp dir, then copy into container
     let temp_dir = match tempfile::tempdir() {
         Ok(d) => d,
         Err(e) => {
@@ -81,6 +103,25 @@ pub(in crate::commands::serve) async fn download_files(
         Err(resp) => return resp,
     };
 
+    match litebox
+        .copy_out_stream(&query.path, CopyOptions::default())
+        .await
+    {
+        Ok((stream, kind)) => {
+            let mut response = Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", "application/x-tar");
+            if let Some(is_dir) = kind.to_wire() {
+                response = response.header("x-acrylmicrovm-source-is-dir", is_dir.to_string());
+            }
+            let body = axum::body::Body::from_stream(stream.map(|r| r.map(Bytes::from)));
+            return response.body(body).unwrap();
+        }
+        Err(AcrylMicrovmError::Unsupported(_)) => {}
+        Err(e) => return error_from_acrylmicrovm(&e),
+    }
+
+    // Not the local backend: stage through a host temp dir.
     let temp_dir = match tempfile::tempdir() {
         Ok(d) => d,
         Err(e) => {
@@ -254,6 +295,7 @@ mod tests {
             Path(BOX_ID.to_string()),
             Query(FileQuery {
                 path: "/probe".to_string(),
+                source_is_dir: None,
             }),
         )
         .await;

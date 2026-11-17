@@ -495,6 +495,10 @@ pub(super) struct RemoveQuery {
 #[derive(Deserialize)]
 pub(super) struct FileQuery {
     pub path: String,
+    /// Upload only: the archive shape the client packed (`false` = one file).
+    /// Absent from older clients.
+    #[serde(default)]
+    pub source_is_dir: Option<bool>,
 }
 
 #[cfg(test)]
