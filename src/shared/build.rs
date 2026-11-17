@@ -89,8 +89,24 @@ impl GitProvenance {
     }
 }
 
-fn get_protoc_version() -> Result<(u32, u32), Box<dyn std::error::Error>> {
-    let output = Command::new("protoc").arg("--version").output()?;
+/// The protoc to use: `$PROTOC`, else `protoc` on PATH, else the copy bundled by
+/// `protoc-bin-vendored`, so building from crates.io needs no protoc installed.
+/// tonic-build reads `$PROTOC`, so the choice is exported for it.
+fn select_protoc() -> Result<PathBuf, Box<dyn std::error::Error>> {
+    println!("cargo:rerun-if-env-changed=PROTOC");
+    if let Some(path) = std::env::var_os("PROTOC") {
+        return Ok(path.into());
+    }
+    let protoc = match Command::new("protoc").arg("--version").output() {
+        Ok(output) if output.status.success() => PathBuf::from("protoc"),
+        _ => protoc_bin_vendored::protoc_bin_path()?,
+    };
+    std::env::set_var("PROTOC", &protoc);
+    Ok(protoc)
+}
+
+fn get_protoc_version(protoc: &std::path::Path) -> Result<(u32, u32), Box<dyn std::error::Error>> {
+    let output = Command::new(protoc).arg("--version").output()?;
 
     if !output.status.success() {
         return Err("protoc --version failed".into());
@@ -129,7 +145,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // proto3 optional fields require protoc >= 3.12
     // For 3.12-3.14, we need --experimental_allow_proto3_optional
     // For 3.15+, it's enabled by default
-    match get_protoc_version() {
+    let protoc = select_protoc()?;
+    match get_protoc_version(&protoc) {
         Ok((major, minor)) if major == 3 && (12..=14).contains(&minor) => {
             config = config.protoc_arg("--experimental_allow_proto3_optional");
         }
