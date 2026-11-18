@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 // @ts-expect-error plain ESM script without types
-import { binaryPath } from "../bin/acrylmicrovm.js";
+import { binaryPath } from "../bin/resolve.js";
 
 function fakePackage(withBinary: boolean) {
   const dir = mkdtempSync(join(tmpdir(), "amv-bin-"));
