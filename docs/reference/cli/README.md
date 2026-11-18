@@ -68,19 +68,22 @@ acrylmicrovm [GLOBAL OPTIONS] <COMMAND> [ARGS...]
 
 ## Installation & verification
 
-The `acrylmicrovm` CLI can be installed three ways:
+The `acrylmicrovm` CLI can be installed these ways (all of them, with pnpm, yarn, bun and deno too, are in
+[Installation](../../getting-started/installation.md)):
 
-- One-line script: `curl -fsSL https://sh.acryl.dev | sh`
+- From npm, prebuilt: `npx acrylmicrovm` or `npm install -g acrylmicrovm`
+- One-line script: `curl -fsSL https://github.com/acryldev/acrylmicrovm/releases/latest/download/install.sh | sh`
 - From crates.io: `cargo install acrylmicrovm-cli`
 - Prebuilt binary via cargo: `cargo binstall acrylmicrovm-cli`
 
-The one-line script installs to `$HOME/.local/bin/acrylmicrovm` and embeds the runtime — no extra setup. `sh.acryl.dev` is a thin Cloudflare Worker that serves the same `install.sh` published on every GitHub Release; the long form `https://github.com/acryldev/acrylmicrovm/releases/latest/download/install.sh` is the verifiable upstream and is what `gh attestation verify` covers.
+The one-line script installs to `$HOME/.local/bin/acrylmicrovm` and embeds the runtime, no extra setup. It is the
+`install.sh` published on every GitHub Release, which is what `gh attestation verify` covers.
 
 ### Pin a version or override the install dir
 
 ```bash
-curl -fsSL https://sh.acryl.dev \
-  | ACRYLMICROVM_VERSION=v0.9.4 ACRYLMICROVM_INSTALL_DIR=/usr/local/bin sh
+curl -fsSL https://github.com/acryldev/acrylmicrovm/releases/latest/download/install.sh \
+  | ACRYLMICROVM_VERSION=v0.13.1 ACRYLMICROVM_INSTALL_DIR=/usr/local/bin sh
 ```
 
 The env-var prefix has to sit on the `sh` side of the pipe — variables placed before `curl` only decorate the curl process and never reach the installer.
@@ -90,8 +93,8 @@ The env-var prefix has to sit on the `sh` side of the pipe — variables placed 
 When pinning a non-latest version, the installer falls back to the remote `.sha256` sidecar in that release for the expected digest. That anchor shares its trust root with the tarball, so for a guarantee independent of the release page, look up the digest in the release's attested `SHA256SUMS` and pass it in explicitly:
 
 ```bash
-curl -fsSL https://sh.acryl.dev \
-  | ACRYLMICROVM_VERSION=v0.9.4 \
+curl -fsSL https://github.com/acryldev/acrylmicrovm/releases/latest/download/install.sh \
+  | ACRYLMICROVM_VERSION=v0.13.1 \
     ACRYLMICROVM_EXPECTED_SHA256=<sha256-of-acrylmicrovm-cli-vX.Y.Z-target.tar.gz> sh
 ```
 
@@ -121,8 +124,7 @@ sh ./install.sh
 
 ### Related operator notes
 
-- [`scripts/release/install.sh.template`](../../../scripts/release/install.sh.template) — the installer source, with inline comments documenting how each verification anchor is consumed
-- [`scripts/release/sh-installer/README.md`](../../../scripts/release/sh-installer/README.md) — operator notes for the `sh.acryl.dev` Cloudflare Worker
+- [`scripts/release/install.sh.template`](../../../scripts/release/install.sh.template): the installer source, with inline comments documenting how each verification anchor is consumed
 
 ---
 

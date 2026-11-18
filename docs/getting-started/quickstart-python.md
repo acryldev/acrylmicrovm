@@ -4,9 +4,9 @@ Get up and running with ACRYL microVMs Python SDK in 5 minutes.
 
 ## Installation
 
-```bash
-pip install acrylmicrovm
-```
+> The Python package is not on PyPI yet. Until it is, build it from a checkout:
+> `git clone --recurse-submodules https://github.com/acryldev/acrylmicrovm.git && cd acrylmicrovm && make setup && make dev:python`.
+> The command line and the Node.js and Rust SDKs are published: see [Installation](installation.md).
 
 **Requirements:**
 - Python 3.10 or later

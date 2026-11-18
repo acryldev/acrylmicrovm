@@ -4,8 +4,9 @@ Documentation for using ACRYL microVMs, the embeddable micro-VM runtime, and for
 
 ## Using ACRYL microVMs
 
-- [Getting started](getting-started/README.md): install ACRYL microVMs and run a first box in Python,
-  Node.js, Rust, or C.
+- [Installation](getting-started/installation.md): `npx acrylmicrovm`, npm, pnpm, yarn, bun, deno, cargo and the
+  prebuilt binaries.
+- [Getting started](getting-started/README.md): run a first box from the command line, Node.js, Rust, Python or C.
 - [Guides](guides/README.md): step-by-step instructions, one task per page.
 - [Concepts](concepts/README.md): how boxes, images, storage, networking, and isolation work.
 - [Reference](reference/README.md): the SDK APIs, the CLI, the REST API, configuration, and errors.

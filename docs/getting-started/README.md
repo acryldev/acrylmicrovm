@@ -2,6 +2,17 @@
 
 Get up and running with ACRYL microVMs in 5 minutes.
 
+The quickest look, on Linux with KVM or an Apple Silicon Mac:
+
+```bash
+npx acrylmicrovm run --rm alpine:latest echo hello
+```
+
+- [Installation](installation.md): every way to install, with npm, npx, pnpm, yarn, bun, deno, cargo, cargo binstall,
+  the install script or a downloaded binary
+- [Command line quick start](quickstart-cli.md): boxes from the terminal
+- [Node.js quick start](quickstart-nodejs.md) and [Rust quick start](quickstart-rust.md): boxes from code
+
 ## Prerequisites
 
 ### System requirements
@@ -79,7 +90,8 @@ Unlike Docker, ACRYL microVMs doesn't require a daemon process. It's an embeddab
 
 | SDK | Language/Toolchain | Best For |
 |-----|--------------------|----------|
-| **[Python](./quickstart-python.md)** | Python 3.10+ | AI agents, scripting, rapid prototyping |
+| **[Command line](./quickstart-cli.md)** | none (`npx acrylmicrovm`, `cargo install acrylmicrovm-cli`) | Trying it, scripts, CI |
+| **[Python](./quickstart-python.md)** (from source for now) | Python 3.10+ | AI agents, scripting, rapid prototyping |
 | **[Node.js](./quickstart-nodejs.md)** | Node.js 18+ | Web services, TypeScript projects |
 | **[Rust](./quickstart-rust.md)** | Rust 1.88+ | Performance-critical, embedded systems |
 | **[C](./quickstart-c.md)** | C11-compatible compiler (GCC/Clang) | C/C++ applications, system integration |
@@ -107,12 +119,7 @@ Unlike Docker, ACRYL microVMs doesn't require a daemon process. It's an embeddab
 
 ### Installation issues
 
-**Problem:** `pip install acrylmicrovm` fails
-
-**Solutions:**
-- Verify Python 3.10+: `python --version`
-- Update pip: `pip install --upgrade pip`
-- Check platform support (macOS ARM64, Linux x86_64/ARM64 only)
+See [Installation: troubleshooting](installation.md#troubleshooting) for npm, cargo and platform problems.
 
 ### Runtime issues
 

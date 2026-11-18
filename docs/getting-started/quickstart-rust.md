@@ -9,8 +9,13 @@ Get up and running with ACRYL microVMs Rust crate in 5 minutes.
 Add ACRYL microVMs to your project:
 
 ```bash
+cargo new hello && cd hello
 cargo add acrylmicrovm tokio futures --features tokio/macros,tokio/rt-multi-thread
 ```
+
+The first build downloads the prebuilt runtime (guest agent, shim, guest kernel) from the matching GitHub release and
+embeds it in your binary; it needs a C compiler, `curl` and `tar`, but not protoc. For the command line instead, see
+[Installation](installation.md).
 
 ## Basic execution
 

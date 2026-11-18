@@ -57,6 +57,8 @@ npm i acrylmicrovm                                    # the Node SDK
 cargo add acrylmicrovm                                # the Rust library
 ```
 
+pnpm, yarn, bun and deno work the same way (`pnpm dlx acrylmicrovm`, `bunx acrylmicrovm`, ...); every way to install,
+including `cargo binstall` and the install script, is in [Installation](docs/getting-started/installation.md).
 Linux (x86_64, arm64) needs read and write access to `/dev/kvm`; macOS needs Apple Silicon. Prebuilt binaries are
 also on the [releases page](https://github.com/acryldev/acrylmicrovm/releases).
 

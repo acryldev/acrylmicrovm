@@ -5,8 +5,11 @@ Get up and running with ACRYL microVMs Node.js SDK in 5 minutes.
 ## Installation
 
 ```bash
-npm install acrylmicrovm
+npm install acrylmicrovm   # or: pnpm add / yarn add / bun add acrylmicrovm
 ```
+
+The package also installs the `acrylmicrovm` command, and runs under Bun and Deno (`npm:acrylmicrovm`) too. Every
+other way is in [Installation](installation.md).
 
 **Requirements:**
 - Node.js 18 or later
